@@ -9,7 +9,7 @@
 //!    is a later stage.
 
 use chrono::{Local, NaiveDate};
-use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 use serde::Serialize;
 
 use crate::error::{CoreError, Result};
@@ -278,15 +278,18 @@ impl Db {
             priced.push(self.price_line(line)?);
         }
 
-        let fy = financial_year(date);
-        let highest = self.highest_invoice_no(fy)?;
-        let invoice_no = next_invoice_no(fy, highest.as_deref())?;
-
         let taxables: Vec<TaxableLine> =
             priced.iter().map(|(_, t): &(i64, TaxableLine)| *t).collect();
         let totals = gst::compute_totals(&taxables, &self.home_state, &customer.place_of_supply);
 
-        let tx = self.conn.transaction()?;
+        // IMMEDIATE takes the write lock up front, so the number is read and used under
+        // the same lock that inserts it. Allocating before the transaction would let two
+        // consoles billing at the same moment read the same highest number and collide.
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let fy = financial_year(date);
+        let invoice_no = next_invoice_no(fy, highest_invoice_no(&tx, fy)?.as_deref())?;
+
         tx.execute(
             "INSERT INTO invoices
                  (invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
@@ -469,17 +472,19 @@ impl Db {
             },
         ))
     }
+}
 
-    /// Highest invoice number issued in a financial year, or `None` for a fresh year.
-    /// Lexical MAX works because the numbers are fixed-prefix and zero-padded.
-    fn highest_invoice_no(&self, fy: i32) -> Result<Option<String>> {
-        let prefix = format!("RI-{fy}-%");
-        Ok(self.conn.query_row(
-            "SELECT MAX(invoice_no) FROM invoices WHERE invoice_no LIKE ?1",
-            [prefix],
-            |row| row.get::<_, Option<String>>(0),
-        )?)
-    }
+/// Highest invoice number issued in a financial year, or `None` for a fresh year.
+/// Lexical MAX works because the numbers are fixed-prefix and zero-padded. Takes a
+/// connection rather than `&self` so it can be called from inside the transaction that
+/// will insert the number it hands back.
+fn highest_invoice_no(conn: &Connection, fy: i32) -> Result<Option<String>> {
+    let prefix = format!("RI-{fy}-%");
+    Ok(conn.query_row(
+        "SELECT MAX(invoice_no) FROM invoices WHERE invoice_no LIKE ?1",
+        [prefix],
+        |row| row.get::<_, Option<String>>(0),
+    )?)
 }
 
 /// Inserts one invoice line and queues it. Shared by `create_invoice` and `add_line_item`.

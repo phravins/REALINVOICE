@@ -7,7 +7,8 @@
 
 use realinvoice_core::{seed, NewCustomer, NewInvoice, NewInvoiceLine};
 use realinvoice_desktop_lib::commands::{
-    quote_invoice, NewCustomerPayload, NewInvoicePayload, NewLinePayload, QuoteLinePayload,
+    check_expected_totals_for_test as check_expected_totals, quote_invoice, ExpectedTotals,
+    NewCustomerPayload, NewInvoicePayload, NewLinePayload, QuoteLinePayload,
 };
 use realinvoice_desktop_lib::state::{AppState, DB_FILE_NAME};
 
@@ -301,4 +302,191 @@ fn the_logged_print_and_lock_payload_is_ready_for_create_invoice() {
     assert_eq!(saved.cgst, 9_450.00);
     assert_eq!(saved.sgst, 9_450.00);
     assert_eq!(saved.grand_total, 123_900.00);
+}
+
+fn worked_example(state: &AppState) -> NewInvoice {
+    let rack = state.db().search_item("RACK-42U-PRO").unwrap().remove(0);
+    let license = state.db().search_item("ABCOS-ENT-LIC").unwrap().remove(0);
+    let customer_id = state.db().search_customer("9600011223").unwrap().unwrap().id;
+    NewInvoice::from(NewInvoicePayload {
+        customer_id,
+        date: None,
+        payment_type: "cash".into(),
+        lines: vec![
+            NewLinePayload {
+                item_id: rack.id,
+                qty: 1.0,
+                rate: Some(45_000.0),
+                tax_rate: Some(18.0),
+            },
+            NewLinePayload {
+                item_id: license.id,
+                qty: 5.0,
+                rate: Some(12_000.0),
+                tax_rate: Some(18.0),
+            },
+        ],
+    })
+}
+
+/// Print & Lock: the invoice, both lines and the sync row all land, and the number is
+/// allocated by the save rather than anything the screen held beforehand.
+#[test]
+fn saving_the_worked_example_persists_everything() {
+    let (dir, state) = console_state();
+
+    let example = worked_example(&state);
+    let invoice = state.db().create_invoice(&example).unwrap();
+    assert_eq!(invoice.invoice_no, "RI-2026-0001");
+    assert_eq!(invoice.subtotal, 105_000.00);
+    assert_eq!(invoice.cgst, 9_450.00);
+    assert_eq!(invoice.sgst, 9_450.00);
+    assert_eq!(invoice.grand_total, 123_900.00);
+    assert_eq!(invoice.sync_status, "pending");
+
+    let lines = state.db().invoice_lines(invoice.id).unwrap();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].line_total, 45_000.00);
+    assert_eq!(lines[1].line_total, 60_000.00);
+
+    let queued = state.db().pending_sync_rows_for("invoices").unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].row_id, invoice.id);
+    assert_eq!(queued[0].op, "insert");
+    assert!(queued[0].synced_at.is_none());
+    assert_eq!(state.db().pending_sync_rows_for("invoice_lines").unwrap().len(), 2);
+
+    // Reopened as a separate handle on the file, it is all still there.
+    drop(state);
+    let reopened = AppState::new(dir.path().join(DB_FILE_NAME)).unwrap();
+    let stored = reopened.db().get_invoice(invoice.id).unwrap().unwrap();
+    assert_eq!(stored.invoice_no, "RI-2026-0001");
+    assert_eq!(stored.grand_total, 123_900.00);
+}
+
+/// New Transaction then a second, different invoice: the number increments and the first
+/// invoice is untouched.
+#[test]
+fn a_second_invoice_takes_the_next_number() {
+    let (_dir, state) = console_state();
+
+    let example = worked_example(&state);
+    let first = state.db().create_invoice(&example).unwrap();
+
+    let cement = state.db().search_item("CEM-OPC-53").unwrap().remove(0);
+    let buyer = state.db().search_customer("9791045678").unwrap().unwrap();
+    let second = state
+        .db()
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "upi".into(),
+            lines: vec![NewInvoiceLine {
+                item_id: cement.id,
+                qty: 20.0,
+                rate: None,
+                tax_rate: None,
+            }],
+        })
+        .unwrap();
+
+    assert_eq!(first.invoice_no, "RI-2026-0001");
+    assert_eq!(second.invoice_no, "RI-2026-0002");
+    assert_ne!(first.id, second.id);
+
+    // 20 x 410 = 8,200 @ 28% -> 1,148 each.
+    assert_eq!(second.subtotal, 8_200.00);
+    assert_eq!(second.cgst, 1_148.00);
+    assert_eq!(second.grand_total, 10_496.00);
+
+    // The first invoice kept its own lines and figures.
+    assert_eq!(state.db().invoice_lines(first.id).unwrap().len(), 2);
+    assert_eq!(state.db().get_invoice(first.id).unwrap().unwrap().grand_total, 123_900.00);
+    assert_eq!(state.db().pending_sync_rows_for("invoices").unwrap().len(), 2);
+    assert_eq!(state.db().list_todays_invoices().unwrap().len(), 2);
+}
+
+/// A failed save must leave nothing behind, so the screen can stay editable and the
+/// operator can simply retry.
+#[test]
+fn a_rejected_save_writes_nothing() {
+    let (_dir, state) = console_state();
+    let buyer = state.db().search_customer("9600011223").unwrap().unwrap();
+
+    let rejected = state.db().create_invoice(&NewInvoice {
+        customer_id: buyer.id,
+        date: None,
+        payment_type: "cash".into(),
+        lines: vec![NewInvoiceLine { item_id: 9_999, qty: 1.0, rate: None, tax_rate: None }],
+    });
+    assert!(rejected.is_err());
+
+    assert!(state.db().list_todays_invoices().unwrap().is_empty());
+    assert!(state.db().pending_sync_rows_for("invoices").unwrap().is_empty());
+    assert!(state.db().pending_sync_rows_for("invoice_lines").unwrap().is_empty());
+
+    // And the number was not burnt: the next good save still takes 0001.
+    let example = worked_example(&state);
+    let saved = state.db().create_invoice(&example).unwrap();
+    assert_eq!(saved.invoice_no, "RI-2026-0001");
+}
+
+#[test]
+fn totals_matching_the_screen_are_accepted() {
+    let (_dir, state) = console_state();
+    let expected = ExpectedTotals {
+        subtotal: 105_000.00,
+        cgst: 9_450.00,
+        sgst: 9_450.00,
+        igst: 0.0,
+        grand_total: 123_900.00,
+    };
+    let example = worked_example(&state);
+    assert!(check_expected_totals(&expected, &example, "TN", "TN").is_ok());
+}
+
+#[test]
+fn totals_that_disagree_with_the_screen_are_refused() {
+    let (_dir, state) = console_state();
+    let invoice = worked_example(&state);
+
+    // The panel showed a grand total short by a rupee.
+    let stale = ExpectedTotals {
+        subtotal: 105_000.00,
+        cgst: 9_450.00,
+        sgst: 9_450.00,
+        igst: 0.0,
+        grand_total: 123_899.00,
+    };
+    let refused = check_expected_totals(&stale, &invoice, "TN", "TN").unwrap_err();
+    assert!(refused.contains("grand total"), "{refused}");
+
+    // Billing the same rows out of state moves the tax to IGST, so an intra-state
+    // expectation no longer matches.
+    let intra = ExpectedTotals {
+        subtotal: 105_000.00,
+        cgst: 9_450.00,
+        sgst: 9_450.00,
+        igst: 0.0,
+        grand_total: 123_900.00,
+    };
+    assert!(check_expected_totals(&intra, &invoice, "KA", "TN").is_err());
+}
+
+/// Rows that defer to the item master are priced inside core; the guard skips them
+/// rather than keeping a second copy of core's pricing rules.
+#[test]
+fn rows_without_explicit_prices_skip_the_guard() {
+    let (_dir, state) = console_state();
+    let cement = state.db().search_item("CEM-OPC-53").unwrap().remove(0);
+    let deferred = NewInvoice {
+        customer_id: 1,
+        date: None,
+        payment_type: "cash".into(),
+        lines: vec![NewInvoiceLine { item_id: cement.id, qty: 1.0, rate: None, tax_rate: None }],
+    };
+
+    let nonsense =
+        ExpectedTotals { subtotal: 1.0, cgst: 1.0, sgst: 1.0, igst: 1.0, grand_total: 1.0 };
+    assert!(check_expected_totals(&nonsense, &deferred, "TN", "TN").is_ok());
 }

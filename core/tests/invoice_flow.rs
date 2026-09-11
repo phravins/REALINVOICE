@@ -411,3 +411,57 @@ fn the_worked_example_totals_to_one_lakh_twentythree_thousand_nine_hundred() {
     assert_eq!(invoice.igst, 0.0);
     assert_eq!(invoice.grand_total, 123_900.00);
 }
+
+/// Invoice numbers are allocated inside the write transaction, so two connections
+/// billing at the same moment cannot be handed the same number. This is the guard for
+/// the multi-console setup a later stage brings.
+#[test]
+fn concurrent_saves_never_collide_on_an_invoice_number() {
+    use std::sync::{Arc, Barrier};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.sqlite");
+
+    let (customer_id, item_id) = {
+        let mut db = Db::open(&path).unwrap();
+        seed::seed_demo_data(&mut db).unwrap();
+        (customer(&db, "9840012345").id, item(&db, "TMT-12MM").id)
+    };
+
+    const WRITERS: usize = 8;
+    // Every thread opens its own connection and they all start together, so the saves
+    // genuinely overlap rather than queueing behind each other by accident.
+    let barrier = Arc::new(Barrier::new(WRITERS));
+    let mut handles = Vec::new();
+
+    for _ in 0..WRITERS {
+        let path = path.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            let mut db = Db::open(&path).unwrap();
+            barrier.wait();
+            db.create_invoice(&NewInvoice {
+                customer_id,
+                date: Some("2026-09-11".into()),
+                payment_type: "cash".into(),
+                lines: vec![NewInvoiceLine { item_id, qty: 1.0, rate: None, tax_rate: None }],
+            })
+            .expect("save under contention")
+            .invoice_no
+        }));
+    }
+
+    let mut numbers: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    numbers.sort();
+    numbers.dedup();
+    assert_eq!(numbers.len(), WRITERS, "every save got its own number");
+
+    // And they form one unbroken run, not a sparse set with gaps.
+    let expected: Vec<String> = (1..=WRITERS).map(|n| format!("RI-2026-{n:04}")).collect();
+    assert_eq!(numbers, expected);
+
+    // Each save queued its own invoice row for sync.
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.pending_sync_rows_for("invoices").unwrap().len(), WRITERS);
+    assert_eq!(db.list_invoices_for_date("2026-09-11".parse().unwrap()).unwrap().len(), WRITERS);
+}

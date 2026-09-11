@@ -141,14 +141,81 @@ pub fn search_item(query: String, state: State<'_, AppState>) -> Result<Vec<Item
     state.db().search_item(&query).map_err(|e| e.to_string())
 }
 
-/// Creates an invoice with its lines. Core allocates the number, splits GST and queues
-/// the sync rows.
+/// Saves the transaction. Core does the work in one transaction: allocate the next
+/// number in the financial year, insert the invoice, insert every line, and queue the
+/// `sync_queue` rows. Nothing is written if any part of it fails, so a failed save leaves
+/// the screen editable with nothing lost.
+///
+/// `expected` is what the summary panel was showing. When the rows carry explicit prices
+/// — which the billing card always sends — the same figures are recomputed here first and
+/// the save is refused on a mismatch, so an invoice can never be stored under numbers the
+/// operator did not see.
 #[tauri::command]
 pub fn create_invoice(
     payload: NewInvoicePayload,
+    expected: Option<ExpectedTotals>,
     state: State<'_, AppState>,
-) -> Result<Invoice, String> {
-    state.db().create_invoice(&NewInvoice::from(payload)).map_err(|e| e.to_string())
+) -> Result<SavedInvoice, String> {
+    let new_invoice = NewInvoice::from(payload);
+    // One guard for the whole operation: the pre-check, the save and the read-back all
+    // see the same database state.
+    let mut db = state.db();
+
+    let customer = db
+        .get_customer(new_invoice.customer_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("customer {} no longer exists", new_invoice.customer_id))?;
+
+    if let Some(expected) = expected {
+        check_expected_totals(&expected, &new_invoice, &customer.place_of_supply, db.home_state())?;
+    }
+
+    let invoice = db.create_invoice(&new_invoice).map_err(|e| e.to_string())?;
+    let lines = db.invoice_lines(invoice.id).map_err(|e| e.to_string())?;
+    let queued_sync_rows = db.pending_sync_rows().map_err(|e| e.to_string())?.len();
+
+    Ok(SavedInvoice { invoice, lines, customer, queued_sync_rows })
+}
+
+/// Re-prices the rows and compares against what the panel displayed.
+///
+/// Only meaningful when every row carries its own rate and tax rate; a row that defers to
+/// the item master is priced inside core during the save, and re-deriving that here would
+/// mean a second copy of core's pricing rules. Those rows skip the check rather than get
+/// a guess.
+pub(crate) fn check_expected_totals(
+    expected: &ExpectedTotals,
+    new_invoice: &NewInvoice,
+    place_of_supply: &str,
+    home_state: &str,
+) -> Result<(), String> {
+    let mut priced = Vec::with_capacity(new_invoice.lines.len());
+    for line in &new_invoice.lines {
+        match (line.rate, line.tax_rate) {
+            (Some(rate), Some(tax_rate)) => {
+                priced.push(gst::TaxableLine { qty: line.qty, rate, tax_rate })
+            }
+            _ => return Ok(()),
+        }
+    }
+
+    let actual = gst::compute_totals(&priced, home_state, place_of_supply);
+    let differs = [
+        ("subtotal", expected.subtotal, actual.subtotal),
+        ("CGST", expected.cgst, actual.cgst),
+        ("SGST", expected.sgst, actual.sgst),
+        ("IGST", expected.igst, actual.igst),
+        ("grand total", expected.grand_total, actual.grand_total),
+    ]
+    .into_iter()
+    .find(|(_, shown, computed)| (shown - computed).abs() > MONEY_EPSILON);
+
+    match differs {
+        Some((field, shown, computed)) => Err(format!(
+            "refusing to save: {field} on screen is {shown:.2} but prices to {computed:.2}"
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Appends a line to an existing invoice and re-totals it.
@@ -166,6 +233,31 @@ pub fn add_line_item(
 pub fn list_todays_invoices(state: State<'_, AppState>) -> Result<Vec<Invoice>, String> {
     state.db().list_todays_invoices().map_err(|e| e.to_string())
 }
+
+/// The totals the operator was shown when they hit Print & Lock. Sent so the save can
+/// refuse if what core prices differs from what was on screen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpectedTotals {
+    pub subtotal: f64,
+    pub cgst: f64,
+    pub sgst: f64,
+    pub igst: f64,
+    pub grand_total: f64,
+}
+
+/// Everything the locked screen needs after a successful save: the invoice with its
+/// freshly allocated number, the lines as they were stored, the buyer, and how many rows
+/// are now waiting in `sync_queue` for a later stage to send.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedInvoice {
+    pub invoice: Invoice,
+    pub lines: Vec<InvoiceLine>,
+    pub customer: Customer,
+    pub queued_sync_rows: usize,
+}
+
+/// Half a paisa — closer than two roundings of the same figure can differ.
+const MONEY_EPSILON: f64 = 0.005;
 
 /// Registers a customer the counter could not resolve. Errors if the mobile number is
 /// already on file.
@@ -199,4 +291,16 @@ pub fn quote_invoice(place_of_supply: String, lines: Vec<QuoteLinePayload>) -> I
         igst: totals.igst,
         grand_total: totals.grand_total,
     }
+}
+
+/// Test hook for [`check_expected_totals`], which is otherwise an implementation detail
+/// of `create_invoice`. The command itself needs a running app to call.
+#[doc(hidden)]
+pub fn check_expected_totals_for_test(
+    expected: &ExpectedTotals,
+    new_invoice: &NewInvoice,
+    place_of_supply: &str,
+    home_state: &str,
+) -> Result<(), String> {
+    check_expected_totals(expected, new_invoice, place_of_supply, home_state)
 }

@@ -16,6 +16,9 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA foreign_keys = ON;
+         -- Another console (or the future sync worker) holding the write lock should
+         -- make this one wait its turn, not fail the sale.
+         PRAGMA busy_timeout = 5000;
          CREATE TABLE IF NOT EXISTS schema_migrations (
              name       TEXT PRIMARY KEY,
              applied_at TEXT NOT NULL DEFAULT (datetime('now'))
