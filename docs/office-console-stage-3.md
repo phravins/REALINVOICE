@@ -84,6 +84,10 @@ Run under Xvfb against a fresh config dir:
    lock, no number, Print & Lock still offered. Editing the Qty afterwards re-priced live,
    and the database still held exactly the two earlier invoices.
 
+> **Extended by stage 4.** The history pane arrived, and Print & Lock gained a Print
+> preview that shares its layout with Reprint. See
+> [office-console-stage-4.md](office-console-stage-4.md).
+
 ## Not in this stage
 
 - The invoice history / list pane — stage 4. Persistence was confirmed by reading

@@ -30,6 +30,8 @@ pub fn run() {
             commands::create_invoice,
             commands::add_line_item,
             commands::list_todays_invoices,
+            commands::list_invoices,
+            commands::invoice_detail,
             commands::quote_invoice,
         ])
         .run(tauri::generate_context!())

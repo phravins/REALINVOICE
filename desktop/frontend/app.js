@@ -67,6 +67,90 @@
   /** True once a save succeeds. A locked screen is read-only until New Transaction. */
   var locked = false;
 
+  /** The invoice this screen just saved, for the print preview. */
+  var lastSaved = null;
+
+  /** Rows currently listed in the History pane. */
+  var historyRows = [];
+
+  /* ----------------------------------------------- shared renderers (billing + history) */
+
+  /**
+   * The financial summary. One implementation, two callers: the billing card feeds it a
+   * live quote from core, the history detail feeds it a saved invoice. Intra-state shows
+   * CGST + SGST, inter-state shows IGST — never both.
+   */
+  function renderTotals(el, t) {
+    function row(label, value, cls) {
+      return (
+        '<div class="tot-row' + (cls || "") + '"><dt>' + label + "</dt><dd>" +
+        rupees(value) + "</dd></div>"
+      );
+    }
+
+    var html = row("Subtotal", t.subtotal);
+    if (t.intra_state) {
+      html += row("CGST", t.cgst) + row("SGST", t.sgst);
+    } else {
+      html += row("IGST", t.igst);
+    }
+    el.innerHTML = html + row("Grand Total", t.grand_total, " tot-row--grand");
+  }
+
+  /** A saved invoice's totals, in the shape renderTotals expects. */
+  function totalsOf(invoice) {
+    return {
+      // A stored invoice carries the split itself: IGST is only ever set inter-state.
+      intra_state: !(invoice.igst > 0),
+      subtotal: invoice.subtotal,
+      cgst: invoice.cgst,
+      sgst: invoice.sgst,
+      igst: invoice.igst,
+      grand_total: invoice.grand_total,
+    };
+  }
+
+  /**
+   * The item rows. `editable` gives each row a Qty box and a remove button for the
+   * billing card; without it the same columns render as plain text for the read-only
+   * detail view and the printable sheet.
+   */
+  function lineRowsHtml(lines, editable) {
+    return lines
+      .map(function (line, index) {
+        var qty = editable
+          ? '<input class="qty-input" type="number" min="0" step="any" value="' +
+            line.qty + '" data-index="' + index + '" aria-label="Quantity for ' +
+            escapeHtml(line.item_code) + '" />'
+          : '<span class="mono">' + line.qty + "</span>";
+
+        var remove = editable
+          ? '<td class="num"><button class="row-del" data-remove="' + index +
+            '" title="Remove row" aria-label="Remove ' + escapeHtml(line.item_code) +
+            '">×</button></td>'
+          : "";
+
+        return (
+          "<tr>" +
+          '<td class="mono">' + escapeHtml(line.item_code) + "</td>" +
+          "<td>" + escapeHtml(line.description) + "</td>" +
+          '<td class="num">' + qty + "</td>" +
+          '<td class="num mono">' + money(line.rate) + "</td>" +
+          '<td class="num mono">' + money(line.tax_rate) + "</td>" +
+          '<td class="num mono" data-total="' + index + '">' + money(line.total) + "</td>" +
+          remove +
+          "</tr>"
+        );
+      })
+      .join("");
+  }
+
+  /** `YYYY-MM-DD HH:MM:SS` -> `YYYY-MM-DD HH:MM`, falling back to the invoice date. */
+  function stamp(invoice) {
+    var at = invoice.created_at || "";
+    return at.length >= 16 ? at.slice(0, 16) : invoice.date;
+  }
+
   /* ----------------------------------------------------------------------- tabs */
 
   var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
@@ -80,7 +164,12 @@
     Array.prototype.forEach.call(document.querySelectorAll(".pane"), function (pane) {
       pane.classList.toggle("is-active", pane.id === "pane-" + name);
     });
-    if (name !== "billing") status(name + ": coming soon.");
+    if (name === "history") {
+      // Reload on every visit so an invoice saved a moment ago is already listed.
+      loadHistory();
+    } else if (name !== "billing") {
+      status(name + ": coming soon.");
+    }
   }
 
   tabs.forEach(function (tab) {
@@ -207,30 +296,7 @@
   function renderRows() {
     var body = $("items-body");
     $("empty-rows").hidden = rows.length > 0;
-
-    if (!rows.length) {
-      body.innerHTML = "";
-      return;
-    }
-
-    body.innerHTML = rows
-      .map(function (row, index) {
-        return (
-          "<tr>" +
-          '<td class="mono">' + escapeHtml(row.item_code) + "</td>" +
-          "<td>" + escapeHtml(row.description) + "</td>" +
-          '<td class="num"><input class="qty-input" type="number" min="0" step="any" ' +
-          'value="' + row.qty + '" data-index="' + index + '" ' +
-          'aria-label="Quantity for ' + escapeHtml(row.item_code) + '" /></td>' +
-          '<td class="num mono">' + money(row.rate) + "</td>" +
-          '<td class="num mono">' + money(row.tax_rate) + "</td>" +
-          '<td class="num mono" data-total="' + index + '">' + money(row.total) + "</td>" +
-          '<td class="num"><button class="row-del" data-remove="' + index + '" ' +
-          'title="Remove row" aria-label="Remove ' + escapeHtml(row.item_code) + '">×</button></td>' +
-          "</tr>"
-        );
-      })
-      .join("");
+    body.innerHTML = rows.length ? lineRowsHtml(rows, !locked) : "";
   }
 
   function addRow(item) {
@@ -349,21 +415,11 @@
     // Row totals are core's line values, not a number this file worked out.
     quote.line_totals.forEach(function (total, index) {
       if (rows[index]) rows[index].total = total;
-      var cell = document.querySelector('[data-total="' + index + '"]');
+      var cell = document.querySelector('#items-body [data-total="' + index + '"]');
       if (cell) cell.textContent = money(total);
     });
 
-    $("t-subtotal").textContent = rupees(quote.subtotal);
-    $("t-cgst").textContent = rupees(quote.cgst);
-    $("t-sgst").textContent = rupees(quote.sgst);
-    $("t-igst").textContent = rupees(quote.igst);
-
-    // Intra-state bills CGST + SGST; inter-state bills IGST. Never both.
-    $("row-cgst").hidden = !quote.intra_state;
-    $("row-sgst").hidden = !quote.intra_state;
-    $("row-igst").hidden = quote.intra_state;
-
-    $("t-grand").textContent = rupees(quote.grand_total);
+    renderTotals($("billing-totals"), quote);
 
     $("gst-mode").textContent = customer
       ? (quote.intra_state ? "Intra-state" : "Inter-state") +
@@ -423,6 +479,7 @@
     $("add-item-btn").disabled = on;
     $("payment-type").disabled = on;
     $("print-lock").hidden = on;
+    $("print-preview").hidden = !on;
     $("new-txn").hidden = !on;
 
     Array.prototype.forEach.call(document.querySelectorAll(".qty-input"), function (input) {
@@ -516,16 +573,14 @@
 
     // Render what was actually stored, not what was on screen a moment ago.
     saved.lines.forEach(function (line, index) {
-      var cell = document.querySelector('[data-total="' + index + '"]');
+      var cell = document.querySelector('#items-body [data-total="' + index + '"]');
       if (cell) cell.textContent = money(line.line_total);
       if (rows[index]) rows[index].total = line.line_total;
     });
-    $("t-subtotal").textContent = rupees(invoice.subtotal);
-    $("t-cgst").textContent = rupees(invoice.cgst);
-    $("t-sgst").textContent = rupees(invoice.sgst);
-    $("t-igst").textContent = rupees(invoice.igst);
-    $("t-grand").textContent = rupees(invoice.grand_total);
+    renderTotals($("billing-totals"), totalsOf(invoice));
 
+    // Keep the saved invoice for the print preview the locked card now offers.
+    lastSaved = saved;
     setLocked(true);
 
     var msg = $("action-msg");
@@ -542,6 +597,7 @@
     customer = null;
     rows = [];
     lastQuote = null;
+    lastSaved = null;
 
     $("mobile-input").value = "";
     $("payment-type").value = "cash";
@@ -560,6 +616,307 @@
     $("mobile-input").focus();
     status("Ready for the next customer.");
   }
+
+  /* --------------------------------------------------------------------- history */
+
+  /** The invoice open in the detail view, or null while the list is showing. */
+  var openDetail = null;
+
+  function iso(date) {
+    var pad = function (n) {
+      return (n < 10 ? "0" : "") + n;
+    };
+    return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate());
+  }
+
+  /**
+   * Turns the range control into `from`/`to` bounds. Weeks start Monday — the working
+   * week a shop reconciles against, not the calendar's Sunday.
+   */
+  function rangeBounds() {
+    var choice = $("f-range").value;
+    var now = new Date();
+
+    if (choice === "all") return { from: null, to: null };
+    if (choice === "custom") {
+      return { from: $("f-from").value || null, to: $("f-to").value || null };
+    }
+    if (choice === "today") return { from: iso(now), to: iso(now) };
+
+    if (choice === "week") {
+      var monday = new Date(now);
+      var weekday = (now.getDay() + 6) % 7; // Monday = 0
+      monday.setDate(now.getDate() - weekday);
+      return { from: iso(monday), to: iso(now) };
+    }
+
+    var first = new Date(now.getFullYear(), now.getMonth(), 1);
+    return { from: iso(first), to: iso(now) };
+  }
+
+  function loadHistory() {
+    var body = $("history-body");
+    var bounds = rangeBounds();
+    var text = $("f-text").value.trim();
+
+    if (!invoke) return bridgeMissing("list_invoices");
+
+    status("Loading invoices…");
+    invoke("list_invoices", {
+      filter: { from: bounds.from, to: bounds.to, text: text || null, limit: null },
+    })
+      .then(function (list) {
+        historyRows = list;
+        $("history-empty").hidden = list.length > 0;
+
+        body.innerHTML = list
+          .map(function (row, index) {
+            return (
+              '<tr class="hist-row" data-open="' + index + '" tabindex="0" role="button">' +
+              '<td class="mono hist-no">' + escapeHtml(row.invoice.invoice_no) + "</td>" +
+              '<td class="mono">' + escapeHtml(stamp(row.invoice)) + "</td>" +
+              "<td>" + escapeHtml(row.customer_name) + "</td>" +
+              '<td class="mono">' + escapeHtml(row.invoice.payment_type) + "</td>" +
+              '<td class="num mono">' + money(row.invoice.grand_total) + "</td>" +
+              "</tr>"
+            );
+          })
+          .join("");
+
+        var sum = list.reduce(function (acc, row) {
+          return acc + row.invoice.grand_total;
+        }, 0);
+
+        // A half-filled date box reads as empty, which silently drops that bound. Say so
+        // rather than letting the list look narrower than it is.
+        var open = [];
+        if ($("f-range").value === "custom") {
+          if (!bounds.from) open.push("no From date");
+          if (!bounds.to) open.push("no To date");
+        }
+        var caveat = open.length ? " · open-ended (" + open.join(", ") + ")" : "";
+
+        $("history-count").textContent = list.length
+          ? list.length + " invoice(s) · " + rupees(sum) + " billed" + caveat
+          : "";
+        status(list.length + " invoice(s) in range.");
+      })
+      .catch(function (err) {
+        body.innerHTML = "";
+        $("history-empty").hidden = false;
+        $("history-empty").textContent = "Could not load invoices: " + errText(err);
+        status("list_invoices failed: " + errText(err));
+      });
+  }
+
+  /** Opens the read-only detail. Nothing here can change a stored invoice. */
+  function openInvoice(invoiceId) {
+    if (!invoke) return bridgeMissing("invoice_detail");
+
+    invoke("invoice_detail", { invoiceId: invoiceId })
+      .then(function (detail) {
+        if (!detail) {
+          status("Invoice " + invoiceId + " not found.");
+          return;
+        }
+        openDetail = detail;
+
+        var invoice = detail.invoice;
+        var buyer = detail.customer;
+
+        $("d-inv-no").textContent = invoice.invoice_no;
+        $("d-customer").innerHTML =
+          '<span class="cust-name">' + escapeHtml(buyer.name) + "</span>" +
+          ' <span class="cust-gstin">— GSTIN: ' +
+          escapeHtml(buyer.gstin || "unregistered") + "</span>" +
+          ' <span class="cust-pos">· ' + escapeHtml(buyer.mobile) +
+          " · place of supply " + escapeHtml(buyer.place_of_supply) + "</span>";
+
+        $("d-meta").innerHTML =
+          '<span>Raised <strong class="mono">' + escapeHtml(stamp(invoice)) + "</strong></span>" +
+          '<span>Payment <strong class="mono">' + escapeHtml(invoice.payment_type) +
+          "</strong></span>" +
+          '<span>Sync <strong class="mono">' + escapeHtml(invoice.sync_status) +
+          "</strong></span>";
+
+        // Same row renderer as the billing table, without the editable controls.
+        $("d-lines").innerHTML = lineRowsHtml(detailLines(detail), false);
+        renderTotals($("detail-totals"), totalsOf(invoice));
+
+        $("d-gst-mode").textContent =
+          (invoice.igst > 0 ? "Inter-state" : "Intra-state") +
+          " · place of supply " + buyer.place_of_supply;
+
+        $("history-list-card").hidden = true;
+        $("history-detail").hidden = false;
+        $("d-back").focus();
+        status("Viewing " + invoice.invoice_no + " (read-only).");
+      })
+      .catch(function (err) {
+        status("invoice_detail failed: " + errText(err));
+      });
+  }
+
+  /** Saved lines in the shape the shared row renderer expects. */
+  function detailLines(detail) {
+    return detail.lines.map(function (entry) {
+      return {
+        item_code: entry.item_code,
+        description: entry.description,
+        uom: entry.uom,
+        qty: entry.line.qty,
+        rate: entry.line.rate,
+        tax_rate: entry.line.tax_rate,
+        total: entry.line.line_total,
+      };
+    });
+  }
+
+  function closeDetail() {
+    openDetail = null;
+    $("history-detail").hidden = true;
+    $("history-list-card").hidden = false;
+    status("Invoice history.");
+  }
+
+  $("f-range").addEventListener("change", function () {
+    var custom = $("f-range").value === "custom";
+    $("f-from-wrap").hidden = !custom;
+    $("f-to-wrap").hidden = !custom;
+    if (!custom) loadHistory();
+  });
+
+  $("f-apply").addEventListener("click", loadHistory);
+  $("f-text").addEventListener("keydown", function (event) {
+    if (event.key === "Enter") loadHistory();
+  });
+  $("f-from").addEventListener("change", loadHistory);
+  $("f-to").addEventListener("change", loadHistory);
+
+  $("history-body").addEventListener("click", function (event) {
+    var tr = event.target.closest("[data-open]");
+    if (tr) openInvoice(historyRows[Number(tr.dataset.open)].invoice.id);
+  });
+  $("history-body").addEventListener("keydown", function (event) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    var tr = event.target.closest("[data-open]");
+    if (tr) {
+      event.preventDefault();
+      openInvoice(historyRows[Number(tr.dataset.open)].invoice.id);
+    }
+  });
+
+  $("d-back").addEventListener("click", closeDetail);
+
+  /* -------------------------------------------------------------- printable sheet */
+
+  /**
+   * The printable document, built from a saved invoice. Print & Lock and Reprint both
+   * come through here, so a reprint is the same layout and the same numbers — nothing is
+   * re-entered or recomputed to produce it.
+   */
+  function renderPrintable(detail, label) {
+    var invoice = detail.invoice;
+    var buyer = detail.customer;
+    var lines = detailLines(detail);
+
+    var taxRows = invoice.igst > 0
+      ? "<tr><th>IGST</th><td>" + rupees(invoice.igst) + "</td></tr>"
+      : "<tr><th>CGST</th><td>" + rupees(invoice.cgst) + "</td></tr>" +
+        "<tr><th>SGST</th><td>" + rupees(invoice.sgst) + "</td></tr>";
+
+    $("print-sheet").innerHTML =
+      '<div class="sheet-head">' +
+        "<div><h1>TAX INVOICE</h1>" +
+        '<p class="sheet-seller">RealInvoice Demo Traders · Tamil Nadu · Node POS-01</p></div>' +
+        '<div class="sheet-no"><strong>' + escapeHtml(invoice.invoice_no) + "</strong>" +
+        "<span>" + escapeHtml(stamp(invoice)) + "</span></div>" +
+      "</div>" +
+      '<div class="sheet-buyer"><strong>Billed to</strong>' +
+        "<div>" + escapeHtml(buyer.name) + "</div>" +
+        "<div>GSTIN: " + escapeHtml(buyer.gstin || "unregistered") + "</div>" +
+        "<div>" + escapeHtml(buyer.mobile) + " · Place of supply " +
+        escapeHtml(buyer.place_of_supply) + "</div></div>" +
+      '<table class="sheet-lines"><thead><tr>' +
+        "<th>#</th><th>Item</th><th>Description</th><th>UOM</th>" +
+        '<th class="num">Qty</th><th class="num">Rate</th>' +
+        '<th class="num">Tax %</th><th class="num">Amount</th>' +
+      "</tr></thead><tbody>" +
+      lines
+        .map(function (line, index) {
+          return (
+            "<tr><td>" + (index + 1) + "</td>" +
+            "<td>" + escapeHtml(line.item_code) + "</td>" +
+            "<td>" + escapeHtml(line.description) + "</td>" +
+            "<td>" + escapeHtml(line.uom) + "</td>" +
+            '<td class="num">' + line.qty + "</td>" +
+            '<td class="num">' + money(line.rate) + "</td>" +
+            '<td class="num">' + money(line.tax_rate) + "</td>" +
+            '<td class="num">' + money(line.total) + "</td></tr>"
+          );
+        })
+        .join("") +
+      "</tbody></table>" +
+      '<table class="sheet-totals">' +
+        "<tr><th>Subtotal</th><td>" + rupees(invoice.subtotal) + "</td></tr>" +
+        taxRows +
+        '<tr class="grand"><th>Grand Total</th><td>' + rupees(invoice.grand_total) +
+        "</td></tr>" +
+      "</table>" +
+      '<p class="sheet-foot">Payment: ' + escapeHtml(invoice.payment_type) +
+        " · This is a computer-generated invoice.</p>";
+
+    $("print-label").textContent = label;
+    $("print-overlay").hidden = false;
+    $("print-close").focus();
+  }
+
+  $("print-close").addEventListener("click", function () {
+    $("print-overlay").hidden = true;
+  });
+
+  $("print-now").addEventListener("click", function () {
+    // The real printer call is the browser's own dialog; no printer configuration or
+    // driver selection is wired up yet.
+    try {
+      window.print();
+    } catch (err) {
+      status("Printing unavailable here: " + errText(err));
+    }
+  });
+
+  // Reprint: the same layout, from the saved invoice already on screen.
+  $("d-reprint").addEventListener("click", function () {
+    if (openDetail) renderPrintable(openDetail, "Reprint · " + openDetail.invoice.invoice_no);
+  });
+
+  // Print & Lock's own preview, from what the save returned.
+  $("print-preview").addEventListener("click", function () {
+    if (!lastSaved) return;
+    renderPrintable(
+      { invoice: lastSaved.invoice, customer: lastSaved.customer, lines: savedToDetailLines(lastSaved) },
+      lastSaved.invoice.invoice_no
+    );
+  });
+
+  /** A just-saved invoice reshaped to match what `invoice_detail` returns. */
+  function savedToDetailLines(saved) {
+    return saved.lines.map(function (line, index) {
+      var source = rows[index] || {};
+      return {
+        line: line,
+        item_code: source.item_code || "",
+        description: source.description || "",
+        uom: source.uom || "",
+      };
+    });
+  }
+
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape") return;
+    if (!$("print-overlay").hidden) $("print-overlay").hidden = true;
+    else if (!$("history-detail").hidden) closeDetail();
+  });
 
   /* ----------------------------------------------------------------- wiring */
 
