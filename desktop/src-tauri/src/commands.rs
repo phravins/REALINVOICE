@@ -5,11 +5,60 @@
 //! numbering and the `sync_queue` writes all belong to `realinvoice-core`, so the Phoenix
 //! and Ratatui runtimes get identical behaviour for free.
 
-use realinvoice_core::{Customer, Invoice, InvoiceLine, Item, NewInvoice, NewInvoiceLine};
+use realinvoice_core::{
+    gst, Customer, Invoice, InvoiceLine, Item, NewCustomer, NewInvoice, NewInvoiceLine,
+};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::state::{AppState, NODE_NAME};
+
+/// A customer as the New-customer form posts it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewCustomerPayload {
+    pub name: String,
+    #[serde(default)]
+    pub gstin: Option<String>,
+    pub place_of_supply: String,
+    pub mobile: String,
+}
+
+impl From<NewCustomerPayload> for NewCustomer {
+    fn from(payload: NewCustomerPayload) -> Self {
+        NewCustomer {
+            name: payload.name,
+            gstin: payload.gstin,
+            place_of_supply: payload.place_of_supply,
+            mobile: payload.mobile,
+        }
+    }
+}
+
+/// One row of the billing table, as priced on screen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuoteLinePayload {
+    pub qty: f64,
+    pub rate: f64,
+    pub tax_rate: f64,
+}
+
+/// What the summary panel renders. Every number here comes out of core's GST module, so
+/// the figures on screen are the ones that will be persisted — the frontend does no
+/// arithmetic of its own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvoiceQuote {
+    /// Seller's state, for the intra/inter-state decision.
+    pub home_state: String,
+    /// True when the split is CGST + SGST rather than IGST.
+    pub intra_state: bool,
+    /// Taxable value per row, in the order supplied — the table's Total column.
+    pub line_totals: Vec<f64>,
+    pub subtotal: f64,
+    pub cgst: f64,
+    pub sgst: f64,
+    pub igst: f64,
+    pub grand_total: f64,
+}
 
 /// What the shell reports about itself: node name, connectivity, and where its data
 /// lives. `connected` is a stub until the sync stage gives it something real to say.
@@ -116,4 +165,38 @@ pub fn add_line_item(
 #[tauri::command]
 pub fn list_todays_invoices(state: State<'_, AppState>) -> Result<Vec<Invoice>, String> {
     state.db().list_todays_invoices().map_err(|e| e.to_string())
+}
+
+/// Registers a customer the counter could not resolve. Errors if the mobile number is
+/// already on file.
+#[tauri::command]
+pub fn create_customer(
+    payload: NewCustomerPayload,
+    state: State<'_, AppState>,
+) -> Result<Customer, String> {
+    state.db().create_customer(&NewCustomer::from(payload)).map_err(|e| e.to_string())
+}
+
+/// Prices the rows currently on screen against a place of supply, without touching the
+/// database. Pure and cheap, so the summary panel can re-quote on every edit; it exists
+/// so the live totals and the saved invoice come from one implementation.
+#[tauri::command]
+pub fn quote_invoice(place_of_supply: String, lines: Vec<QuoteLinePayload>) -> InvoiceQuote {
+    let home_state = realinvoice_core::DEFAULT_HOME_STATE;
+    let taxable: Vec<gst::TaxableLine> = lines
+        .iter()
+        .map(|l| gst::TaxableLine { qty: l.qty, rate: l.rate, tax_rate: l.tax_rate })
+        .collect();
+
+    let totals = gst::compute_totals(&taxable, home_state, &place_of_supply);
+    InvoiceQuote {
+        home_state: home_state.to_string(),
+        intra_state: gst::is_intra_state(home_state, &place_of_supply),
+        line_totals: taxable.iter().map(|l| l.line_total()).collect(),
+        subtotal: totals.subtotal,
+        cgst: totals.cgst,
+        sgst: totals.sgst,
+        igst: totals.igst,
+        grand_total: totals.grand_total,
+    }
 }

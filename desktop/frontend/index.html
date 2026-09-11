@@ -23,40 +23,107 @@
 
     <main>
       <section class="pane is-active" id="pane-billing" role="tabpanel">
-        <div class="card">
-          <h2>Customer lookup</h2>
-          <p class="hint">Enter a mobile number to resolve the buyer from the local database.</p>
-          <div class="row">
-            <input
-              id="mobile-input"
-              type="tel"
-              inputmode="numeric"
-              autocomplete="off"
-              placeholder="Mobile number, e.g. 9840012345"
-              aria-label="Customer mobile number"
-            />
-            <button id="search-btn" class="btn btn--primary">Search</button>
+        <div class="card card--txn">
+          <div class="card-head">
+            <h2>New Transaction</h2>
+            <div class="cust-search">
+              <label class="sr-only" for="mobile-input">Customer mobile number</label>
+              <input
+                id="mobile-input"
+                type="tel"
+                inputmode="numeric"
+                autocomplete="off"
+                placeholder="Customer mobile"
+              />
+              <button id="search-btn" class="btn btn--primary">Search</button>
+            </div>
           </div>
-          <div class="result" id="customer-result" aria-live="polite">
-            <span class="muted">No search yet.</span>
+
+          <div class="cust-line" id="customer-line" aria-live="polite">
+            <span class="muted">Search a mobile number to attach a customer.</span>
+          </div>
+
+          <!-- Shown only when a mobile number resolves to nobody. -->
+          <div class="newcust" id="new-customer" hidden>
+            <div class="newcust-head">Register new customer</div>
+            <div class="newcust-grid">
+              <label>Name<input id="nc-name" type="text" autocomplete="off" /></label>
+              <label>Mobile<input id="nc-mobile" type="tel" inputmode="numeric" autocomplete="off" /></label>
+              <label>GSTIN <span class="opt">(optional)</span><input id="nc-gstin" type="text" autocomplete="off" /></label>
+              <label>Place of supply<input id="nc-pos" type="text" maxlength="2" placeholder="TN" autocomplete="off" /></label>
+            </div>
+            <div class="newcust-actions">
+              <button id="nc-save" class="btn btn--primary">Create customer</button>
+              <button id="nc-cancel" class="btn">Cancel</button>
+              <span class="newcust-msg" id="nc-msg"></span>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="items" id="items-table">
+              <thead>
+                <tr>
+                  <th class="col-code">Item Code</th>
+                  <th class="col-desc">Description</th>
+                  <th class="num col-qty">Qty</th>
+                  <th class="num col-rate">Rate (₹)</th>
+                  <th class="num col-tax">Tax %</th>
+                  <th class="num col-total">Total (₹)</th>
+                  <th class="col-act"><span class="sr-only">Remove</span></th>
+                </tr>
+              </thead>
+              <tbody id="items-body"></tbody>
+            </table>
+            <p class="empty-rows" id="empty-rows">No items yet — use Add Item to start billing.</p>
+          </div>
+
+          <div class="add-item">
+            <button id="add-item-btn" class="btn">+ Add Item</button>
+          </div>
+
+          <!-- Item picker: opened by Add Item, closed on pick or Escape. -->
+          <div class="picker" id="item-picker" hidden>
+            <div class="picker-head">
+              <label class="sr-only" for="item-query">Search items</label>
+              <input id="item-query" type="text" autocomplete="off" placeholder="Item code or description" />
+              <button id="picker-close" class="btn">Close</button>
+            </div>
+            <ul class="picker-results" id="picker-results"></ul>
+          </div>
+
+          <div class="summary">
+            <div class="summary-left">
+              <label class="pay">Payment
+                <select id="payment-type">
+                  <option value="cash">Cash</option>
+                  <option value="upi">UPI</option>
+                  <option value="card">Card</option>
+                  <option value="credit">Credit</option>
+                </select>
+              </label>
+              <span class="gst-mode" id="gst-mode"></span>
+            </div>
+            <dl class="totals" id="totals">
+              <div class="tot-row"><dt>Subtotal</dt><dd id="t-subtotal">₹0.00</dd></div>
+              <div class="tot-row" id="row-cgst"><dt>CGST</dt><dd id="t-cgst">₹0.00</dd></div>
+              <div class="tot-row" id="row-sgst"><dt>SGST</dt><dd id="t-sgst">₹0.00</dd></div>
+              <div class="tot-row" id="row-igst" hidden><dt>IGST</dt><dd id="t-igst">₹0.00</dd></div>
+              <div class="tot-row tot-row--grand"><dt>Grand Total</dt><dd id="t-grand">₹0.00</dd></div>
+            </dl>
+          </div>
+
+          <div class="actions">
+            <span class="action-msg" id="action-msg"></span>
+            <button id="print-lock" class="btn btn--lock">Print &amp; Lock (F5)</button>
           </div>
         </div>
 
-        <div class="card">
-          <h2>Today's invoices</h2>
-          <p class="hint">Reads straight from this node's <code>db.sqlite</code>.</p>
-          <div class="row">
-            <button id="list-btn" class="btn">List Today's Invoices</button>
-          </div>
-          <div class="result" id="invoice-result" aria-live="polite">
-            <span class="muted">No search yet.</span>
-          </div>
-        </div>
-
-        <p class="stage-note">
-          Stage 1 shell: command wiring only. The full transaction screen — item rows,
-          line totals, GST summary and Print &amp; Lock — lands in stage 2.
-        </p>
+        <!-- Stage 2 scaffolding: Print & Lock assembles the payload and logs it rather
+             than saving. Stage 3 hands this same object to create_invoice. -->
+        <details class="payload" id="payload-box" hidden>
+          <summary>Assembled payload (logged to console — not saved)</summary>
+          <pre id="payload-json"></pre>
+        </details>
       </section>
 
       <section class="pane" id="pane-inventory" role="tabpanel"><div class="soon">Coming soon</div></section>

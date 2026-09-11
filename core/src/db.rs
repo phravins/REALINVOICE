@@ -80,6 +80,47 @@ impl Db {
         Ok(found)
     }
 
+    /// Registers a brand-new customer. Fails if that mobile number is already on file —
+    /// the counter has resolved it and found nothing, so a collision here means someone
+    /// else registered it in between and the operator should see the existing record
+    /// rather than silently overwrite it.
+    pub fn create_customer(&mut self, new: &NewCustomer) -> Result<Customer> {
+        let mobile = new.mobile.trim().to_string();
+        if mobile.is_empty() {
+            return Err(CoreError::Invalid("customer mobile is required".into()));
+        }
+        if new.name.trim().is_empty() {
+            return Err(CoreError::Invalid("customer name is required".into()));
+        }
+        if new.place_of_supply.trim().is_empty() {
+            return Err(CoreError::Invalid("place_of_supply is required".into()));
+        }
+        if self.search_customer(&mobile)?.is_some() {
+            return Err(CoreError::Invalid(format!("mobile {mobile} is already registered")));
+        }
+
+        let gstin =
+            new.gstin.as_ref().map(|g| g.trim()).filter(|g| !g.is_empty()).map(String::from);
+        let place_of_supply = new.place_of_supply.trim().to_uppercase();
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO customers (name, gstin, place_of_supply, mobile)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![new.name.trim(), gstin, place_of_supply, mobile],
+        )?;
+        let customer = Customer {
+            id: tx.last_insert_rowid(),
+            name: new.name.trim().to_string(),
+            gstin,
+            place_of_supply,
+            mobile,
+        };
+        enqueue(&tx, "customers", customer.id, SyncOp::Insert, &customer)?;
+        tx.commit()?;
+        Ok(customer)
+    }
+
     /// Inserts a customer, or updates the existing one with that mobile number.
     pub fn upsert_customer(&mut self, new: &NewCustomer) -> Result<Customer> {
         let mobile = new.mobile.trim().to_string();

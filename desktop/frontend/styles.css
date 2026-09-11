@@ -16,6 +16,8 @@
 
 * { box-sizing: border-box; }
 
+[hidden] { display: none !important; }
+
 html, body {
   height: 100%;
   margin: 0;
@@ -145,24 +147,6 @@ main {
   gap: 8px;
 }
 
-input[type="tel"] {
-  flex: 1 1 240px;
-  min-width: 0;
-  padding: 8px 10px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--ink);
-  font: inherit;
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-input[type="tel"]:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
 .btn {
   padding: 8px 16px;
   background: var(--panel-2);
@@ -189,48 +173,25 @@ input[type="tel"]:focus {
 
 /* ------------------------------------------------------------------- results */
 
-.result {
-  margin-top: 12px;
-  padding: 12px;
-  min-height: 44px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  -webkit-user-select: text;
-  user-select: text;
-}
-
 .muted { color: var(--ink-dim); }
 .error { color: var(--err); }
-
-.kv {
-  display: grid;
-  grid-template-columns: 130px 1fr;
-  gap: 4px 12px;
-  margin: 0;
-}
-
-.kv dt { color: var(--ink-dim); }
-.kv dd { margin: 0; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
-
-.list {
-  margin: 0;
-  padding-left: 20px;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-}
-
-.list li { margin-bottom: 3px; }
 
 code {
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   color: var(--ink);
 }
 
-.stage-note {
-  max-width: 860px;
-  color: var(--ink-dim);
-  font-size: 12.5px;
-  font-style: italic;
+/* Visible to screen readers only. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ----------------------------------------------------------------- statusbar */
@@ -242,4 +203,397 @@ code {
   color: var(--ink-dim);
   font-size: 12px;
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+/* ---------------------------------------------------- new transaction card */
+
+.card--txn { max-width: 1100px; }
+
+.card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.card-head h2 { margin: 0; }
+
+.cust-search {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.cust-search input {
+  width: 220px;
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  font: inherit;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.cust-search input:focus { outline: none; border-color: var(--accent); }
+
+.cust-line {
+  padding: 10px 0;
+  font-size: 15px;
+}
+
+.cust-name { font-weight: 600; }
+
+.cust-gstin,
+.cust-pos {
+  color: var(--ink-dim);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+}
+
+/* ------------------------------------------------------- new customer form */
+
+.newcust {
+  margin: 4px 0 14px;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+}
+
+.newcust-head {
+  margin-bottom: 10px;
+  color: var(--accent);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.newcust-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.newcust-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--ink-dim);
+  font-size: 12px;
+}
+
+.newcust-grid .opt { color: var(--line); }
+
+.newcust-grid input {
+  /* Labels wrap to different heights ("GSTIN (optional)" takes two lines); pushing each
+     input down aligns every box on one line regardless. */
+  margin-top: auto;
+  padding: 7px 9px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  font: inherit;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.newcust-grid input:focus { outline: none; border-color: var(--accent); }
+
+.newcust-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.newcust-msg { font-size: 13px; }
+
+/* ------------------------------------------------------------- items table */
+
+.table-wrap { overflow-x: auto; }
+
+.items {
+  width: 100%;
+  margin-top: 4px;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.items th {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-dim);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  text-align: left;
+}
+
+.items td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--panel-2);
+  vertical-align: middle;
+}
+
+.items .num { text-align: right; }
+.items .col-code { width: 150px; }
+.items .col-qty { width: 90px; }
+.items .col-rate,
+.items .col-tax { width: 110px; }
+.items .col-total { width: 130px; }
+.items .col-act { width: 44px; }
+
+.items .mono {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.qty-input {
+  width: 70px;
+  padding: 5px 7px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  font: inherit;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  text-align: right;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.qty-input:focus { outline: none; border-color: var(--accent); }
+.qty-input.is-bad { border-color: var(--err); }
+
+.row-del {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.row-del:hover { border-color: var(--err); color: var(--err); }
+
+.empty-rows {
+  margin: 0;
+  padding: 18px 10px;
+  color: var(--ink-dim);
+  font-size: 13px;
+}
+
+.add-item { margin-top: 12px; }
+
+/* ------------------------------------------------------------- item picker */
+
+.picker {
+  margin-top: 10px;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+
+.picker-head { display: flex; gap: 8px; }
+
+.picker-head input {
+  flex: 1;
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  font: inherit;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.picker-head input:focus { outline: none; border-color: var(--accent); }
+
+.picker-results {
+  max-height: 210px;
+  margin: 10px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.picker-results li + li { margin-top: 4px; }
+
+.picker-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  width: 100%;
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.picker-pick:hover { border-color: var(--accent); }
+
+.picker-pick .pk-code {
+  min-width: 130px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: var(--accent);
+}
+
+.picker-pick .pk-meta {
+  margin-left: auto;
+  color: var(--ink-dim);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12.5px;
+}
+
+.picker-empty { padding: 8px 10px; color: var(--ink-dim); font-size: 13px; }
+
+/* ----------------------------------------------------------------- summary */
+
+.summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.summary-left {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pay {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-dim);
+  font-size: 13px;
+}
+
+.pay select {
+  padding: 6px 26px 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  font: inherit;
+  /* Drop the GTK widget chrome, which paints light-on-light here, and draw our own
+     caret so the control stays legible on the dark ground. */
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-dim) 50%),
+                    linear-gradient(135deg, var(--ink-dim) 50%, transparent 50%);
+  background-position: right 12px center, right 7px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.pay select option {
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.pay select:focus { outline: none; border-color: var(--accent); }
+
+.gst-mode {
+  color: var(--ink-dim);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.totals {
+  min-width: 290px;
+  margin: 0;
+}
+
+.tot-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 3px 0;
+}
+
+.tot-row dt { color: var(--ink-dim); }
+
+.tot-row dd {
+  margin: 0;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.tot-row--grand {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 18px;
+}
+
+.tot-row--grand dt { color: var(--ink); font-weight: 600; }
+.tot-row--grand dd { color: var(--accent); font-weight: 700; }
+
+/* ----------------------------------------------------------------- actions */
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.action-msg { font-size: 13px; }
+.action-msg.ok { color: var(--ok); }
+
+.btn--lock {
+  padding: 10px 22px;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #17202c;
+  font-weight: 700;
+}
+
+.btn--lock:hover { filter: brightness(1.08); }
+
+/* --------------------------------------------------------- payload preview */
+
+.payload {
+  max-width: 1100px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink-dim);
+  font-size: 12.5px;
+}
+
+.payload summary { cursor: pointer; }
+
+.payload pre {
+  max-height: 260px;
+  margin: 10px 0 0;
+  overflow: auto;
+  color: var(--ink);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  -webkit-user-select: text;
+  user-select: text;
 }
