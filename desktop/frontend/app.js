@@ -64,6 +64,9 @@
   /** Last quote returned by core, for the Print & Lock payload. */
   var lastQuote = null;
 
+  /** True once a save succeeds. A locked screen is read-only until New Transaction. */
+  var locked = false;
+
   /* ----------------------------------------------------------------------- tabs */
 
   var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
@@ -369,20 +372,21 @@
   }
 
   /**
-   * Drops a previously assembled payload. Anything that changes the transaction makes
-   * the logged payload and its confirmation stale, and a stale total on screen next to a
-   * fresh one is how a counter mis-bills.
+   * Clears a stale message. Anything that changes the transaction makes a previous
+   * confirmation or error wrong, and a stale line next to fresh totals is how a counter
+   * mis-bills. A save confirmation is exempt: the screen is locked, so nothing beneath it
+   * can change.
    */
-  function invalidatePayload() {
+  function clearMessage() {
+    if (locked) return;
     var msg = $("action-msg");
     msg.className = "action-msg";
     msg.textContent = "";
-    $("payload-box").hidden = true;
   }
 
   /** Re-prices every row through core. Called on any change to rows or customer. */
   function requote() {
-    invalidatePayload();
+    clearMessage();
     if (!invoke) return bridgeMissing("quote_invoice");
 
     // With no customer resolved yet, quote against the home state so the operator still
@@ -406,87 +410,155 @@
   /* -------------------------------------------------------------- print & lock */
 
   /**
-   * Stage 2 stops here: assemble what stage 3 will hand to create_invoice, log it, and
-   * show it. Nothing is written to the database.
+   * Locks or unlocks the whole card. A saved invoice is a printed document: nothing on
+   * screen may still look editable, or an operator will "correct" a row that is already
+   * in the books and on a customer's copy.
+   */
+  function setLocked(on) {
+    locked = on;
+    document.querySelector(".card--txn").classList.toggle("is-locked", on);
+
+    $("mobile-input").disabled = on;
+    $("search-btn").disabled = on;
+    $("add-item-btn").disabled = on;
+    $("payment-type").disabled = on;
+    $("print-lock").hidden = on;
+    $("new-txn").hidden = !on;
+
+    Array.prototype.forEach.call(document.querySelectorAll(".qty-input"), function (input) {
+      input.disabled = on;
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".row-del"), function (button) {
+      button.disabled = on;
+    });
+
+    if (on) {
+      hideNewCustomer();
+      closePicker();
+      $("new-txn").focus();
+    }
+  }
+
+  /** Assembles what core needs to store this transaction. */
+  function buildPayload() {
+    return {
+      customer_id: customer.id,
+      date: null, // core stamps today
+      payment_type: $("payment-type").value,
+      lines: rows.map(function (row) {
+        return { item_id: row.item_id, qty: row.qty, rate: row.rate, tax_rate: row.tax_rate };
+      }),
+    };
+  }
+
+  function saveError(message) {
+    var msg = $("action-msg");
+    msg.className = "action-msg error";
+    msg.textContent = message;
+    status("Not saved: " + message);
+  }
+
+  /**
+   * Saves the transaction. The invoice number is allocated by core inside the same
+   * transaction that writes the rows — never previewed here beforehand, so two consoles
+   * billing at the same moment cannot be shown the same number.
    */
   function printAndLock() {
+    if (locked) return; // already saved; New Transaction is the only way on
+
+    if (!customer) return saveError("Attach a customer first.");
+    if (!rows.length) return saveError("Add at least one item.");
+    if (!lastQuote) return saveError("Totals not priced yet — try again.");
+
+    var bad = rows.filter(function (row) {
+      return !(row.qty > 0);
+    });
+    if (bad.length) return saveError("Every row needs a quantity above zero.");
+
+    if (!invoke) return bridgeMissing("create_invoice");
+
+    var button = $("print-lock");
+    button.disabled = true;
     var msg = $("action-msg");
+    msg.className = "action-msg muted";
+    msg.textContent = "Saving…";
 
-    if (!customer) {
-      msg.className = "action-msg error";
-      msg.textContent = "Attach a customer first.";
-      return;
-    }
-    if (!rows.length) {
-      msg.className = "action-msg error";
-      msg.textContent = "Add at least one item.";
-      return;
-    }
-    if (!lastQuote) {
-      msg.className = "action-msg error";
-      msg.textContent = "Totals not priced yet — try again.";
-      return;
-    }
-
-    var payload = {
-      customer: {
-        id: customer.id,
-        name: customer.name,
-        gstin: customer.gstin,
-        mobile: customer.mobile,
-        place_of_supply: customer.place_of_supply,
-      },
-      // Shaped for core's NewInvoice: create_invoice needs exactly these fields.
-      invoice: {
-        customer_id: customer.id,
-        date: null, // core stamps today
-        payment_type: $("payment-type").value,
-        lines: rows.map(function (row) {
-          return {
-            item_id: row.item_id,
-            qty: row.qty,
-            rate: row.rate,
-            tax_rate: row.tax_rate,
-          };
-        }),
-      },
-      // Display copies of what core already priced. Stage 3 does not send these —
-      // create_invoice recomputes them — they are here to diff against what it returns.
-      lines_display: rows.map(function (row) {
-        return {
-          item_code: row.item_code,
-          description: row.description,
-          uom: row.uom,
-          qty: row.qty,
-          rate: row.rate,
-          tax_rate: row.tax_rate,
-          line_total: row.total,
-        };
-      }),
-      totals: {
-        home_state: lastQuote.home_state,
-        intra_state: lastQuote.intra_state,
+    invoke("create_invoice", {
+      payload: buildPayload(),
+      // What the panel is showing. Core refuses the save if it prices differently.
+      expected: {
         subtotal: lastQuote.subtotal,
         cgst: lastQuote.cgst,
         sgst: lastQuote.sgst,
         igst: lastQuote.igst,
         grand_total: lastQuote.grand_total,
       },
-    };
+    })
+      .then(function (saved) {
+        button.disabled = false;
+        showSaved(saved);
+      })
+      .catch(function (err) {
+        // Nothing was written — core rolls the whole transaction back — so the form stays
+        // exactly as it was and the operator can retry.
+        button.disabled = false;
+        saveError(errText(err));
+      });
+  }
 
-    console.log("[Print & Lock] assembled invoice payload (NOT saved — stage 3):", payload);
-    console.log(JSON.stringify(payload, null, 2));
+  /** Shows the allocated number, renders the stored figures, and locks the card. */
+  function showSaved(saved) {
+    var invoice = saved.invoice;
 
-    $("payload-json").textContent = JSON.stringify(payload, null, 2);
-    var box = $("payload-box");
-    box.hidden = false;
-    box.open = true;
+    var badge = $("inv-no");
+    badge.textContent = invoice.invoice_no;
+    badge.hidden = false;
 
+    // Render what was actually stored, not what was on screen a moment ago.
+    saved.lines.forEach(function (line, index) {
+      var cell = document.querySelector('[data-total="' + index + '"]');
+      if (cell) cell.textContent = money(line.line_total);
+      if (rows[index]) rows[index].total = line.line_total;
+    });
+    $("t-subtotal").textContent = rupees(invoice.subtotal);
+    $("t-cgst").textContent = rupees(invoice.cgst);
+    $("t-sgst").textContent = rupees(invoice.sgst);
+    $("t-igst").textContent = rupees(invoice.igst);
+    $("t-grand").textContent = rupees(invoice.grand_total);
+
+    setLocked(true);
+
+    var msg = $("action-msg");
     msg.className = "action-msg ok";
-    msg.textContent =
-      "Payload logged — " + rows.length + " line(s), " + rupees(lastQuote.grand_total) +
-      ". Not saved yet (stage 3).";
-    status("Print & Lock: payload logged to console, nothing written.");
+    msg.textContent = "Saved — Invoice #" + invoice.invoice_no;
+    status(
+      "Saved " + invoice.invoice_no + " · " + rupees(invoice.grand_total) + " · " +
+        saved.lines.length + " line(s) · " + saved.queued_sync_rows + " row(s) queued for sync."
+    );
+  }
+
+  /** Clears the card back to a fresh empty state for the next customer. */
+  function newTransaction() {
+    customer = null;
+    rows = [];
+    lastQuote = null;
+
+    $("mobile-input").value = "";
+    $("payment-type").value = "cash";
+    $("inv-no").hidden = true;
+    $("inv-no").textContent = "";
+
+    setLocked(false);
+
+    var msg = $("action-msg");
+    msg.className = "action-msg";
+    msg.textContent = "";
+
+    renderCustomer();
+    renderRows();
+    requote();
+    $("mobile-input").focus();
+    status("Ready for the next customer.");
   }
 
   /* ----------------------------------------------------------------- wiring */
@@ -503,6 +575,7 @@
   });
 
   $("print-lock").addEventListener("click", printAndLock);
+  $("new-txn").addEventListener("click", newTransaction);
   document.addEventListener("keydown", function (event) {
     if (event.key === "F5") {
       event.preventDefault(); // never let F5 reload the shell mid-transaction

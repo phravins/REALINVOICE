@@ -7,6 +7,10 @@ row — is unchanged.
 Print & Lock still does **not** save. It assembles the payload, logs it, and shows it.
 Wiring it to `create_invoice` is stage 3.
 
+> **Superseded in part.** Stage 3 made Print & Lock save, and removed the payload preview
+> box described below. See [office-console-stage-3.md](office-console-stage-3.md).
+> Everything else on this page still holds.
+
 ## The card
 
 | Section | Behaviour |
