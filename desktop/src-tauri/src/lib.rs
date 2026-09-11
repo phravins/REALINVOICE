@@ -25,10 +25,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::node_status,
             commands::search_customer,
+            commands::create_customer,
             commands::search_item,
             commands::create_invoice,
             commands::add_line_item,
             commands::list_todays_invoices,
+            commands::quote_invoice,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the RealInvoice Office Console");

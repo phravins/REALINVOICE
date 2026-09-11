@@ -243,7 +243,7 @@ fn searches_behave_on_misses_and_partial_input() {
     assert_eq!(db.search_item("tmt").unwrap().len(), 1);
     assert_eq!(db.search_item("Pipe").unwrap().len(), 1);
     assert!(db.search_item("nothing-like-this").unwrap().is_empty());
-    assert_eq!(db.search_item("").unwrap().len(), 5);
+    assert_eq!(db.search_item("").unwrap().len(), seed::demo_items().len());
 }
 
 #[test]
@@ -286,11 +286,128 @@ fn seeding_twice_does_not_duplicate_rows() {
     let mut db = seeded_db();
     seed::seed_demo_data(&mut db).unwrap();
 
-    assert_eq!(db.search_item("").unwrap().len(), 5);
+    assert_eq!(db.search_item("").unwrap().len(), seed::demo_items().len());
     assert_eq!(db.search_customer("9840012345").unwrap().unwrap().name, "Sri Balaji Traders");
     // Second pass queues updates rather than a second set of inserts.
+    let seeded = seed::demo_items().len();
     let ops: Vec<String> =
         db.pending_sync_rows_for("items").unwrap().into_iter().map(|r| r.op).collect();
-    assert_eq!(ops.iter().filter(|o| *o == "insert").count(), 5);
-    assert_eq!(ops.iter().filter(|o| *o == "update").count(), 5);
+    assert_eq!(ops.iter().filter(|o| *o == "insert").count(), seeded);
+    assert_eq!(ops.iter().filter(|o| *o == "update").count(), seeded);
+}
+
+#[test]
+fn a_new_customer_can_be_registered_from_the_counter() {
+    let mut db = seeded_db();
+
+    let created = db
+        .create_customer(&NewCustomer {
+            name: "  Anand Electricals  ".into(),
+            gstin: Some("  33AAFCA1234M1Z9  ".into()),
+            place_of_supply: "tn".into(),
+            mobile: " 9884455661 ".into(),
+        })
+        .expect("register customer");
+
+    // Input is trimmed and the state code normalised, so GST comparison stays reliable.
+    assert_eq!(created.name, "Anand Electricals");
+    assert_eq!(created.gstin.as_deref(), Some("33AAFCA1234M1Z9"));
+    assert_eq!(created.place_of_supply, "TN");
+    assert_eq!(created.mobile, "9884455661");
+
+    // Immediately findable by the same search the counter just missed on.
+    assert_eq!(db.search_customer("9884455661").unwrap().unwrap(), created);
+
+    let queued = db.pending_sync_rows_for("customers").unwrap();
+    let mine = queued.iter().find(|r| r.row_id == created.id).expect("queued");
+    assert_eq!(mine.op, "insert");
+    assert!(mine.synced_at.is_none());
+}
+
+#[test]
+fn registering_a_duplicate_mobile_is_refused() {
+    let mut db = seeded_db();
+
+    let duplicate = db.create_customer(&NewCustomer {
+        name: "Someone Else".into(),
+        gstin: None,
+        place_of_supply: "TN".into(),
+        mobile: "9840012345".into(),
+    });
+    assert!(matches!(duplicate, Err(CoreError::Invalid(_))));
+
+    // The existing record is untouched.
+    assert_eq!(db.search_customer("9840012345").unwrap().unwrap().name, "Sri Balaji Traders");
+}
+
+#[test]
+fn a_blank_gstin_is_stored_as_unregistered() {
+    let mut db = seeded_db();
+
+    let created = db
+        .create_customer(&NewCustomer {
+            name: "Cash Counter Buyer".into(),
+            gstin: Some("   ".into()),
+            place_of_supply: "TN".into(),
+            mobile: "9112233445".into(),
+        })
+        .unwrap();
+
+    assert_eq!(created.gstin, None, "whitespace is not a GSTIN");
+}
+
+#[test]
+fn incomplete_customers_are_refused() {
+    let mut db = seeded_db();
+    let base = NewCustomer {
+        name: "Valid Name".into(),
+        gstin: None,
+        place_of_supply: "TN".into(),
+        mobile: "9111111111".into(),
+    };
+
+    let no_name = db.create_customer(&NewCustomer { name: "  ".into(), ..base.clone() });
+    assert!(matches!(no_name, Err(CoreError::Invalid(_))));
+
+    let no_mobile = db.create_customer(&NewCustomer { mobile: "".into(), ..base.clone() });
+    assert!(matches!(no_mobile, Err(CoreError::Invalid(_))));
+
+    let no_state = db.create_customer(&NewCustomer { place_of_supply: " ".into(), ..base });
+    assert!(matches!(no_state, Err(CoreError::Invalid(_))));
+
+    // Nothing half-written landed.
+    assert!(db.search_customer("9111111111").unwrap().is_none());
+}
+
+/// The stage-2 worked example, billed through the seeded catalogue: a 42U rack and five
+/// enterprise licences to an intra-state Tamil Nadu buyer.
+#[test]
+fn the_worked_example_totals_to_one_lakh_twentythree_thousand_nine_hundred() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9600011223"); // Ishta Capital Investments, TN
+    let rack = item(&db, "RACK-42U-PRO");
+    let license = item(&db, "ABCOS-ENT-LIC");
+
+    assert_eq!(rack.rate, 45_000.0);
+    assert_eq!(rack.description, "42U Server Rack Pro");
+    assert_eq!(license.rate, 12_000.0);
+    assert_eq!(license.description, "aBCOS Enterprise Lic");
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "credit".into(),
+            lines: vec![
+                NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None },
+                NewInvoiceLine { item_id: license.id, qty: 5.0, rate: None, tax_rate: None },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(invoice.subtotal, 105_000.00);
+    assert_eq!(invoice.cgst, 9_450.00);
+    assert_eq!(invoice.sgst, 9_450.00);
+    assert_eq!(invoice.igst, 0.0);
+    assert_eq!(invoice.grand_total, 123_900.00);
 }

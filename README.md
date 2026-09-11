@@ -30,8 +30,9 @@ realinvoice/
 | --- | --- | --- |
 | 1 | `core` — schema, GST calc, invoice numbering, `Db` | done |
 | 1 | Office Console — native shell, Tauri commands, stub UI | done |
-| 2 | Office Console — full transaction UI (item rows, Print & Lock) | not started |
+| 2 | Office Console — NEW TRANSACTION card, live GST summary | done |
 | 2 | Back-Office Web (Phoenix LiveView) | not started |
+| 3 | Office Console — Print & Lock wired to `create_invoice` | not started |
 | 3 | Logistics Desk (Ratatui TUI) | not started |
 | — | Sync worker that drains `sync_queue` | not started |
 
@@ -45,4 +46,5 @@ cd desktop/src-tauri && cargo tauri dev
 
 The desktop app needs the usual Tauri v2 Linux dependencies (`libwebkit2gtk-4.1-dev`,
 `libgtk-3-dev`, `librsvg2-dev`, `patchelf`, `libxdo-dev`); see
-[docs/office-console-stage-1.md](docs/office-console-stage-1.md).
+[docs/office-console-stage-1.md](docs/office-console-stage-1.md) and
+[docs/office-console-stage-2.md](docs/office-console-stage-2.md).

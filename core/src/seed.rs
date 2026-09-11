@@ -29,6 +29,12 @@ pub fn demo_customers() -> Vec<NewCustomer> {
             place_of_supply: "KA".into(),
             mobile: "9845567890".into(),
         },
+        NewCustomer {
+            name: "Ishta Capital Investments".into(),
+            gstin: Some("33AAAAA0000A1Z1".into()),
+            place_of_supply: "TN".into(),
+            mobile: "9600011223".into(),
+        },
         // Unregistered walk-in: no GSTIN.
         NewCustomer {
             name: "Walk-in Customer".into(),
@@ -42,6 +48,21 @@ pub fn demo_customers() -> Vec<NewCustomer> {
 /// Items a fresh database starts with.
 pub fn demo_items() -> Vec<NewItem> {
     vec![
+        // The two the worked example bills: 1 x 45,000 + 5 x 12,000 = 1,05,000 @ 18%.
+        NewItem {
+            item_code: "RACK-42U-PRO".into(),
+            description: "42U Server Rack Pro".into(),
+            rate: 45_000.0,
+            tax_rate: 18.0,
+            uom: "NOS".into(),
+        },
+        NewItem {
+            item_code: "ABCOS-ENT-LIC".into(),
+            description: "aBCOS Enterprise Lic".into(),
+            rate: 12_000.0,
+            tax_rate: 18.0,
+            uom: "LIC".into(),
+        },
         NewItem {
             item_code: "CEM-OPC-53".into(),
             description: "OPC 53 Grade Cement".into(),

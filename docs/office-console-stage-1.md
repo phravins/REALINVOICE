@@ -3,6 +3,11 @@
 The native shell for the billing counter, wired to `realinvoice-core` and proving the
 `invoke()` bridge. No transaction UI yet: that is stage 2.
 
+> **Superseded in part.** The Billing pane described here — a mobile search box and a
+> List Today's Invoices button — was scaffolding, and stage 2 replaced it with the NEW
+> TRANSACTION card. See [office-console-stage-2.md](office-console-stage-2.md). Everything
+> else on this page (the shell, the command layer, the database location) still holds.
+
 ## What this stage delivers
 
 - A Tauri v2 app under `desktop/src-tauri` depending on `core` as a path dependency.
@@ -54,7 +59,7 @@ sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
 Then:
 
 ```sh
-cargo test --workspace                 # 29 tests
+cargo test --workspace
 cargo run -p realinvoice-desktop       # or: cd desktop/src-tauri && cargo tauri dev
 ```
 
