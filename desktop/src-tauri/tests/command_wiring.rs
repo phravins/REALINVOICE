@@ -5,7 +5,7 @@
 //! What they prove: the console opens its own database file, seeds itself, and a frontend
 //! payload survives the trip into core unchanged.
 
-use realinvoice_core::{seed, NewCustomer, NewInvoice, NewInvoiceLine};
+use realinvoice_core::{seed, InvoiceFilter, NewCustomer, NewInvoice, NewInvoiceLine};
 use realinvoice_desktop_lib::commands::{
     check_expected_totals_for_test as check_expected_totals, quote_invoice, ExpectedTotals,
     NewCustomerPayload, NewInvoicePayload, NewLinePayload, QuoteLinePayload,
@@ -489,4 +489,175 @@ fn rows_without_explicit_prices_skip_the_guard() {
     let nonsense =
         ExpectedTotals { subtotal: 1.0, cgst: 1.0, sgst: 1.0, igst: 1.0, grand_total: 1.0 };
     assert!(check_expected_totals(&nonsense, &deferred, "TN", "TN").is_ok());
+}
+
+/// Bills four invoices through the console the way stage 3 saves them.
+fn billed_history(state: &AppState) -> Vec<realinvoice_core::Invoice> {
+    let example = worked_example(state);
+    let first = state.db().create_invoice(&example).unwrap();
+
+    let cement = state.db().search_item("CEM-OPC-53").unwrap().remove(0);
+    let kaveri = state.db().search_customer("9791045678").unwrap().unwrap().id;
+    let second = NewInvoice {
+        customer_id: kaveri,
+        date: None,
+        payment_type: "upi".into(),
+        lines: vec![NewInvoiceLine { item_id: cement.id, qty: 20.0, rate: None, tax_rate: None }],
+    };
+    let second = state.db().create_invoice(&second).unwrap();
+
+    let license = state.db().search_item("ABCOS-ENT-LIC").unwrap().remove(0);
+    let deccan = state.db().search_customer("9845567890").unwrap().unwrap().id;
+    let third = NewInvoice {
+        customer_id: deccan,
+        date: None,
+        payment_type: "credit".into(),
+        lines: vec![NewInvoiceLine { item_id: license.id, qty: 2.0, rate: None, tax_rate: None }],
+    };
+    let third = state.db().create_invoice(&third).unwrap();
+
+    // One on an older date, so a "today" filter has something to exclude.
+    let pipe = state.db().search_item("PVC-PIPE-4").unwrap().remove(0);
+    let older = NewInvoice {
+        customer_id: kaveri,
+        date: Some("2026-08-20".into()),
+        payment_type: "cash".into(),
+        lines: vec![NewInvoiceLine { item_id: pipe.id, qty: 4.0, rate: None, tax_rate: None }],
+    };
+    let older = state.db().create_invoice(&older).unwrap();
+
+    vec![first, second, third, older]
+}
+
+#[test]
+fn the_history_pane_lists_every_billed_invoice_with_its_totals() {
+    let (_dir, state) = console_state();
+    let billed = billed_history(&state);
+
+    let all = state.db().list_invoices(&InvoiceFilter::default()).unwrap();
+    assert_eq!(all.len(), 4);
+
+    // Every saved invoice is listed, with the total it was saved with.
+    for invoice in &billed {
+        let listed = all
+            .iter()
+            .find(|s| s.invoice.id == invoice.id)
+            .unwrap_or_else(|| panic!("{} missing from history", invoice.invoice_no));
+        assert_eq!(listed.invoice.grand_total, invoice.grand_total);
+        assert_eq!(listed.invoice.invoice_no, invoice.invoice_no);
+        assert!(!listed.customer_name.is_empty());
+        assert!(!listed.invoice.created_at.is_empty(), "the list shows a date and time");
+    }
+}
+
+#[test]
+fn todays_filter_excludes_an_older_invoice_and_a_custom_range_finds_it() {
+    let (_dir, state) = console_state();
+    let billed = billed_history(&state);
+    let older = billed.last().unwrap();
+    let today = realinvoice_core::Invoice::clone(&billed[0]).date;
+
+    let todays = state
+        .db()
+        .list_invoices(&InvoiceFilter {
+            from: Some(today.clone()),
+            to: Some(today),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(todays.len(), 3);
+    assert!(todays.iter().all(|s| s.invoice.id != older.id));
+
+    // A custom range around August finds only the older one.
+    let august = state
+        .db()
+        .list_invoices(&InvoiceFilter {
+            from: Some("2026-08-01".into()),
+            to: Some("2026-08-31".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(august.len(), 1);
+    assert_eq!(august[0].invoice.id, older.id);
+
+    // And a range containing nothing narrows to nothing, without erroring.
+    assert!(state
+        .db()
+        .list_invoices(&InvoiceFilter {
+            from: Some("2020-01-01".into()),
+            to: Some("2020-12-31".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn the_detail_view_matches_exactly_what_was_saved() {
+    let (_dir, state) = console_state();
+    let billed = billed_history(&state);
+    let saved = &billed[0]; // the worked example
+
+    let detail = state.db().get_invoice_detail(saved.id).unwrap().expect("detail");
+
+    // Header figures are the stored ones, not recomputed for display.
+    assert_eq!(&detail.invoice, saved);
+    assert_eq!(detail.invoice.grand_total, 123_900.00);
+    assert_eq!(detail.customer.name, "Ishta Capital Investments");
+
+    // Every line matches the stored row, and they sum to the stored subtotal.
+    let stored_lines = state.db().invoice_lines(saved.id).unwrap();
+    assert_eq!(detail.lines.len(), stored_lines.len());
+    for (shown, stored) in detail.lines.iter().zip(&stored_lines) {
+        assert_eq!(&shown.line, stored);
+    }
+    let summed: f64 = detail.lines.iter().map(|l| l.line.line_total).sum();
+    assert_eq!(summed, detail.invoice.subtotal);
+}
+
+/// Reprint renders from the stored invoice, so its numbers are the saved ones with
+/// nothing re-entered and nothing recomputed.
+#[test]
+fn reprinting_reads_the_same_figures_back() {
+    let (dir, state) = console_state();
+    let billed = billed_history(&state);
+    let saved = billed[0].clone();
+    drop(state);
+
+    // A fresh process, as a reprint days later would be.
+    let reopened = AppState::new(dir.path().join(DB_FILE_NAME)).unwrap();
+    let detail = reopened.db().get_invoice_detail(saved.id).unwrap().unwrap();
+
+    assert_eq!(detail.invoice.invoice_no, saved.invoice_no);
+    assert_eq!(detail.invoice.subtotal, saved.subtotal);
+    assert_eq!(detail.invoice.cgst, saved.cgst);
+    assert_eq!(detail.invoice.sgst, saved.sgst);
+    assert_eq!(detail.invoice.igst, saved.igst);
+    assert_eq!(detail.invoice.grand_total, saved.grand_total);
+    assert_eq!(detail.invoice.created_at, saved.created_at);
+
+    // The sheet prints code, description and UOM, so the detail has to carry them.
+    assert_eq!(detail.lines[0].item_code, "RACK-42U-PRO");
+    assert_eq!(detail.lines[0].description, "42U Server Rack Pro");
+    assert_eq!(detail.lines[0].uom, "NOS");
+}
+
+#[test]
+fn searching_history_by_customer_or_number_narrows_the_list() {
+    let (_dir, state) = console_state();
+    billed_history(&state);
+
+    let by_name = state
+        .db()
+        .list_invoices(&InvoiceFilter { text: Some("ishta".into()), ..Default::default() })
+        .unwrap();
+    assert_eq!(by_name.len(), 1);
+    assert_eq!(by_name[0].invoice.invoice_no, "RI-2026-0001");
+
+    let by_number = state
+        .db()
+        .list_invoices(&InvoiceFilter { text: Some("0002".into()), ..Default::default() })
+        .unwrap();
+    assert_eq!(by_number.len(), 1);
+    assert_eq!(by_number[0].customer_name, "Kaveri Hardware");
 }

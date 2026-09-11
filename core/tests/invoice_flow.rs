@@ -1,7 +1,9 @@
 //! End-to-end tests: an invoice goes in through `Db`, and comes back out of a freshly
 //! reopened SQLite file with its lines and its `sync_queue` rows intact.
 
-use realinvoice_core::{seed, CoreError, Db, NewCustomer, NewInvoice, NewInvoiceLine, NewItem};
+use realinvoice_core::{
+    seed, CoreError, Db, InvoiceFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewItem,
+};
 
 fn seeded_db() -> Db {
     let mut db = Db::open_in_memory().expect("open in-memory db");
@@ -464,4 +466,233 @@ fn concurrent_saves_never_collide_on_an_invoice_number() {
     let db = Db::open(&path).unwrap();
     assert_eq!(db.pending_sync_rows_for("invoices").unwrap().len(), WRITERS);
     assert_eq!(db.list_invoices_for_date("2026-09-11".parse().unwrap()).unwrap().len(), WRITERS);
+}
+
+/// Raises invoices across several dates, customers and totals so the history query has
+/// something to narrow. Returns them oldest first.
+fn history_fixture(db: &mut Db) -> Vec<realinvoice_core::Invoice> {
+    let ishta = customer(db, "9600011223").id; // TN
+    let kaveri = customer(db, "9791045678").id; // TN
+    let deccan = customer(db, "9845567890").id; // KA
+    let rack = item(db, "RACK-42U-PRO").id;
+    let license = item(db, "ABCOS-ENT-LIC").id;
+    let cement = item(db, "CEM-OPC-53").id;
+
+    let mut raise = |customer_id: i64, date: &str, pay: &str, lines: Vec<NewInvoiceLine>| {
+        db.create_invoice(&NewInvoice {
+            customer_id,
+            date: Some(date.into()),
+            payment_type: pay.into(),
+            lines,
+        })
+        .unwrap()
+    };
+
+    vec![
+        raise(
+            kaveri,
+            "2026-08-20",
+            "upi",
+            vec![NewInvoiceLine { item_id: cement, qty: 20.0, rate: None, tax_rate: None }],
+        ),
+        raise(
+            deccan,
+            "2026-09-09",
+            "credit",
+            vec![NewInvoiceLine { item_id: license, qty: 2.0, rate: None, tax_rate: None }],
+        ),
+        raise(
+            ishta,
+            "2026-09-11",
+            "cash",
+            vec![
+                NewInvoiceLine { item_id: rack, qty: 1.0, rate: None, tax_rate: None },
+                NewInvoiceLine { item_id: license, qty: 5.0, rate: None, tax_rate: None },
+            ],
+        ),
+        raise(
+            kaveri,
+            "2026-09-11",
+            "card",
+            vec![NewInvoiceLine { item_id: rack, qty: 2.0, rate: None, tax_rate: None }],
+        ),
+    ]
+}
+
+#[test]
+fn history_lists_everything_newest_first() {
+    let mut db = seeded_db();
+    history_fixture(&mut db);
+
+    let all = db.list_invoices(&InvoiceFilter::default()).unwrap();
+    assert_eq!(all.len(), 4);
+
+    let numbers: Vec<&str> = all.iter().map(|s| s.invoice.invoice_no.as_str()).collect();
+    // Newest date first; within a date, the later invoice first.
+    assert_eq!(numbers, ["RI-2026-0004", "RI-2026-0003", "RI-2026-0002", "RI-2026-0001"]);
+
+    // Each row carries what the list column needs without a second lookup.
+    let top = &all[0];
+    assert_eq!(top.customer_name, "Kaveri Hardware");
+    assert_eq!(top.customer_mobile, "9791045678");
+    assert_eq!(top.line_count, 1);
+    assert_eq!(top.invoice.payment_type, "card");
+    assert_eq!(top.invoice.grand_total, 106_200.00);
+    assert!(!top.invoice.created_at.is_empty());
+}
+
+#[test]
+fn history_narrows_by_date_range() {
+    let mut db = seeded_db();
+    history_fixture(&mut db);
+
+    let today = db
+        .list_invoices(&InvoiceFilter {
+            from: Some("2026-09-11".into()),
+            to: Some("2026-09-11".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(today.len(), 2);
+    assert!(today.iter().all(|s| s.invoice.date == "2026-09-11"));
+
+    // A week that takes in the 9th but not August.
+    let week = db
+        .list_invoices(&InvoiceFilter {
+            from: Some("2026-09-07".into()),
+            to: Some("2026-09-13".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(week.len(), 3);
+
+    // A custom range that excludes every invoice comes back empty, not erroring.
+    let none = db
+        .list_invoices(&InvoiceFilter {
+            from: Some("2026-01-01".into()),
+            to: Some("2026-01-31".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(none.is_empty());
+
+    // An open-ended bound filters on one side only.
+    let since_september = db
+        .list_invoices(&InvoiceFilter { from: Some("2026-09-01".into()), ..Default::default() })
+        .unwrap();
+    assert_eq!(since_september.len(), 3);
+}
+
+#[test]
+fn history_text_filter_matches_customer_or_invoice_number() {
+    let mut db = seeded_db();
+    history_fixture(&mut db);
+
+    let by_customer = db
+        .list_invoices(&InvoiceFilter { text: Some("kaveri".into()), ..Default::default() })
+        .unwrap();
+    assert_eq!(by_customer.len(), 2, "case-insensitive on customer name");
+
+    let by_number = db
+        .list_invoices(&InvoiceFilter { text: Some("RI-2026-0003".into()), ..Default::default() })
+        .unwrap();
+    assert_eq!(by_number.len(), 1);
+    assert_eq!(by_number[0].customer_name, "Ishta Capital Investments");
+
+    // Partial numbers work too, since the match is a substring.
+    assert_eq!(
+        db.list_invoices(&InvoiceFilter { text: Some("0004".into()), ..Default::default() })
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Text and dates compose.
+    let both = db
+        .list_invoices(&InvoiceFilter {
+            from: Some("2026-09-11".into()),
+            to: Some("2026-09-11".into()),
+            text: Some("kaveri".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(both.len(), 1);
+    assert_eq!(both[0].invoice.invoice_no, "RI-2026-0004");
+
+    assert!(db
+        .list_invoices(&InvoiceFilter { text: Some("nobody".into()), ..Default::default() })
+        .unwrap()
+        .is_empty());
+
+    // Whitespace is not a filter.
+    assert_eq!(
+        db.list_invoices(&InvoiceFilter { text: Some("   ".into()), ..Default::default() })
+            .unwrap()
+            .len(),
+        4
+    );
+}
+
+#[test]
+fn invoice_detail_returns_exactly_what_was_saved() {
+    let mut db = seeded_db();
+    let raised = history_fixture(&mut db);
+    let worked_example = &raised[2]; // 1 rack + 5 licences to Ishta, intra-state TN
+
+    let detail = db.get_invoice_detail(worked_example.id).unwrap().expect("detail");
+
+    assert_eq!(&detail.invoice, worked_example);
+    assert_eq!(detail.invoice.subtotal, 105_000.00);
+    assert_eq!(detail.invoice.cgst, 9_450.00);
+    assert_eq!(detail.invoice.sgst, 9_450.00);
+    assert_eq!(detail.invoice.igst, 0.0);
+    assert_eq!(detail.invoice.grand_total, 123_900.00);
+
+    assert_eq!(detail.customer.name, "Ishta Capital Investments");
+    assert_eq!(detail.customer.gstin.as_deref(), Some("33AAAAA0000A1Z1"));
+
+    assert_eq!(detail.lines.len(), 2);
+    assert_eq!(detail.lines[0].item_code, "RACK-42U-PRO");
+    assert_eq!(detail.lines[0].description, "42U Server Rack Pro");
+    assert_eq!(detail.lines[0].uom, "NOS");
+    assert_eq!(detail.lines[0].line.qty, 1.0);
+    assert_eq!(detail.lines[0].line.line_total, 45_000.00);
+    assert_eq!(detail.lines[1].item_code, "ABCOS-ENT-LIC");
+    assert_eq!(detail.lines[1].line.qty, 5.0);
+    assert_eq!(detail.lines[1].line.line_total, 60_000.00);
+
+    // The lines add up to the stored subtotal — what a reprint puts on paper.
+    let summed: f64 = detail.lines.iter().map(|l| l.line.line_total).sum();
+    assert_eq!(summed, detail.invoice.subtotal);
+}
+
+#[test]
+fn detail_of_an_inter_state_invoice_carries_igst() {
+    let mut db = seeded_db();
+    let raised = history_fixture(&mut db);
+
+    let detail = db.get_invoice_detail(raised[1].id).unwrap().unwrap();
+    assert_eq!(detail.customer.place_of_supply, "KA");
+    assert_eq!(detail.invoice.cgst, 0.0);
+    assert_eq!(detail.invoice.sgst, 0.0);
+    assert_eq!(detail.invoice.igst, 4_320.00);
+    assert_eq!(detail.invoice.grand_total, 28_320.00);
+}
+
+#[test]
+fn detail_of_an_unknown_invoice_is_none() {
+    let db = seeded_db();
+    assert!(db.get_invoice_detail(9_999).unwrap().is_none());
+}
+
+#[test]
+fn history_respects_a_limit() {
+    let mut db = seeded_db();
+    history_fixture(&mut db);
+
+    let capped = db.list_invoices(&InvoiceFilter { limit: Some(2), ..Default::default() }).unwrap();
+    assert_eq!(capped.len(), 2);
+    // Still the newest two, not an arbitrary pair.
+    assert_eq!(capped[0].invoice.invoice_no, "RI-2026-0004");
+    assert_eq!(capped[1].invoice.invoice_no, "RI-2026-0003");
 }

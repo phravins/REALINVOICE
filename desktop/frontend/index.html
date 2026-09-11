@@ -15,6 +15,7 @@
 
     <nav class="tabs" id="tabs" role="tablist">
       <button class="tab is-active" role="tab" data-pane="billing" aria-selected="true">Billing</button>
+      <button class="tab" role="tab" data-pane="history" aria-selected="false">History</button>
       <button class="tab" role="tab" data-pane="inventory" aria-selected="false">Inventory</button>
       <button class="tab" role="tab" data-pane="analytics" aria-selected="false">Analytics</button>
       <button class="tab" role="tab" data-pane="sync" aria-selected="false">Sync</button>
@@ -104,22 +105,106 @@
               </label>
               <span class="gst-mode" id="gst-mode"></span>
             </div>
-            <dl class="totals" id="totals">
-              <div class="tot-row"><dt>Subtotal</dt><dd id="t-subtotal">₹0.00</dd></div>
-              <div class="tot-row" id="row-cgst"><dt>CGST</dt><dd id="t-cgst">₹0.00</dd></div>
-              <div class="tot-row" id="row-sgst"><dt>SGST</dt><dd id="t-sgst">₹0.00</dd></div>
-              <div class="tot-row" id="row-igst" hidden><dt>IGST</dt><dd id="t-igst">₹0.00</dd></div>
-              <div class="tot-row tot-row--grand"><dt>Grand Total</dt><dd id="t-grand">₹0.00</dd></div>
-            </dl>
+            <!-- Filled by renderTotals(), the same function the history detail uses. -->
+            <dl class="totals" id="billing-totals"></dl>
           </div>
 
           <div class="actions">
             <span class="action-msg" id="action-msg"></span>
             <button id="print-lock" class="btn btn--lock">Print &amp; Lock (F5)</button>
+            <button id="print-preview" class="btn" hidden>Print preview</button>
             <button id="new-txn" class="btn btn--lock" hidden>New Transaction</button>
           </div>
         </div>
 
+      </section>
+
+      <section class="pane" id="pane-history" role="tabpanel">
+        <div class="card" id="history-list-card">
+          <div class="card-head">
+            <h2>Invoice History</h2>
+          </div>
+
+          <div class="filters">
+            <label class="filt">Range
+              <select id="f-range">
+                <option value="today" selected>Today</option>
+                <option value="week">This week</option>
+                <option value="month">This month</option>
+                <option value="all">All time</option>
+                <option value="custom">Custom range</option>
+              </select>
+            </label>
+            <label class="filt" id="f-from-wrap" hidden>From
+              <input id="f-from" type="date" />
+            </label>
+            <label class="filt" id="f-to-wrap" hidden>To
+              <input id="f-to" type="date" />
+            </label>
+            <label class="filt filt--grow">Search
+              <input id="f-text" type="text" autocomplete="off"
+                     placeholder="Customer name or invoice number" />
+            </label>
+            <button id="f-apply" class="btn">Apply</button>
+          </div>
+
+          <div class="table-wrap">
+            <table class="items history" id="history-table">
+              <thead>
+                <tr>
+                  <th class="col-code">Invoice #</th>
+                  <th class="col-when">Date / Time</th>
+                  <th>Customer</th>
+                  <th class="col-pay">Payment</th>
+                  <th class="num col-total">Grand Total (₹)</th>
+                </tr>
+              </thead>
+              <tbody id="history-body"></tbody>
+            </table>
+            <p class="empty-rows" id="history-empty">No invoices match.</p>
+          </div>
+          <p class="hist-count" id="history-count"></p>
+        </div>
+
+        <!-- Read-only. Invoices are append-only once saved: no edit, delete or reopen. -->
+        <div class="card card--txn" id="history-detail" hidden>
+          <div class="card-head">
+            <h2>Invoice</h2>
+            <span class="inv-no" id="d-inv-no"></span>
+            <span class="ro-badge">Read-only</span>
+            <div class="detail-actions">
+              <button id="d-reprint" class="btn btn--lock">Reprint</button>
+              <button id="d-back" class="btn">Back to list</button>
+            </div>
+          </div>
+
+          <div class="cust-line" id="d-customer"></div>
+          <div class="detail-meta" id="d-meta"></div>
+
+          <div class="table-wrap">
+            <table class="items">
+              <thead>
+                <tr>
+                  <th class="col-code">Item Code</th>
+                  <th class="col-desc">Description</th>
+                  <th class="num col-qty">Qty</th>
+                  <th class="num col-rate">Rate (₹)</th>
+                  <th class="num col-tax">Tax %</th>
+                  <th class="num col-total">Total (₹)</th>
+                </tr>
+              </thead>
+              <tbody id="d-lines"></tbody>
+            </table>
+          </div>
+
+          <div class="summary">
+            <div class="summary-left">
+              <span class="gst-mode" id="d-gst-mode"></span>
+            </div>
+            <!-- Same renderTotals() as the billing card, fed saved data. -->
+            <dl class="totals" id="detail-totals"></dl>
+          </div>
+        </div>
       </section>
 
       <section class="pane" id="pane-inventory" role="tabpanel"><div class="soon">Coming soon</div></section>
@@ -127,6 +212,17 @@
       <section class="pane" id="pane-sync" role="tabpanel"><div class="soon">Coming soon</div></section>
       <section class="pane" id="pane-settings" role="tabpanel"><div class="soon">Coming soon</div></section>
     </main>
+
+    <!-- The printable document. Rendered from a saved invoice by renderPrintable(),
+         whether that comes from Print & Lock or from Reprint. -->
+    <div class="print-overlay" id="print-overlay" hidden>
+      <div class="print-bar">
+        <span id="print-label"></span>
+        <button id="print-now" class="btn btn--lock">Print</button>
+        <button id="print-close" class="btn">Close</button>
+      </div>
+      <div class="sheet" id="print-sheet"></div>
+    </div>
 
     <footer class="statusbar"><span id="status-line">Ready.</span></footer>
 

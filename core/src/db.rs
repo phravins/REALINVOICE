@@ -290,11 +290,15 @@ impl Db {
         let fy = financial_year(date);
         let invoice_no = next_invoice_no(fy, highest_invoice_no(&tx, fy)?.as_deref())?;
 
+        // Stamped here rather than left to the column default, which is UTC: `date` is
+        // the counter's local day, and a time from a different clock beside it misleads.
+        let created_at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
         tx.execute(
             "INSERT INTO invoices
                  (invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
-                  grand_total, payment_type, sync_status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending')",
+                  grand_total, payment_type, sync_status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10)",
             params![
                 invoice_no,
                 date.to_string(),
@@ -305,6 +309,7 @@ impl Db {
                 totals.igst,
                 totals.grand_total,
                 new.payment_type,
+                created_at,
             ],
         )?;
         let invoice_id = tx.last_insert_rowid();
@@ -325,6 +330,7 @@ impl Db {
             grand_total: totals.grand_total,
             payment_type: new.payment_type.clone(),
             sync_status: "pending".to_string(),
+            created_at,
         };
         enqueue(&tx, "invoices", invoice.id, SyncOp::Insert, &invoice)?;
         tx.commit()?;
@@ -399,7 +405,7 @@ impl Db {
     pub fn list_invoices_for_date(&self, date: NaiveDate) -> Result<Vec<Invoice>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
-                    grand_total, payment_type, sync_status
+                    grand_total, payment_type, sync_status, created_at
                FROM invoices
               WHERE date = ?1
               ORDER BY id DESC",
@@ -408,12 +414,94 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The history query. Filters on date range and a substring of the customer name or
+    /// invoice number; newest first. An empty filter lists everything.
+    pub fn list_invoices(&self, filter: &InvoiceFilter) -> Result<Vec<InvoiceSummary>> {
+        // `text` is matched with LIKE, so the wildcards have to be built here. A NULL
+        // pattern short-circuits the whole clause rather than matching nothing.
+        let pattern = filter
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("%{t}%"));
+        let limit = filter.limit.unwrap_or(500);
+
+        let mut stmt = self.conn.prepare(
+            "SELECT i.id, i.invoice_no, i.date, i.customer_id, i.subtotal, i.cgst, i.sgst,
+                    i.igst, i.grand_total, i.payment_type, i.sync_status, i.created_at,
+                    c.name, c.mobile,
+                    (SELECT COUNT(*) FROM invoice_lines l WHERE l.invoice_id = i.id)
+               FROM invoices i
+               JOIN customers c ON c.id = i.customer_id
+              WHERE (:from IS NULL OR i.date >= :from)
+                AND (:to   IS NULL OR i.date <= :to)
+                AND (:pattern IS NULL
+                     OR c.name LIKE :pattern COLLATE NOCASE
+                     OR i.invoice_no LIKE :pattern COLLATE NOCASE)
+              ORDER BY i.date DESC, i.id DESC
+              LIMIT :limit",
+        )?;
+
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":from": filter.from.as_deref(),
+                ":to": filter.to.as_deref(),
+                ":pattern": pattern.as_deref(),
+                ":limit": limit,
+            },
+            |row| {
+                Ok(InvoiceSummary {
+                    invoice: invoice_from_row(row)?,
+                    customer_name: row.get(12)?,
+                    customer_mobile: row.get(13)?,
+                    line_count: row.get(14)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// One saved invoice with its buyer and its lines, ready to display or reprint with
+    /// no further lookups. Read-only — nothing here can change a stored invoice.
+    pub fn get_invoice_detail(&self, id: i64) -> Result<Option<InvoiceDetail>> {
+        let Some(invoice) = self.get_invoice(id)? else {
+            return Ok(None);
+        };
+        let customer = self
+            .get_customer(invoice.customer_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("customer {}", invoice.customer_id)))?;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT l.id, l.invoice_id, l.item_id, l.qty, l.rate, l.tax_rate, l.line_total,
+                    it.item_code, it.description, it.uom
+               FROM invoice_lines l
+               JOIN items it ON it.id = l.item_id
+              WHERE l.invoice_id = ?1
+              ORDER BY l.id",
+        )?;
+        let rows = stmt.query_map([id], |row| {
+            Ok(InvoiceDetailLine {
+                line: line_from_row(row)?,
+                item_code: row.get(7)?,
+                description: row.get(8)?,
+                uom: row.get(9)?,
+            })
+        })?;
+
+        Ok(Some(InvoiceDetail {
+            invoice,
+            customer,
+            lines: rows.collect::<rusqlite::Result<Vec<_>>>()?,
+        }))
+    }
+
     pub fn get_invoice(&self, id: i64) -> Result<Option<Invoice>> {
         Ok(self
             .conn
             .query_row(
                 "SELECT id, invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
-                        grand_total, payment_type, sync_status
+                        grand_total, payment_type, sync_status, created_at
                    FROM invoices WHERE id = ?1",
                 [id],
                 invoice_from_row,
@@ -567,6 +655,7 @@ fn invoice_from_row(row: &Row<'_>) -> rusqlite::Result<Invoice> {
         grand_total: row.get(8)?,
         payment_type: row.get(9)?,
         sync_status: row.get(10)?,
+        created_at: row.get(11)?,
     })
 }
 

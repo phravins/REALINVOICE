@@ -54,6 +54,53 @@ pub struct Invoice {
     pub grand_total: f64,
     pub payment_type: String,
     pub sync_status: String,
+    /// Local wall-clock time the invoice was raised, `YYYY-MM-DD HH:MM:SS`. Local rather
+    /// than UTC so it agrees with `date`, which is the counter's own day.
+    pub created_at: String,
+}
+
+/// An invoice as the history list shows it: the invoice plus who it was billed to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InvoiceSummary {
+    pub invoice: Invoice,
+    pub customer_name: String,
+    pub customer_mobile: String,
+    pub line_count: i64,
+}
+
+/// A saved invoice with everything needed to display or reprint it, with no further
+/// lookups. Read-only: invoices are append-only once saved.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InvoiceDetail {
+    pub invoice: Invoice,
+    pub customer: Customer,
+    pub lines: Vec<InvoiceDetailLine>,
+}
+
+/// A stored line with its item's code and description resolved.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InvoiceDetailLine {
+    pub line: InvoiceLine,
+    pub item_code: String,
+    pub description: String,
+    pub uom: String,
+}
+
+/// What the history pane filters by. Every field is optional; an empty filter lists
+/// everything, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct InvoiceFilter {
+    /// Inclusive lower bound on `invoices.date`, `YYYY-MM-DD`.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// Inclusive upper bound on `invoices.date`.
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Substring matched against customer name or invoice number.
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -6,7 +6,8 @@
 //! and Ratatui runtimes get identical behaviour for free.
 
 use realinvoice_core::{
-    gst, Customer, Invoice, InvoiceLine, Item, NewCustomer, NewInvoice, NewInvoiceLine,
+    gst, Customer, Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine, InvoiceSummary, Item,
+    NewCustomer, NewInvoice, NewInvoiceLine,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -226,6 +227,27 @@ pub fn add_line_item(
     state: State<'_, AppState>,
 ) -> Result<InvoiceLine, String> {
     state.db().add_line_item(invoice_id, &NewInvoiceLine::from(line)).map_err(|e| e.to_string())
+}
+
+/// The history query: date range plus a substring of customer name or invoice number.
+/// An empty filter lists everything, newest first.
+#[tauri::command]
+pub fn list_invoices(
+    filter: Option<InvoiceFilter>,
+    state: State<'_, AppState>,
+) -> Result<Vec<InvoiceSummary>, String> {
+    state.db().list_invoices(&filter.unwrap_or_default()).map_err(|e| e.to_string())
+}
+
+/// One saved invoice with its buyer and lines, for the read-only detail view and for
+/// reprinting. There is deliberately no counterpart that changes a stored invoice:
+/// invoices are append-only once saved.
+#[tauri::command]
+pub fn invoice_detail(
+    invoice_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Option<InvoiceDetail>, String> {
+    state.db().get_invoice_detail(invoice_id).map_err(|e| e.to_string())
 }
 
 /// Today's invoices, newest first. An empty list on a quiet morning — not an error.
