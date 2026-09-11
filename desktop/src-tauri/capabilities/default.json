@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the Office Console window. Commands are invoked directly; no plugin access is needed yet.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

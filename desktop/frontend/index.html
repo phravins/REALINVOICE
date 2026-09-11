@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>REALINVOICE DESKTOP</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="titlebar">
+      <span class="brand">REALINVOICE DESKTOP</span>
+      <span class="node" id="node-label">[Node: POS-01]</span>
+      <span class="badge badge--connected" id="conn-badge">[Connected]</span>
+    </header>
+
+    <nav class="tabs" id="tabs" role="tablist">
+      <button class="tab is-active" role="tab" data-pane="billing" aria-selected="true">Billing</button>
+      <button class="tab" role="tab" data-pane="inventory" aria-selected="false">Inventory</button>
+      <button class="tab" role="tab" data-pane="analytics" aria-selected="false">Analytics</button>
+      <button class="tab" role="tab" data-pane="sync" aria-selected="false">Sync</button>
+      <button class="tab" role="tab" data-pane="settings" aria-selected="false">Settings</button>
+    </nav>
+
+    <main>
+      <section class="pane is-active" id="pane-billing" role="tabpanel">
+        <div class="card">
+          <h2>Customer lookup</h2>
+          <p class="hint">Enter a mobile number to resolve the buyer from the local database.</p>
+          <div class="row">
+            <input
+              id="mobile-input"
+              type="tel"
+              inputmode="numeric"
+              autocomplete="off"
+              placeholder="Mobile number, e.g. 9840012345"
+              aria-label="Customer mobile number"
+            />
+            <button id="search-btn" class="btn btn--primary">Search</button>
+          </div>
+          <div class="result" id="customer-result" aria-live="polite">
+            <span class="muted">No search yet.</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Today's invoices</h2>
+          <p class="hint">Reads straight from this node's <code>db.sqlite</code>.</p>
+          <div class="row">
+            <button id="list-btn" class="btn">List Today's Invoices</button>
+          </div>
+          <div class="result" id="invoice-result" aria-live="polite">
+            <span class="muted">No search yet.</span>
+          </div>
+        </div>
+
+        <p class="stage-note">
+          Stage 1 shell: command wiring only. The full transaction screen — item rows,
+          line totals, GST summary and Print &amp; Lock — lands in stage 2.
+        </p>
+      </section>
+
+      <section class="pane" id="pane-inventory" role="tabpanel"><div class="soon">Coming soon</div></section>
+      <section class="pane" id="pane-analytics" role="tabpanel"><div class="soon">Coming soon</div></section>
+      <section class="pane" id="pane-sync" role="tabpanel"><div class="soon">Coming soon</div></section>
+      <section class="pane" id="pane-settings" role="tabpanel"><div class="soon">Coming soon</div></section>
+    </main>
+
+    <footer class="statusbar"><span id="status-line">Ready.</span></footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

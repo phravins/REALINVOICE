@@ -1,0 +1,17 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Tauri build output
+/desktop/src-tauri/target/
+/desktop/src-tauri/gen/
+
+# Local databases — every node's data stays on its own machine
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
