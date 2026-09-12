@@ -12,6 +12,7 @@ use crate::error::Result;
 const MIGRATIONS: &[(&str, &str)] = &[
     ("001_init", include_str!("../migrations/001_init.sql")),
     ("002_users", include_str!("../migrations/002_users.sql")),
+    ("003_settings", include_str!("../migrations/003_settings.sql")),
 ];
 
 /// Applies every migration that hasn't run yet against `conn`.
@@ -57,7 +58,9 @@ mod tests {
         run_migrations(&mut conn).unwrap();
         run_migrations(&mut conn).unwrap();
 
-        for table in ["customers", "items", "invoices", "invoice_lines", "sync_queue", "users"] {
+        for table in
+            ["customers", "items", "invoices", "invoice_lines", "sync_queue", "users", "settings"]
+        {
             let found: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",

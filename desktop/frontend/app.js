@@ -167,6 +167,9 @@
     if (name === "history") {
       // Reload on every visit so an invoice saved a moment ago is already listed.
       loadHistory();
+    } else if (name === "settings") {
+      refreshAbout();
+      status("About RealInvoice.");
     } else if (name !== "billing") {
       status(name + ": coming soon.");
     }
@@ -186,7 +189,7 @@
       .then(function (info) {
         $("node-label").textContent = "[Node: " + info.node + "]";
         var badge = $("conn-badge");
-        badge.textContent = info.connected ? "[Connected]" : "[Offline]";
+        badge.textContent = info.connected ? "Connected" : "Offline";
         badge.className = "badge " + (info.connected ? "badge--connected" : "badge--offline");
         status("db: " + info.db_path);
       })
@@ -1113,6 +1116,82 @@
     }
   });
 
+  /* ----------------------------------------------------------------------- theme */
+
+  /**
+   * boot.js has already set data-theme from the localStorage cache or the OS, so the
+   * first paint was correct. This reconciles with core's settings table, which is the
+   * authority — the cache only exists to avoid a flash.
+   */
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    try {
+      localStorage.setItem("ui.theme", theme);
+    } catch (err) {
+      // Blocked storage costs us the no-flash boot, nothing else.
+    }
+  }
+
+  function currentTheme() {
+    return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+  }
+
+  function loadTheme() {
+    if (!invoke) return;
+    invoke("get_theme")
+      .then(function (saved) {
+        // Nothing saved yet: keep whatever the OS gave us and leave it unsaved, so the
+        // app keeps following the OS until someone actually chooses.
+        if (saved === "light" || saved === "dark") applyTheme(saved);
+      })
+      .catch(function (err) {
+        status("get_theme failed: " + errText(err));
+      });
+  }
+
+  function toggleTheme() {
+    var next = currentTheme() === "dark" ? "light" : "dark";
+    applyTheme(next);
+    refreshAbout();
+
+    if (!invoke) return;
+    invoke("set_theme", { theme: next }).catch(function (err) {
+      status("Theme not saved: " + errText(err));
+    });
+  }
+
+  $("theme-toggle").addEventListener("click", toggleTheme);
+
+  /* ----------------------------------------------------------------------- about */
+
+  /** Everything here is read from the running build; nothing is duplicated in the UI. */
+  function refreshAbout() {
+    var grid = $("about-grid");
+    if (!grid || !invoke || !user) return;
+
+    invoke("app_info")
+      .then(function (info) {
+        var rows = [
+          ["Application", info.name],
+          ["Version", info.version],
+          ["Identifier", info.identifier],
+          ["Build date", info.build_date],
+          ["Node", info.node],
+          ["Signed in", user.display_name + " (" + user.role + ")"],
+          ["Theme", currentTheme() === "dark" ? "Dark" : "Light"],
+          ["Database", info.db_path],
+        ];
+        grid.innerHTML = rows
+          .map(function (row) {
+            return "<dt>" + escapeHtml(row[0]) + "</dt><dd>" + escapeHtml(row[1]) + "</dd>";
+          })
+          .join("");
+      })
+      .catch(function (err) {
+        grid.innerHTML = '<dt>Error</dt><dd class="error">' + escapeHtml(errText(err)) + "</dd>";
+      });
+  }
+
   /* ----------------------------------------------------------------- wiring */
 
   $("search-btn").addEventListener("click", searchCustomer);
@@ -1137,5 +1216,6 @@
 
   renderCustomer();
   renderRows();
+  loadTheme();
   bootstrap();
 })();

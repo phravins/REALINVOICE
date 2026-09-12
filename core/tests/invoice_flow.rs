@@ -896,3 +896,48 @@ fn payment_type_is_stored_as_chosen() {
         assert_eq!(db.get_invoice(invoice.id).unwrap().unwrap().payment_type, chosen);
     }
 }
+
+// ----------------------------------------------------------------- settings
+
+#[test]
+fn a_local_preference_round_trips_and_overwrites() {
+    let mut db = Db::open_in_memory().unwrap();
+
+    assert_eq!(db.get_setting("ui.theme").unwrap(), None, "unset until chosen");
+
+    db.set_setting("ui.theme", "light").unwrap();
+    assert_eq!(db.get_setting("ui.theme").unwrap().as_deref(), Some("light"));
+
+    // Choosing again replaces rather than accumulating rows.
+    db.set_setting("ui.theme", "dark").unwrap();
+    assert_eq!(db.get_setting("ui.theme").unwrap().as_deref(), Some("dark"));
+
+    assert!(db.set_setting("  ", "x").is_err());
+    assert_eq!(db.get_setting("never.set").unwrap(), None);
+}
+
+#[test]
+fn a_preference_survives_reopening_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.sqlite");
+
+    {
+        let mut db = Db::open(&path).unwrap();
+        db.set_setting("ui.theme", "light").unwrap();
+    }
+
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.get_setting("ui.theme").unwrap().as_deref(), Some("light"));
+}
+
+#[test]
+fn preferences_are_not_queued_for_sync() {
+    // One till's display preference is not something the back office should receive.
+    let mut db = seeded_db();
+    let before = db.pending_sync_rows().unwrap().len();
+
+    db.set_setting("ui.theme", "dark").unwrap();
+
+    assert_eq!(db.pending_sync_rows().unwrap().len(), before);
+    assert!(db.pending_sync_rows_for("settings").unwrap().is_empty());
+}

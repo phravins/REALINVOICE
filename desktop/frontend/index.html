@@ -4,14 +4,39 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>REALINVOICE DESKTOP</title>
+    <link rel="stylesheet" href="theme.css" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <!-- Sets data-theme before first paint; see boot.js. -->
+    <script src="boot.js"></script>
+
+    <!--
+      The wordmark, defined once and referenced by <use> wherever it appears, so the title
+      bar and the login screen can never drift apart. Swapping in a real logo means
+      replacing the contents of this one symbol; no layout code needs to change.
+      The mark takes the accent token, the wordmark takes currentColor.
+    -->
+    <svg width="0" height="0" aria-hidden="true" focusable="false" class="svg-defs">
+      <symbol id="ri-logo" viewBox="0 0 168 32">
+        <!--
+          Styled with inline `style` attributes rather than classes: a <use> renders into
+          a shadow tree that outside selectors cannot reach, but custom properties and
+          currentColor inherit into it, so the logo still themes itself.
+        -->
+        <rect x="1.25" y="1.25" width="29.5" height="29.5" rx="8.5"
+              style="fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5" />
+        <path d="M11.4 23.2V8.8h6.9a4.3 4.3 0 0 1 1.2 8.43l3.1 5.97h-3.3l-2.85-5.6H14.3v5.6zm2.9-8.1h3.9a1.75 1.75 0 0 0 0-3.5h-3.9z"
+              style="fill: var(--accent)" />
+        <text x="42" y="22"
+              style="fill: currentColor; font-family: var(--font-ui); font-size: 19px; font-weight: 650; letter-spacing: -0.015em">RealInvoice</text>
+      </symbol>
+    </svg>
     <!-- The gate. Nothing behind it is rendered, and every command behind it refuses
          to answer without a session, so hiding the shell is not the only protection. -->
     <div class="login" id="login-screen">
       <form class="login-card" id="login-form" autocomplete="off">
-        <h1>REALINVOICE</h1>
+        <svg class="logo logo--login" role="img" aria-label="RealInvoice"><use href="#ri-logo" /></svg>
         <p class="login-node" id="login-node">Office Console</p>
 
         <label class="login-field">Username
@@ -32,10 +57,19 @@
 
     <div class="shell" id="shell" hidden>
     <header class="titlebar">
-      <span class="brand">REALINVOICE DESKTOP</span>
+      <svg class="logo logo--bar" role="img" aria-label="RealInvoice"><use href="#ri-logo" /></svg>
       <span class="node" id="node-label">[Node: POS-01]</span>
       <span class="who" id="who"></span>
-      <span class="badge badge--connected" id="conn-badge">[Connected]</span>
+      <span class="badge badge--connected" id="conn-badge">Connected</span>
+      <button class="icon-btn" id="theme-toggle" type="button" aria-label="Switch theme" title="Switch theme">
+        <svg class="icon icon--sun" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="4.2" />
+          <path d="M12 2.6v2.6M12 18.8v2.6M4.3 12H1.7M22.3 12h-2.6M6.6 6.6 4.8 4.8M19.2 19.2l-1.8-1.8M6.6 17.4l-1.8 1.8M19.2 4.8l-1.8 1.8" />
+        </svg>
+        <svg class="icon icon--moon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20.5 14.5A8.6 8.6 0 0 1 9.5 3.5a8.6 8.6 0 1 0 11 11z" />
+        </svg>
+      </button>
       <button class="signout" id="signout">Sign Out</button>
     </header>
 
@@ -243,7 +277,16 @@
       <section class="pane" id="pane-inventory" role="tabpanel"><div class="soon">Coming soon</div></section>
       <section class="pane" id="pane-analytics" role="tabpanel"><div class="soon">Coming soon</div></section>
       <section class="pane" id="pane-sync" role="tabpanel"><div class="soon">Coming soon</div></section>
-      <section class="pane" id="pane-settings" role="tabpanel"><div class="soon">Coming soon</div></section>
+      <section class="pane" id="pane-settings" role="tabpanel">
+        <div class="card about">
+          <div class="about-head">
+            <svg class="logo logo--about" role="img" aria-label="RealInvoice"><use href="#ri-logo" /></svg>
+            <p class="about-tagline">Offline-first GST invoicing for Indian SMEs</p>
+          </div>
+          <dl class="about-grid" id="about-grid"></dl>
+          <p class="about-foot">Every field above is read from the running build.</p>
+        </div>
+      </section>
     </main>
 
     <!-- The printable document. Rendered from a saved invoice by renderPrintable(),

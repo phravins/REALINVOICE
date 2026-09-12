@@ -1,0 +1,151 @@
+/*
+ * RealInvoice — design tokens.
+ *
+ * The only file in the app that names a colour. Every component in styles.css references
+ * a token from here, so both themes flip from one attribute on <html> and a new component
+ * cannot reintroduce a stray hex.
+ *
+ * `data-theme` is set synchronously before first paint by the boot script in index.html:
+ * the saved choice if there is one, otherwise whatever the operating system prefers. Each
+ * palette is therefore written exactly once — there is no second copy inside a media
+ * query to drift out of step.
+ */
+
+:root {
+  /* ------------------------------------------------------------------ spacing */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+
+  /* ------------------------------------------------------------------- radius */
+  --r-sm: 6px;   /* inputs, buttons, chips */
+  --r-md: 10px;  /* cards, panels */
+  --r-lg: 14px;  /* the login card and overlays */
+
+  /* --------------------------------------------------------------- typography */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
+             "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas,
+               "Liberation Mono", monospace;
+
+  --t-h1-size: 20px;
+  --t-h1-weight: 650;
+  --t-h2-size: 15px;
+  --t-h2-weight: 600;
+  --t-body-size: 14px;
+  --t-small-size: 12.5px;
+  --t-caption-size: 11.5px;
+
+  --lh-tight: 1.3;
+  --lh-body: 1.5;
+
+  /* -------------------------------------------------------------- chrome size */
+  --control-h: 36px;
+  --titlebar-h: 52px;
+  --tabs-h: 42px;
+
+  --content-max: 1160px;
+
+  /* ---------------------------------------------------------------- paper
+     The printed invoice is ink on white in both themes — a reprint must not change
+     colour because the operator prefers dark mode. Tokens, not raw hex, so the intent
+     is explicit and nothing here gets themed by accident. */
+  --paper: #ffffff;
+  --paper-ink: #16202c;
+  --paper-muted: #5a6673;
+  --paper-line: #dde3ea;
+  --paper-head: #f2f5f8;
+}
+
+/* ======================================================================= dark */
+
+/*
+ * Deep slate rather than true black — the counter runs long shifts, and white figures on
+ * pure black is the harshest thing to read all day.
+ */
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Background layers, furthest back to nearest front. */
+  --bg-app: #0a0f16;
+  --bg-sunken: #070b11;
+  --surface: #121a25;
+  --surface-2: #18222f;
+  --surface-hover: #1e2938;
+  --field-bg: #0d151f;
+
+  /* Text. */
+  --text: #e9eef7;
+  --text-secondary: #9dabc0;
+  --text-muted: #6b7a91;
+  --text-on-accent: #ffffff;
+
+  /* Lines. */
+  --border: #23303f;
+  --border-strong: #324254;
+
+  /* Accent — indigo. Confident and quiet: this is a ledger, not a dashboard. */
+  --accent: #6366f1;
+  --accent-hover: #7c7ff5;
+  --accent-soft: rgba(99, 102, 241, 0.16);
+  --accent-text: #a5b0ff;
+
+  /* Semantics. */
+  --success: #34d399;
+  --success-soft: rgba(52, 211, 153, 0.14);
+  --warning: #fbbf24;
+  --warning-soft: rgba(251, 191, 36, 0.14);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.14);
+
+  /* Elevation. On dark, depth reads as a lighter edge plus a soft cast. */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.02);
+  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.62);
+  --focus-ring: 0 0 0 3px rgba(99, 102, 241, 0.35);
+  --scrim: rgba(4, 7, 11, 0.82);
+}
+
+/* ====================================================================== light */
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-app: #eef1f6;
+  --bg-sunken: #e4e8ef;
+  --surface: #ffffff;
+  --surface-2: #f6f8fb;
+  --surface-hover: #eef2f8;
+  --field-bg: #ffffff;
+
+  --text: #131a26;
+  --text-secondary: #4d5a6d;
+  --text-muted: #7b8798;
+  --text-on-accent: #ffffff;
+
+  --border: #dde3ec;
+  --border-strong: #c3ccda;
+
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-soft: rgba(79, 70, 229, 0.1);
+  --accent-text: #4338ca;
+
+  --success: #15803d;
+  --success-soft: rgba(21, 128, 61, 0.1);
+  --warning: #b45309;
+  --warning-soft: rgba(180, 83, 9, 0.1);
+  --danger: #b91c1c;
+  --danger-soft: rgba(185, 28, 28, 0.09);
+
+  /* On light, elevation is what lifts a card off the page, so it does real work. */
+  --shadow-sm: 0 1px 2px rgba(19, 26, 38, 0.06);
+  --shadow-md: 0 1px 3px rgba(19, 26, 38, 0.08), 0 6px 16px rgba(19, 26, 38, 0.06);
+  --shadow-lg: 0 20px 48px rgba(19, 26, 38, 0.16);
+  --focus-ring: 0 0 0 3px rgba(79, 70, 229, 0.22);
+  --scrim: rgba(19, 26, 38, 0.55);
+}

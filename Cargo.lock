@@ -2572,7 +2572,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "realinvoice-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bcrypt",
  "chrono",
@@ -2587,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "realinvoice-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "realinvoice-core",
  "serde",
