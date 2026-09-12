@@ -13,6 +13,9 @@ serde_json = { workspace = true }
 rusqlite = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+bcrypt = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -6,13 +6,76 @@
 //! and Ratatui runtimes get identical behaviour for free.
 
 use realinvoice_core::{
-    gst, Customer, Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine, InvoiceSummary, Item,
+    auth, gst, Customer, Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine, InvoiceSummary, Item,
     NewCustomer, NewInvoice, NewInvoiceLine,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::state::{AppState, NODE_NAME};
+use crate::state::{AppState, Session, NODE_NAME};
+
+// ------------------------------------------------------------------- sign-in
+
+/// What the login screen needs before anyone has signed in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthStatus {
+    pub node: String,
+    pub session: Option<Session>,
+    /// The one-time password created on a first run, shown once so an app launched from a
+    /// desktop icon — with no terminal to read — is not locked out of itself. Cleared the
+    /// moment anyone signs in.
+    pub first_run_password: Option<String>,
+    pub first_run_username: Option<String>,
+}
+
+/// Whether anyone is signed in. The only command, besides `login`, that works without a
+/// session — the shell asks it on startup to decide what to show.
+#[tauri::command]
+pub fn auth_status(state: State<'_, AppState>) -> AuthStatus {
+    let first_run_password = state.first_run_password();
+    AuthStatus {
+        node: NODE_NAME.to_string(),
+        session: state.session(),
+        first_run_username: first_run_password
+            .is_some()
+            .then(|| realinvoice_core::seed::DEFAULT_OWNER_USERNAME.to_string()),
+        first_run_password,
+    }
+}
+
+/// Signs in. One message for a bad username and a bad password alike, so the screen
+/// cannot be used to find out which accounts exist.
+#[tauri::command]
+pub fn login(
+    username: String,
+    password: String,
+    state: State<'_, AppState>,
+) -> Result<Session, String> {
+    let found = state.db().verify_login(&username, &password).map_err(|e| e.to_string())?;
+
+    match found {
+        Some(user) => {
+            let session = Session { token: auth::new_session_token(), user };
+            state.begin_session(session.clone());
+            Ok(session)
+        }
+        None => Err("Incorrect username or password.".to_string()),
+    }
+}
+
+/// Signs out, clearing the in-memory session. Every other command starts failing again.
+#[tauri::command]
+pub fn logout(state: State<'_, AppState>) {
+    state.end_session();
+}
+
+/// The gate every other command goes through.
+///
+/// Hiding the shell in the frontend is presentation; this is what actually stops an
+/// unauthenticated caller reading customers or writing an invoice.
+fn require_session(state: &State<'_, AppState>) -> Result<Session, String> {
+    state.session().ok_or_else(|| "Not signed in.".to_string())
+}
 
 /// A customer as the New-customer form posts it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +131,8 @@ pub struct NodeStatus {
     pub node: String,
     pub connected: bool,
     pub db_path: String,
+    /// Who is signed in — shown in the title bar beside the node name.
+    pub user: Option<realinvoice_core::User>,
 }
 
 /// An invoice as the frontend posts it. Mirrors core's `NewInvoice`, kept as its own type
@@ -111,6 +176,8 @@ impl From<NewInvoicePayload> for NewInvoice {
             customer_id: payload.customer_id,
             date: payload.date,
             payment_type: payload.payment_type,
+            // Never sent by the frontend — `create_invoice` fills it from the session.
+            created_by_user_id: None,
             lines: payload.lines.into_iter().map(Into::into).collect(),
         }
     }
@@ -118,13 +185,15 @@ impl From<NewInvoicePayload> for NewInvoice {
 
 /// Title-bar state for the shell.
 #[tauri::command]
-pub fn node_status(state: State<'_, AppState>) -> NodeStatus {
-    NodeStatus {
+pub fn node_status(state: State<'_, AppState>) -> Result<NodeStatus, String> {
+    let session = require_session(&state)?;
+    Ok(NodeStatus {
         node: NODE_NAME.to_string(),
         // Stub: real connectivity arrives with the sync stage.
         connected: true,
         db_path: state.db_path().display().to_string(),
-    }
+        user: Some(session.user),
+    })
 }
 
 /// Finds a customer by exact mobile number. `None` when nobody matches.
@@ -133,12 +202,14 @@ pub fn search_customer(
     mobile: String,
     state: State<'_, AppState>,
 ) -> Result<Option<Customer>, String> {
+    require_session(&state)?;
     state.db().search_customer(&mobile).map_err(|e| e.to_string())
 }
 
 /// Substring search over item code and description.
 #[tauri::command]
 pub fn search_item(query: String, state: State<'_, AppState>) -> Result<Vec<Item>, String> {
+    require_session(&state)?;
     state.db().search_item(&query).map_err(|e| e.to_string())
 }
 
@@ -157,7 +228,13 @@ pub fn create_invoice(
     expected: Option<ExpectedTotals>,
     state: State<'_, AppState>,
 ) -> Result<SavedInvoice, String> {
-    let new_invoice = NewInvoice::from(payload);
+    let session = require_session(&state)?;
+
+    let mut new_invoice = NewInvoice::from(payload);
+    // Attribution is derived, never supplied: the cashier does not pick their own name,
+    // and a caller cannot bill as somebody else.
+    new_invoice.created_by_user_id = Some(session.user.id);
+
     // One guard for the whole operation: the pre-check, the save and the read-back all
     // see the same database state.
     let mut db = state.db();
@@ -226,6 +303,7 @@ pub fn add_line_item(
     line: NewLinePayload,
     state: State<'_, AppState>,
 ) -> Result<InvoiceLine, String> {
+    require_session(&state)?;
     state.db().add_line_item(invoice_id, &NewInvoiceLine::from(line)).map_err(|e| e.to_string())
 }
 
@@ -236,6 +314,7 @@ pub fn list_invoices(
     filter: Option<InvoiceFilter>,
     state: State<'_, AppState>,
 ) -> Result<Vec<InvoiceSummary>, String> {
+    require_session(&state)?;
     state.db().list_invoices(&filter.unwrap_or_default()).map_err(|e| e.to_string())
 }
 
@@ -247,12 +326,14 @@ pub fn invoice_detail(
     invoice_id: i64,
     state: State<'_, AppState>,
 ) -> Result<Option<InvoiceDetail>, String> {
+    require_session(&state)?;
     state.db().get_invoice_detail(invoice_id).map_err(|e| e.to_string())
 }
 
 /// Today's invoices, newest first. An empty list on a quiet morning — not an error.
 #[tauri::command]
 pub fn list_todays_invoices(state: State<'_, AppState>) -> Result<Vec<Invoice>, String> {
+    require_session(&state)?;
     state.db().list_todays_invoices().map_err(|e| e.to_string())
 }
 
@@ -288,6 +369,7 @@ pub fn create_customer(
     payload: NewCustomerPayload,
     state: State<'_, AppState>,
 ) -> Result<Customer, String> {
+    require_session(&state)?;
     state.db().create_customer(&NewCustomer::from(payload)).map_err(|e| e.to_string())
 }
 
@@ -295,17 +377,27 @@ pub fn create_customer(
 /// database. Pure and cheap, so the summary panel can re-quote on every edit; it exists
 /// so the live totals and the saved invoice come from one implementation.
 #[tauri::command]
-pub fn quote_invoice(place_of_supply: String, lines: Vec<QuoteLinePayload>) -> InvoiceQuote {
+pub fn quote_invoice(
+    place_of_supply: String,
+    lines: Vec<QuoteLinePayload>,
+    state: State<'_, AppState>,
+) -> Result<InvoiceQuote, String> {
+    require_session(&state)?;
+    Ok(quote(&place_of_supply, &lines))
+}
+
+/// The pricing behind [`quote_invoice`], with no session or app state involved.
+pub fn quote(place_of_supply: &str, lines: &[QuoteLinePayload]) -> InvoiceQuote {
     let home_state = realinvoice_core::DEFAULT_HOME_STATE;
     let taxable: Vec<gst::TaxableLine> = lines
         .iter()
         .map(|l| gst::TaxableLine { qty: l.qty, rate: l.rate, tax_rate: l.tax_rate })
         .collect();
 
-    let totals = gst::compute_totals(&taxable, home_state, &place_of_supply);
+    let totals = gst::compute_totals(&taxable, home_state, place_of_supply);
     InvoiceQuote {
         home_state: home_state.to_string(),
-        intra_state: gst::is_intra_state(home_state, &place_of_supply),
+        intra_state: gst::is_intra_state(home_state, place_of_supply),
         line_totals: taxable.iter().map(|l| l.line_total()).collect(),
         subtotal: totals.subtotal,
         cgst: totals.cgst,

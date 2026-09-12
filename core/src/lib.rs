@@ -14,12 +14,14 @@
 //!     customer_id: customer.id,
 //!     date: None,
 //!     payment_type: "cash".into(),
+//!     created_by_user_id: None,
 //!     lines: vec![NewInvoiceLine { item_id: 1, qty: 2.0, rate: None, tax_rate: None }],
 //! })?;
 //! println!("{} = {}", invoice.invoice_no, invoice.grand_total);
 //! # Ok::<(), realinvoice_core::CoreError>(())
 //! ```
 
+pub mod auth;
 pub mod db;
 pub mod error;
 pub mod gst;

@@ -404,7 +404,10 @@
   });
 
   document.addEventListener("keydown", function (event) {
-    if (event.key === "Escape" && !$("item-picker").hidden) closePicker();
+    if (event.key === "Escape" && !$("item-picker").hidden) {
+      closePicker();
+      event.stopImmediatePropagation();
+    }
   });
 
   /* ----------------------------------------------------------------- summary */
@@ -444,6 +447,8 @@
   function requote() {
     clearMessage();
     if (!invoke) return bridgeMissing("quote_invoice");
+    // Every command is gated on a session; there is nothing to price before sign-in.
+    if (!user) return;
 
     // With no customer resolved yet, quote against the home state so the operator still
     // sees live figures; the split is re-quoted the moment one is attached.
@@ -477,7 +482,9 @@
     $("mobile-input").disabled = on;
     $("search-btn").disabled = on;
     $("add-item-btn").disabled = on;
-    $("payment-type").disabled = on;
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="payment"]'), function (radio) {
+      radio.disabled = on;
+    });
     $("print-lock").hidden = on;
     $("print-preview").hidden = !on;
     $("new-txn").hidden = !on;
@@ -501,7 +508,7 @@
     return {
       customer_id: customer.id,
       date: null, // core stamps today
-      payment_type: $("payment-type").value,
+      payment_type: selectedPayment(),
       lines: rows.map(function (row) {
         return { item_id: row.item_id, qty: row.qty, rate: row.rate, tax_rate: row.tax_rate };
       }),
@@ -600,7 +607,7 @@
     lastSaved = null;
 
     $("mobile-input").value = "";
-    $("payment-type").value = "cash";
+    setPayment("cash");
     $("inv-no").hidden = true;
     $("inv-no").textContent = "";
 
@@ -914,8 +921,196 @@
 
   document.addEventListener("keydown", function (event) {
     if (event.key !== "Escape") return;
-    if (!$("print-overlay").hidden) $("print-overlay").hidden = true;
-    else if (!$("history-detail").hidden) closeDetail();
+    if (!$("print-overlay").hidden) {
+      $("print-overlay").hidden = true;
+      event.stopImmediatePropagation();
+    } else if (!$("history-detail").hidden) {
+      closeDetail();
+      event.stopImmediatePropagation();
+    }
+  });
+
+  /* --------------------------------------------------------------------- sign-in */
+
+  /** The signed-in user, or null. Mirrors the session the backend holds. */
+  var user = null;
+
+  /** `isError` separates a failure from a plain notice like "Signed out." */
+  function showLogin(message, isError) {
+    user = null;
+    $("shell").hidden = true;
+    $("login-screen").hidden = false;
+    $("login-pass").value = "";
+    var msg = $("login-msg");
+    msg.className = "login-msg" + (isError ? " error" : " muted");
+    msg.textContent = message || "";
+    $("login-user").focus();
+  }
+
+  function showShell() {
+    $("login-screen").hidden = true;
+    $("shell").hidden = false;
+    $("who").textContent = user.display_name + " · " + user.role;
+    loadNodeStatus();
+    showPane("billing");
+    $("mobile-input").focus();
+  }
+
+  function signIn(event) {
+    if (event) event.preventDefault();
+    if (!invoke) return bridgeMissing("login");
+
+    var username = $("login-user").value.trim();
+    var password = $("login-pass").value;
+    if (!username || !password) {
+      $("login-msg").className = "login-msg error";
+      $("login-msg").textContent = "Enter a username and password.";
+      return;
+    }
+
+    var button = $("login-submit");
+    button.disabled = true;
+    $("login-msg").className = "login-msg muted";
+    $("login-msg").textContent = "Signing in…";
+
+    invoke("login", { username: username, password: password })
+      .then(function (session) {
+        button.disabled = false;
+        user = session.user;
+        $("login-firstrun").hidden = true;
+        $("login-msg").textContent = "";
+        newTransaction();
+        showShell();
+        status("Signed in as " + user.display_name + ".");
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        $("login-pass").value = "";
+        $("login-msg").className = "login-msg error";
+        $("login-msg").textContent = errText(err);
+        $("login-pass").focus();
+      });
+  }
+
+  function signOut() {
+    if (!invoke) return bridgeMissing("logout");
+    invoke("logout").then(function () {
+      // Clear the screen before showing the gate, so a half-billed transaction is not
+      // sitting there for whoever signs in next.
+      newTransaction();
+      historyRows = [];
+      $("history-body").innerHTML = "";
+      closeDetail();
+      showLogin("Signed out.");
+    });
+  }
+
+  /** Asks the backend who is signed in, and shows the gate or the shell accordingly. */
+  function bootstrap() {
+    if (!invoke) {
+      showLogin("Tauri bridge unavailable — run this through the desktop app.", true);
+      return;
+    }
+
+    invoke("auth_status")
+      .then(function (info) {
+        $("login-node").textContent = "Office Console · Node " + info.node;
+
+        if (info.first_run_password) {
+          var box = $("login-firstrun");
+          box.hidden = false;
+          box.innerHTML =
+            "<strong>First run on this machine</strong>" +
+            "<p>An owner account was created. Write this down — it is shown once.</p>" +
+            "<dl><dt>Username</dt><dd>" + escapeHtml(info.first_run_username) + "</dd>" +
+            "<dt>Password</dt><dd>" + escapeHtml(info.first_run_password) + "</dd></dl>";
+          $("login-user").value = info.first_run_username;
+        }
+
+        if (info.session) {
+          user = info.session.user;
+          showShell();
+        } else {
+          showLogin("");
+        }
+      })
+      .catch(function (err) {
+        showLogin(errText(err), true);
+      });
+  }
+
+  $("login-form").addEventListener("submit", signIn);
+  $("signout").addEventListener("click", signOut);
+
+  /* -------------------------------------------------------------- payment type */
+
+  function selectedPayment() {
+    var chosen = document.querySelector('input[name="payment"]:checked');
+    return chosen ? chosen.value : "cash";
+  }
+
+  function setPayment(value) {
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="payment"]'), function (radio) {
+      radio.checked = radio.value === value;
+    });
+    $("upi-box").hidden = value !== "upi";
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('input[name="payment"]'), function (radio) {
+    radio.addEventListener("change", function () {
+      // UPI is the only one that needs anything on screen; the box is a placeholder
+      // until QR generation lands.
+      $("upi-box").hidden = radio.value !== "upi";
+      status("Payment: " + radio.value.toUpperCase());
+    });
+  });
+
+  /* ---------------------------------------------------------------- shortcuts */
+
+  /**
+   * Clears an in-progress transaction. Confirms first if anything has been billed — a
+   * stray Esc must not wipe a half-entered invoice.
+   */
+  function clearTransaction() {
+    if (locked) return; // a saved invoice is cleared with New Transaction, not Esc
+
+    if (!rows.length && !customer) {
+      status("Nothing to clear.");
+      return;
+    }
+    if (rows.length && !window.confirm("Clear this transaction? " + rows.length + " item(s) will be discarded.")) {
+      return;
+    }
+    newTransaction();
+    status("Transaction cleared.");
+  }
+
+  document.addEventListener("keydown", function (event) {
+    // The login screen takes no shortcuts at all, Esc included.
+    if (!$("login-screen").hidden) return;
+
+    if (event.key === "F2") {
+      event.preventDefault();
+      if (!locked) {
+        showPane("billing");
+        openPicker();
+      }
+      return;
+    }
+
+    if (event.key === "F9") {
+      event.preventDefault();
+      // Stub: the replicator is the sync worker, which does not exist yet.
+      status("F9 · Replicator Settings — coming with the sync stage.");
+      return;
+    }
+
+    if (event.key === "Escape") {
+      // Overlays and the detail view close first; only a bare Esc clears the counter.
+      if (!$("print-overlay").hidden || !$("history-detail").hidden) return;
+      if (!$("item-picker").hidden) return;
+      if ($("pane-billing").classList.contains("is-active")) clearTransaction();
+    }
   });
 
   /* ----------------------------------------------------------------- wiring */
@@ -936,14 +1131,11 @@
   document.addEventListener("keydown", function (event) {
     if (event.key === "F5") {
       event.preventDefault(); // never let F5 reload the shell mid-transaction
-      printAndLock();
+      if ($("login-screen").hidden) printAndLock();
     }
   });
 
-  loadNodeStatus();
-  showPane("billing");
   renderCustomer();
   renderRows();
-  requote();
-  $("mobile-input").focus();
+  bootstrap();
 })();
