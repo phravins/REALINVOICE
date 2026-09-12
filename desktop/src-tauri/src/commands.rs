@@ -77,6 +77,58 @@ fn require_session(state: &State<'_, AppState>) -> Result<Session, String> {
     state.session().ok_or_else(|| "Not signed in.".to_string())
 }
 
+/// What the About pane shows. Every field comes from the running binary, so bumping the
+/// version in one place is reflected here without a second edit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppInfo {
+    pub name: String,
+    pub version: String,
+    pub identifier: String,
+    pub node: String,
+    pub build_date: String,
+    pub db_path: String,
+}
+
+/// App name, version and build date, for the About pane.
+#[tauri::command]
+pub fn app_info(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<AppInfo, String> {
+    require_session(&state)?;
+    let package = app.package_info();
+    Ok(AppInfo {
+        name: package.name.clone(),
+        // Tauri's own idea of the app version — the one that ends up in the bundle.
+        version: package.version.to_string(),
+        identifier: app.config().identifier.clone(),
+        node: NODE_NAME.to_string(),
+        build_date: env!("REALINVOICE_BUILD_DATE").to_string(),
+        db_path: state.db_path().display().to_string(),
+    })
+}
+
+/// The themes the console ships with.
+const THEMES: [&str; 2] = ["light", "dark"];
+
+/// Key under which the chosen theme is stored.
+const THEME_KEY: &str = "ui.theme";
+
+/// The saved theme, or `None` to follow the operating system.
+///
+/// Reachable without a session: the login screen is themed too, and a display preference
+/// exposes nothing.
+#[tauri::command]
+pub fn get_theme(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    state.db().get_setting(THEME_KEY).map_err(|e| e.to_string())
+}
+
+/// Saves the chosen theme so it survives a restart.
+#[tauri::command]
+pub fn set_theme(theme: String, state: State<'_, AppState>) -> Result<(), String> {
+    if !THEMES.contains(&theme.as_str()) {
+        return Err(format!("unknown theme: {theme}"));
+    }
+    state.db().set_setting(THEME_KEY, &theme).map_err(|e| e.to_string())
+}
+
 /// A customer as the New-customer form posts it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewCustomerPayload {

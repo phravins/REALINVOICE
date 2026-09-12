@@ -59,6 +59,34 @@ impl Db {
         &self.home_state
     }
 
+    // ----------------------------------------------------------------- settings
+
+    /// Reads a local preference. `None` when it has never been set.
+    ///
+    /// Machine-local UI state only — no business data lives here, and nothing in this
+    /// table is queued for sync.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| row.get(0))
+            .optional()?)
+    }
+
+    /// Writes a local preference, replacing any previous value.
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<()> {
+        if key.trim().is_empty() {
+            return Err(CoreError::Invalid("setting key is required".into()));
+        }
+        self.conn.execute(
+            "INSERT INTO settings (key, value, updated_at)
+             VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value,
+                                             updated_at = excluded.updated_at",
+            params![key.trim(), value],
+        )?;
+        Ok(())
+    }
+
     // -------------------------------------------------------------------- users
 
     /// Registers a user. The password is hashed here and the plaintext is dropped with
