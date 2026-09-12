@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             customer_id: buyer.id,
             date: None,
             payment_type: "cash".into(),
+            created_by_user_id: None,
             lines: vec![
                 NewInvoiceLine { item_id: cement.id, qty: 10.0, rate: None, tax_rate: None },
                 NewInvoiceLine { item_id: steel.id, qty: 5.0, rate: None, tax_rate: None },

@@ -2,7 +2,8 @@
 //! reopened SQLite file with its lines and its `sync_queue` rows intact.
 
 use realinvoice_core::{
-    seed, CoreError, Db, InvoiceFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewItem,
+    seed, CoreError, Db, InvoiceFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser,
+    Role,
 };
 
 fn seeded_db() -> Db {
@@ -31,6 +32,7 @@ fn an_invoice_can_be_created_end_to_end() {
             customer_id: buyer.id,
             date: Some("2026-09-11".into()),
             payment_type: "cash".into(),
+            created_by_user_id: None,
             lines: vec![
                 NewInvoiceLine { item_id: cement.id, qty: 10.0, rate: None, tax_rate: None },
                 NewInvoiceLine { item_id: steel.id, qty: 5.0, rate: None, tax_rate: None },
@@ -85,6 +87,7 @@ fn sync_queue_picks_up_the_invoice_and_every_line() {
             customer_id: buyer.id,
             date: None,
             payment_type: "upi".into(),
+            created_by_user_id: None,
             lines: vec![
                 NewInvoiceLine { item_id: widget.id, qty: 2.0, rate: None, tax_rate: None },
                 NewInvoiceLine { item_id: widget.id, qty: 3.0, rate: Some(90.0), tax_rate: None },
@@ -124,6 +127,7 @@ fn an_invoice_survives_closing_and_reopening_the_file() {
                 customer_id: buyer.id,
                 date: None,
                 payment_type: "card".into(),
+                created_by_user_id: None,
                 lines: vec![NewInvoiceLine {
                     item_id: pipe.id,
                     qty: 4.0,
@@ -156,6 +160,7 @@ fn adding_a_line_retotals_the_invoice_and_queues_an_update() {
             customer_id: buyer.id,
             date: None,
             payment_type: "cash".into(),
+            created_by_user_id: None,
             lines: vec![NewInvoiceLine { item_id: steel.id, qty: 1.0, rate: None, tax_rate: None }],
         })
         .unwrap();
@@ -192,6 +197,7 @@ fn an_inter_state_customer_is_billed_igst() {
             customer_id: buyer.id,
             date: None,
             payment_type: "credit".into(),
+            created_by_user_id: None,
             lines: vec![NewInvoiceLine {
                 item_id: steel.id,
                 qty: 10.0,
@@ -219,6 +225,7 @@ fn invoice_numbers_run_in_sequence_within_a_financial_year() {
             customer_id: buyer.id,
             date: Some(date.into()),
             payment_type: "cash".into(),
+            created_by_user_id: None,
             lines: vec![NewInvoiceLine { item_id: steel.id, qty: 1.0, rate: None, tax_rate: None }],
         })
         .unwrap()
@@ -258,6 +265,7 @@ fn bad_references_and_quantities_are_rejected() {
         customer_id: 9_999,
         date: None,
         payment_type: "cash".into(),
+        created_by_user_id: None,
         lines: vec![],
     });
     assert!(matches!(missing_customer, Err(CoreError::NotFound(_))));
@@ -266,6 +274,7 @@ fn bad_references_and_quantities_are_rejected() {
         customer_id: buyer.id,
         date: None,
         payment_type: "cash".into(),
+        created_by_user_id: None,
         lines: vec![NewInvoiceLine { item_id: steel.id, qty: 0.0, rate: None, tax_rate: None }],
     });
     assert!(matches!(bad_qty, Err(CoreError::Invalid(_))));
@@ -274,6 +283,7 @@ fn bad_references_and_quantities_are_rejected() {
         customer_id: buyer.id,
         date: Some("11-09-2026".into()),
         payment_type: "cash".into(),
+        created_by_user_id: None,
         lines: vec![],
     });
     assert!(matches!(bad_date, Err(CoreError::Invalid(_))));
@@ -400,6 +410,7 @@ fn the_worked_example_totals_to_one_lakh_twentythree_thousand_nine_hundred() {
             customer_id: buyer.id,
             date: None,
             payment_type: "credit".into(),
+            created_by_user_id: None,
             lines: vec![
                 NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None },
                 NewInvoiceLine { item_id: license.id, qty: 5.0, rate: None, tax_rate: None },
@@ -446,6 +457,7 @@ fn concurrent_saves_never_collide_on_an_invoice_number() {
                 customer_id,
                 date: Some("2026-09-11".into()),
                 payment_type: "cash".into(),
+                created_by_user_id: None,
                 lines: vec![NewInvoiceLine { item_id, qty: 1.0, rate: None, tax_rate: None }],
             })
             .expect("save under contention")
@@ -483,6 +495,7 @@ fn history_fixture(db: &mut Db) -> Vec<realinvoice_core::Invoice> {
             customer_id,
             date: Some(date.into()),
             payment_type: pay.into(),
+            created_by_user_id: None,
             lines,
         })
         .unwrap()
@@ -695,4 +708,191 @@ fn history_respects_a_limit() {
     // Still the newest two, not an arbitrary pair.
     assert_eq!(capped[0].invoice.invoice_no, "RI-2026-0004");
     assert_eq!(capped[1].invoice.invoice_no, "RI-2026-0003");
+}
+
+// ------------------------------------------------------------------ sign-in
+
+#[test]
+fn a_seeded_owner_can_sign_in_with_its_generated_password() {
+    let mut db = Db::open_in_memory().unwrap();
+    assert_eq!(db.count_users().unwrap(), 0);
+
+    let (owner, password) = seed::seed_owner_if_empty(&mut db).unwrap().expect("seeded");
+    assert_eq!(owner.username, "admin");
+    assert_eq!(owner.role, Role::Owner);
+    assert_eq!(owner.display_name, "Store Owner");
+
+    let signed_in = db.verify_login("admin", &password).unwrap().expect("sign-in");
+    assert_eq!(signed_in, owner);
+
+    // Case-insensitive username, exact password.
+    assert!(db.verify_login("ADMIN", &password).unwrap().is_some());
+    assert!(db.verify_login("admin", &password.to_uppercase()).unwrap().is_none());
+}
+
+#[test]
+fn seeding_runs_once_and_never_replaces_an_existing_account() {
+    let mut db = Db::open_in_memory().unwrap();
+    let (_, first_password) = seed::seed_owner_if_empty(&mut db).unwrap().unwrap();
+
+    // Second run finds users and does nothing — a restart must not reset the password.
+    assert!(seed::seed_owner_if_empty(&mut db).unwrap().is_none());
+    assert_eq!(db.count_users().unwrap(), 1);
+    assert!(db.verify_login("admin", &first_password).unwrap().is_some());
+}
+
+#[test]
+fn every_installation_gets_a_different_initial_password() {
+    let mut a = Db::open_in_memory().unwrap();
+    let mut b = Db::open_in_memory().unwrap();
+    let (_, password_a) = seed::seed_owner_if_empty(&mut a).unwrap().unwrap();
+    let (_, password_b) = seed::seed_owner_if_empty(&mut b).unwrap().unwrap();
+
+    assert_ne!(password_a, password_b, "nothing secret is hardcoded in the source");
+    // And one machine's password does not open the other.
+    assert!(a.verify_login("admin", &password_b).unwrap().is_none());
+}
+
+#[test]
+fn a_wrong_password_or_unknown_user_both_return_none() {
+    let mut db = Db::open_in_memory().unwrap();
+    seed::seed_owner_if_empty(&mut db).unwrap();
+
+    assert!(db.verify_login("admin", "not the password").unwrap().is_none());
+    assert!(db.verify_login("nobody", "whatever").unwrap().is_none());
+    assert!(db.verify_login("", "").unwrap().is_none());
+}
+
+#[test]
+fn the_password_is_never_stored_or_returned_in_the_clear() {
+    let mut db = Db::open_in_memory().unwrap();
+    let (owner, password) = seed::seed_owner_if_empty(&mut db).unwrap().unwrap();
+
+    // The User that crosses into the frontend carries no hash and no password.
+    let serialized = serde_json::to_string(&owner).unwrap();
+    assert!(!serialized.contains(&password));
+    assert!(!serialized.contains("password"), "{serialized}");
+
+    // And what is on disk is a bcrypt hash, not the password.
+    let stored: String =
+        db.pending_sync_rows().unwrap().iter().map(|r| r.payload_json.clone()).collect();
+    assert!(!stored.contains(&password), "users must not be queued for sync");
+}
+
+#[test]
+fn a_second_user_can_be_created_and_duplicates_refused() {
+    let mut db = Db::open_in_memory().unwrap();
+    seed::seed_owner_if_empty(&mut db).unwrap();
+
+    let cashier = db
+        .create_user(
+            &NewUser {
+                username: "  Meena  ".into(),
+                display_name: "Meena R".into(),
+                role: Role::Cashier,
+            },
+            "counter-password",
+        )
+        .unwrap();
+    assert_eq!(cashier.username, "meena", "usernames normalise to lowercase");
+    assert_eq!(cashier.role, Role::Cashier);
+    assert!(db.verify_login("MEENA", "counter-password").unwrap().is_some());
+
+    let duplicate = db.create_user(
+        &NewUser {
+            username: "meena".into(),
+            display_name: "Someone Else".into(),
+            role: Role::Cashier,
+        },
+        "another-password",
+    );
+    assert!(matches!(duplicate, Err(CoreError::Invalid(_))));
+
+    let too_short = db.create_user(
+        &NewUser { username: "raj".into(), display_name: "Raj".into(), role: Role::Cashier },
+        "short",
+    );
+    assert!(matches!(too_short, Err(CoreError::Invalid(_))));
+    assert!(db.find_user("raj").unwrap().is_none(), "nothing half-created");
+}
+
+#[test]
+fn an_invoice_records_who_billed_it() {
+    let mut db = seeded_db();
+    let (owner, _) = seed::seed_owner_if_empty(&mut db).unwrap().unwrap();
+    let buyer = customer(&db, "9600011223");
+    let rack = item(&db, "RACK-42U-PRO");
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "upi".into(),
+            created_by_user_id: Some(owner.id),
+            lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+        })
+        .unwrap();
+
+    assert_eq!(invoice.created_by_user_id, Some(owner.id));
+
+    // The history list and the detail view both name the biller.
+    let listed = db.list_invoices(&InvoiceFilter::default()).unwrap();
+    assert_eq!(listed[0].created_by.as_deref(), Some("Store Owner"));
+
+    let detail = db.get_invoice_detail(invoice.id).unwrap().unwrap();
+    assert_eq!(detail.created_by.unwrap().display_name, "Store Owner");
+
+    // It survives a reopen, and the queued payload carries it for the sync worker.
+    let queued = &db.pending_sync_rows_for("invoices").unwrap()[0];
+    let payload: serde_json::Value = serde_json::from_str(&queued.payload_json).unwrap();
+    assert_eq!(payload["created_by_user_id"], owner.id);
+}
+
+#[test]
+fn an_unattributed_invoice_is_still_valid() {
+    // Invoices raised before sign-in existed have nobody to attribute them to.
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9600011223");
+    let rack = item(&db, "RACK-42U-PRO");
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+        })
+        .unwrap();
+
+    assert_eq!(invoice.created_by_user_id, None);
+    assert_eq!(db.list_invoices(&InvoiceFilter::default()).unwrap()[0].created_by, None);
+    assert!(db.get_invoice_detail(invoice.id).unwrap().unwrap().created_by.is_none());
+}
+
+#[test]
+fn payment_type_is_stored_as_chosen() {
+    let mut db = seeded_db();
+    let (owner, _) = seed::seed_owner_if_empty(&mut db).unwrap().unwrap();
+    let buyer = customer(&db, "9600011223");
+    let rack = item(&db, "RACK-42U-PRO");
+
+    for chosen in ["upi", "cash", "card"] {
+        let invoice = db
+            .create_invoice(&NewInvoice {
+                customer_id: buyer.id,
+                date: None,
+                payment_type: chosen.into(),
+                created_by_user_id: Some(owner.id),
+                lines: vec![NewInvoiceLine {
+                    item_id: rack.id,
+                    qty: 1.0,
+                    rate: None,
+                    tax_rate: None,
+                }],
+            })
+            .unwrap();
+        assert_eq!(invoice.payment_type, chosen);
+        assert_eq!(db.get_invoice(invoice.id).unwrap().unwrap().payment_type, chosen);
+    }
 }

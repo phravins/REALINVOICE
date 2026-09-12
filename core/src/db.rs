@@ -12,6 +12,7 @@ use chrono::{Local, NaiveDate};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 use serde::Serialize;
 
+use crate::auth;
 use crate::error::{CoreError, Result};
 use crate::gst::{self, TaxableLine, DEFAULT_HOME_STATE};
 use crate::models::*;
@@ -56,6 +57,113 @@ impl Db {
 
     pub fn home_state(&self) -> &str {
         &self.home_state
+    }
+
+    // -------------------------------------------------------------------- users
+
+    /// Registers a user. The password is hashed here and the plaintext is dropped with
+    /// this call — nothing stores or returns it.
+    ///
+    /// No `sync_queue` row is written. Every other write queues, but replicating password
+    /// hashes off this machine is a decision for whoever builds the sync worker; starting
+    /// to do it by default would make that choice silently.
+    pub fn create_user(&mut self, new: &NewUser, password: &str) -> Result<User> {
+        let username = new.username.trim().to_lowercase();
+        if username.is_empty() {
+            return Err(CoreError::Invalid("username is required".into()));
+        }
+        if new.display_name.trim().is_empty() {
+            return Err(CoreError::Invalid("display_name is required".into()));
+        }
+        if self.find_user(&username)?.is_some() {
+            return Err(CoreError::Invalid(format!("user {username} already exists")));
+        }
+
+        let password_hash = auth::hash_password(password)?;
+        self.conn.execute(
+            "INSERT INTO users (username, password_hash, display_name, role)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![username, password_hash, new.display_name.trim(), new.role.as_str()],
+        )?;
+
+        self.get_user(self.conn.last_insert_rowid())?
+            .ok_or_else(|| CoreError::NotFound("user just created".into()))
+    }
+
+    /// Checks a sign-in. `None` for both an unknown username and a wrong password — the
+    /// caller cannot tell which, so the screen cannot leak which usernames exist.
+    ///
+    /// The hash is always verified, even when no such user exists, so the call takes the
+    /// same time either way and cannot be used to enumerate accounts.
+    pub fn verify_login(&self, username: &str, password: &str) -> Result<Option<User>> {
+        let username = username.trim().to_lowercase();
+        let found: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT id, password_hash FROM users WHERE username = ?1",
+                [&username],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        match found {
+            Some((id, password_hash)) => {
+                if auth::verify_password(password, &password_hash) {
+                    self.get_user(id)
+                } else {
+                    Ok(None)
+                }
+            }
+            None => {
+                // A dummy verify against a real hash, so a missing user costs the same
+                // time as a wrong password.
+                auth::verify_password(password, DUMMY_HASH);
+                Ok(None)
+            }
+        }
+    }
+
+    pub fn get_user(&self, id: i64) -> Result<Option<User>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, username, display_name, role, created_at FROM users WHERE id = ?1",
+                [id],
+                user_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Looks a user up by username, case-insensitively. No password check.
+    pub fn find_user(&self, username: &str) -> Result<Option<User>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, username, display_name, role, created_at
+                   FROM users WHERE username = ?1",
+                [username.trim().to_lowercase()],
+                user_from_row,
+            )
+            .optional()?)
+    }
+
+    /// How many accounts exist. Used to decide whether first-run seeding is needed.
+    pub fn count_users(&self) -> Result<i64> {
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?)
+    }
+
+    /// Replaces a user's password. No reset flow exists yet; this is the primitive one
+    /// will be built on.
+    pub fn set_password(&mut self, user_id: i64, password: &str) -> Result<()> {
+        let password_hash = auth::hash_password(password)?;
+        let changed = self.conn.execute(
+            "UPDATE users SET password_hash = ?1 WHERE id = ?2",
+            params![password_hash, user_id],
+        )?;
+        if changed == 0 {
+            return Err(CoreError::NotFound(format!("user {user_id}")));
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------- customers
@@ -297,8 +405,8 @@ impl Db {
         tx.execute(
             "INSERT INTO invoices
                  (invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
-                  grand_total, payment_type, sync_status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10)",
+                  grand_total, payment_type, sync_status, created_at, created_by_user_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?11)",
             params![
                 invoice_no,
                 date.to_string(),
@@ -310,6 +418,7 @@ impl Db {
                 totals.grand_total,
                 new.payment_type,
                 created_at,
+                new.created_by_user_id,
             ],
         )?;
         let invoice_id = tx.last_insert_rowid();
@@ -331,6 +440,7 @@ impl Db {
             payment_type: new.payment_type.clone(),
             sync_status: "pending".to_string(),
             created_at,
+            created_by_user_id: new.created_by_user_id,
         };
         enqueue(&tx, "invoices", invoice.id, SyncOp::Insert, &invoice)?;
         tx.commit()?;
@@ -405,7 +515,7 @@ impl Db {
     pub fn list_invoices_for_date(&self, date: NaiveDate) -> Result<Vec<Invoice>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
-                    grand_total, payment_type, sync_status, created_at
+                    grand_total, payment_type, sync_status, created_at, created_by_user_id
                FROM invoices
               WHERE date = ?1
               ORDER BY id DESC",
@@ -430,10 +540,12 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT i.id, i.invoice_no, i.date, i.customer_id, i.subtotal, i.cgst, i.sgst,
                     i.igst, i.grand_total, i.payment_type, i.sync_status, i.created_at,
-                    c.name, c.mobile,
-                    (SELECT COUNT(*) FROM invoice_lines l WHERE l.invoice_id = i.id)
+                    i.created_by_user_id, c.name, c.mobile,
+                    (SELECT COUNT(*) FROM invoice_lines l WHERE l.invoice_id = i.id),
+                    u.display_name
                FROM invoices i
                JOIN customers c ON c.id = i.customer_id
+               LEFT JOIN users u ON u.id = i.created_by_user_id
               WHERE (:from IS NULL OR i.date >= :from)
                 AND (:to   IS NULL OR i.date <= :to)
                 AND (:pattern IS NULL
@@ -453,9 +565,10 @@ impl Db {
             |row| {
                 Ok(InvoiceSummary {
                     invoice: invoice_from_row(row)?,
-                    customer_name: row.get(12)?,
-                    customer_mobile: row.get(13)?,
-                    line_count: row.get(14)?,
+                    customer_name: row.get(13)?,
+                    customer_mobile: row.get(14)?,
+                    line_count: row.get(15)?,
+                    created_by: row.get(16)?,
                 })
             },
         )?;
@@ -489,10 +602,16 @@ impl Db {
             })
         })?;
 
+        let created_by = match invoice.created_by_user_id {
+            Some(user_id) => self.get_user(user_id)?,
+            None => None,
+        };
+
         Ok(Some(InvoiceDetail {
             invoice,
             customer,
             lines: rows.collect::<rusqlite::Result<Vec<_>>>()?,
+            created_by,
         }))
     }
 
@@ -501,7 +620,8 @@ impl Db {
             .conn
             .query_row(
                 "SELECT id, invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
-                        grand_total, payment_type, sync_status, created_at
+                        grand_total, payment_type, sync_status, created_at,
+                        created_by_user_id
                    FROM invoices WHERE id = ?1",
                 [id],
                 invoice_from_row,
@@ -621,6 +741,21 @@ fn enqueue<T: Serialize>(
     Ok(())
 }
 
+/// A real bcrypt hash of a value nobody knows, verified against when no such user
+/// exists so that a missing username costs the same time as a wrong password.
+const DUMMY_HASH: &str = "$2b$12$C6UzMDM.H6dfI/f/IKcEeODuLPFbCMovVlIVoiUCnLPRTOBzHfyOq";
+
+fn user_from_row(row: &Row<'_>) -> rusqlite::Result<User> {
+    let role: String = row.get(3)?;
+    Ok(User {
+        id: row.get(0)?,
+        username: row.get(1)?,
+        display_name: row.get(2)?,
+        role: Role::parse(&role).unwrap_or(Role::Cashier),
+        created_at: row.get(4)?,
+    })
+}
+
 fn customer_from_row(row: &Row<'_>) -> rusqlite::Result<Customer> {
     Ok(Customer {
         id: row.get(0)?,
@@ -656,6 +791,7 @@ fn invoice_from_row(row: &Row<'_>) -> rusqlite::Result<Invoice> {
         payment_type: row.get(9)?,
         sync_status: row.get(10)?,
         created_at: row.get(11)?,
+        created_by_user_id: row.get(12)?,
     })
 }
 

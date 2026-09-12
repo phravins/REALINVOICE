@@ -7,10 +7,36 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <!-- The gate. Nothing behind it is rendered, and every command behind it refuses
+         to answer without a session, so hiding the shell is not the only protection. -->
+    <div class="login" id="login-screen">
+      <form class="login-card" id="login-form" autocomplete="off">
+        <h1>REALINVOICE</h1>
+        <p class="login-node" id="login-node">Office Console</p>
+
+        <label class="login-field">Username
+          <input id="login-user" type="text" autocomplete="username" autocapitalize="off"
+                 spellcheck="false" required />
+        </label>
+        <label class="login-field">Password
+          <input id="login-pass" type="password" autocomplete="current-password" required />
+        </label>
+
+        <button type="submit" class="btn btn--lock login-submit" id="login-submit">Sign In</button>
+        <p class="login-msg" id="login-msg" aria-live="polite"></p>
+
+        <!-- Shown once, on a first run, for an app launched without a terminal to read. -->
+        <div class="login-firstrun" id="login-firstrun" hidden></div>
+      </form>
+    </div>
+
+    <div class="shell" id="shell" hidden>
     <header class="titlebar">
       <span class="brand">REALINVOICE DESKTOP</span>
       <span class="node" id="node-label">[Node: POS-01]</span>
+      <span class="who" id="who"></span>
       <span class="badge badge--connected" id="conn-badge">[Connected]</span>
+      <button class="signout" id="signout">Sign Out</button>
     </header>
 
     <nav class="tabs" id="tabs" role="tablist">
@@ -95,14 +121,21 @@
 
           <div class="summary">
             <div class="summary-left">
-              <label class="pay">Payment
-                <select id="payment-type">
-                  <option value="cash">Cash</option>
-                  <option value="upi">UPI</option>
-                  <option value="card">Card</option>
-                  <option value="credit">Credit</option>
-                </select>
-              </label>
+              <div class="pay" role="radiogroup" aria-label="Payment type">
+                <span class="pay-label">Payment</span>
+                <label class="pay-opt"><input type="radio" name="payment" value="upi" /><span>UPI</span></label>
+                <label class="pay-opt"><input type="radio" name="payment" value="cash" checked /><span>Cash</span></label>
+                <label class="pay-opt"><input type="radio" name="payment" value="card" /><span>Card</span></label>
+              </div>
+
+              <!-- Placeholder until QR generation lands with the payments stage. -->
+              <div class="upi-box" id="upi-box" hidden>
+                <div class="upi-qr" aria-hidden="true">
+                  <span>QR</span>
+                </div>
+                <p>Scan screen code to pay via UPI<br /><small>Live QR codes come in a later stage.</small></p>
+              </div>
+
               <span class="gst-mode" id="gst-mode"></span>
             </div>
             <!-- Filled by renderTotals(), the same function the history detail uses. -->
@@ -224,7 +257,14 @@
       <div class="sheet" id="print-sheet"></div>
     </div>
 
+    <footer class="shortcuts" id="shortcuts">
+      <span><kbd>F2</kbd> Search Item</span><i>│</i>
+      <span><kbd>F5</kbd> Save &amp; Print</span><i>│</i>
+      <span id="sc-f9"><kbd>F9</kbd> Replicator Settings</span><i>│</i>
+      <span><kbd>Esc</kbd> Clear Transaction</span>
+    </footer>
     <footer class="statusbar"><span id="status-line">Ready.</span></footer>
+    </div>
 
     <script src="app.js"></script>
   </body>

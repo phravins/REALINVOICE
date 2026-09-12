@@ -9,7 +9,10 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// Ordered list of `(name, sql)`. Append only — never edit an applied migration.
-const MIGRATIONS: &[(&str, &str)] = &[("001_init", include_str!("../migrations/001_init.sql"))];
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("001_init", include_str!("../migrations/001_init.sql")),
+    ("002_users", include_str!("../migrations/002_users.sql")),
+];
 
 /// Applies every migration that hasn't run yet against `conn`.
 pub fn run_migrations(conn: &mut Connection) -> Result<()> {
@@ -54,7 +57,7 @@ mod tests {
         run_migrations(&mut conn).unwrap();
         run_migrations(&mut conn).unwrap();
 
-        for table in ["customers", "items", "invoices", "invoice_lines", "sync_queue"] {
+        for table in ["customers", "items", "invoices", "invoice_lines", "sync_queue", "users"] {
             let found: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",

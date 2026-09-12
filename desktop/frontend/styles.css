@@ -845,3 +845,278 @@ code {
   .print-overlay { position: static; background: #fff; }
   .sheet { margin: 0; padding: 0; max-width: none; }
 }
+
+/* ------------------------------------------------------------------- shell */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.who {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.who::before {
+  content: "· ";
+  color: var(--line);
+}
+
+.signout {
+  margin-left: 12px;
+  padding: 3px 11px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.signout:hover { border-color: var(--err); color: var(--err); }
+
+/* The badge no longer pushes right on its own — the user block sits between. */
+.titlebar .badge { margin-left: auto; }
+
+/* ------------------------------------------------------------------- login */
+
+.login {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 24px;
+  background:
+    radial-gradient(1100px 520px at 50% -10%, #1b2838 0%, transparent 70%),
+    var(--bg);
+}
+
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  padding: 30px 30px 26px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.login-card h1 {
+  margin: 0;
+  color: var(--accent);
+  font-size: 21px;
+  letter-spacing: 0.16em;
+  text-align: center;
+}
+
+.login-node {
+  margin: 6px 0 24px;
+  color: var(--ink-dim);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  text-align: center;
+}
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 14px;
+  color: var(--ink-dim);
+  font-size: 12px;
+}
+
+.login-field input {
+  padding: 9px 11px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  font: inherit;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.login-field input:focus { outline: none; border-color: var(--accent); }
+
+.login-submit {
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px;
+}
+
+.login-msg {
+  min-height: 18px;
+  margin: 12px 0 0;
+  font-size: 13px;
+  text-align: center;
+}
+
+.login-msg.error { color: var(--err); }
+
+.login-firstrun {
+  margin-top: 18px;
+  padding: 12px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  font-size: 12.5px;
+}
+
+.login-firstrun strong { color: var(--accent); }
+.login-firstrun p { margin: 5px 0 10px; color: var(--ink-dim); }
+
+.login-firstrun dl {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 3px 10px;
+  margin: 0;
+}
+
+.login-firstrun dt { color: var(--ink-dim); }
+
+.login-firstrun dd {
+  margin: 0;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: var(--ink);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* ------------------------------------------------------------ payment type */
+
+.pay {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.pay-label {
+  margin-right: 2px;
+  color: var(--ink-dim);
+  font-size: 13px;
+}
+
+.pay-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 13px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.pay-opt input { accent-color: var(--accent); margin: 0; }
+
+.pay-opt:has(input:checked) {
+  border-color: var(--accent);
+  color: var(--ink);
+  background: var(--panel-2);
+}
+
+.pay-opt:has(input:disabled) { opacity: 0.55; cursor: default; }
+
+.upi-box {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 340px;
+  margin-top: 4px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px dashed var(--accent);
+  border-radius: 5px;
+  color: var(--ink-dim);
+  font-size: 12.5px;
+}
+
+.upi-box p { margin: 0; }
+.upi-box small { color: var(--line); }
+
+.upi-qr {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 58px;
+  height: 58px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  /* A placeholder grid, not a scannable code. */
+  background-image:
+    linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%),
+    linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%);
+  background-size: 14px 14px;
+  background-position: 0 0, 7px 7px;
+  color: var(--ink-dim);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+}
+
+.upi-qr span {
+  padding: 1px 4px;
+  background: var(--panel-2);
+}
+
+/* --------------------------------------------------------------- shortcuts */
+
+.shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  background: var(--panel-2);
+  border-top: 1px solid var(--line);
+  color: var(--ink-dim);
+  font-size: 12px;
+}
+
+.shortcuts i { color: var(--line); font-style: normal; }
+
+.shortcuts kbd {
+  padding: 1px 6px;
+  margin-right: 5px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  color: var(--accent);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+}
+
+/* ------------------------------------------------------------------ polish */
+
+/* Numeric columns line up on the decimal point now that real figures flow through:
+   one tabular font, one width, no drift between the table and the summary. */
+.items .mono,
+.items .qty-input,
+.tot-row dd,
+.hist-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.items td { padding: 8px 10px; }
+.items th { padding: 9px 10px 7px; }
+
+/* The row under the cursor, so a finger on a trackball does not lose its place. */
+.items tbody tr:hover td { background: rgba(255, 255, 255, 0.02); }
+
+.summary { align-items: flex-start; }
+.summary-left { gap: 12px; }
+
+.totals { min-width: 320px; }
+.tot-row { padding: 4px 0; }
+
+/* Give the grand total room to breathe against the tax lines above it. */
+.tot-row--grand { margin-top: 8px; padding-top: 10px; }
+
+.card { padding: 18px; }
+.card-head { gap: 14px; }

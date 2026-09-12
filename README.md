@@ -35,6 +35,7 @@ realinvoice/
 | 3 | Office Console — Print & Lock saves, locks and resets | done |
 | 3 | Logistics Desk (Ratatui TUI) | not started |
 | 4 | Office Console — invoice history, detail view, reprint | done |
+| 5 | Office Console — sign-in, payment type, shortcuts, polish | done |
 | — | Sync worker that drains `sync_queue` | not started |
 
 ## Build
@@ -50,4 +51,5 @@ The desktop app needs the usual Tauri v2 Linux dependencies (`libwebkit2gtk-4.1-
 [docs/office-console-stage-1.md](docs/office-console-stage-1.md) and
 [docs/office-console-stage-2.md](docs/office-console-stage-2.md),
 [docs/office-console-stage-3.md](docs/office-console-stage-3.md),
-[docs/office-console-stage-4.md](docs/office-console-stage-4.md).
+[docs/office-console-stage-4.md](docs/office-console-stage-4.md),
+[docs/office-console-stage-5.md](docs/office-console-stage-5.md).

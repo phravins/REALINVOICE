@@ -5,12 +5,14 @@
 //! What they prove: the console opens its own database file, seeds itself, and a frontend
 //! payload survives the trip into core unchanged.
 
-use realinvoice_core::{seed, InvoiceFilter, NewCustomer, NewInvoice, NewInvoiceLine};
+use realinvoice_core::{
+    seed, InvoiceFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewUser, Role,
+};
 use realinvoice_desktop_lib::commands::{
-    check_expected_totals_for_test as check_expected_totals, quote_invoice, ExpectedTotals,
+    check_expected_totals_for_test as check_expected_totals, quote, ExpectedTotals,
     NewCustomerPayload, NewInvoicePayload, NewLinePayload, QuoteLinePayload,
 };
-use realinvoice_desktop_lib::state::{AppState, DB_FILE_NAME};
+use realinvoice_desktop_lib::state::{AppState, Session, DB_FILE_NAME};
 
 fn console_state() -> (tempfile::TempDir, AppState) {
     let dir = tempfile::tempdir().unwrap();
@@ -46,6 +48,7 @@ fn reopening_the_same_path_keeps_the_data_and_does_not_reseed() {
                 customer_id: buyer.id,
                 date: None,
                 payment_type: "cash".into(),
+                created_by_user_id: None,
                 lines: vec![NewInvoiceLine {
                     item_id: item.id,
                     qty: 2.0,
@@ -127,9 +130,9 @@ fn a_payload_posted_through_the_console_produces_a_real_invoice() {
 /// a 42U rack and five enterprise licences to an intra-state Tamil Nadu buyer.
 #[test]
 fn the_summary_panel_quote_matches_the_worked_example() {
-    let quote = quote_invoice(
-        "TN".into(),
-        vec![
+    let quote = quote(
+        "TN",
+        &[
             QuoteLinePayload { qty: 1.0, rate: 45_000.0, tax_rate: 18.0 },
             QuoteLinePayload { qty: 5.0, rate: 12_000.0, tax_rate: 18.0 },
         ],
@@ -147,9 +150,9 @@ fn the_summary_panel_quote_matches_the_worked_example() {
 
 #[test]
 fn the_same_rows_billed_out_of_state_move_to_igst() {
-    let quote = quote_invoice(
-        "KA".into(),
-        vec![
+    let quote = quote(
+        "KA",
+        &[
             QuoteLinePayload { qty: 1.0, rate: 45_000.0, tax_rate: 18.0 },
             QuoteLinePayload { qty: 5.0, rate: 12_000.0, tax_rate: 18.0 },
         ],
@@ -165,19 +168,16 @@ fn the_same_rows_billed_out_of_state_move_to_igst() {
 #[test]
 fn removing_a_row_reprices_the_rest() {
     // Both rows, then the licence row alone — what the panel shows after a delete.
-    let both = quote_invoice(
-        "TN".into(),
-        vec![
+    let both = quote(
+        "TN",
+        &[
             QuoteLinePayload { qty: 1.0, rate: 45_000.0, tax_rate: 18.0 },
             QuoteLinePayload { qty: 5.0, rate: 12_000.0, tax_rate: 18.0 },
         ],
     );
     assert_eq!(both.grand_total, 123_900.00);
 
-    let one = quote_invoice(
-        "TN".into(),
-        vec![QuoteLinePayload { qty: 5.0, rate: 12_000.0, tax_rate: 18.0 }],
-    );
+    let one = quote("TN", &[QuoteLinePayload { qty: 5.0, rate: 12_000.0, tax_rate: 18.0 }]);
     assert_eq!(one.line_totals, vec![60_000.00]);
     assert_eq!(one.subtotal, 60_000.00);
     assert_eq!(one.cgst, 5_400.00);
@@ -187,15 +187,12 @@ fn removing_a_row_reprices_the_rest() {
 
 #[test]
 fn an_empty_or_half_typed_table_quotes_to_zero() {
-    let empty = quote_invoice("TN".into(), vec![]);
+    let empty = quote("TN", &[]);
     assert_eq!(empty.line_totals, Vec::<f64>::new());
     assert_eq!(empty.grand_total, 0.0);
 
     // A cleared qty box prices as zero rather than erroring the panel out.
-    let blank_qty = quote_invoice(
-        "TN".into(),
-        vec![QuoteLinePayload { qty: 0.0, rate: 45_000.0, tax_rate: 18.0 }],
-    );
+    let blank_qty = quote("TN", &[QuoteLinePayload { qty: 0.0, rate: 45_000.0, tax_rate: 18.0 }]);
     assert_eq!(blank_qty.line_totals, vec![0.0]);
     assert_eq!(blank_qty.grand_total, 0.0);
 }
@@ -280,18 +277,16 @@ fn the_logged_print_and_lock_payload_is_ready_for_create_invoice() {
 
     // And it prices to the figures the panel displayed when it was logged.
     let (_dir, state) = console_state();
-    let quote = quote_invoice(
-        "TN".into(),
-        new_invoice
-            .lines
-            .iter()
-            .map(|l| QuoteLinePayload {
-                qty: l.qty,
-                rate: l.rate.unwrap(),
-                tax_rate: l.tax_rate.unwrap(),
-            })
-            .collect(),
-    );
+    let priced: Vec<QuoteLinePayload> = new_invoice
+        .lines
+        .iter()
+        .map(|l| QuoteLinePayload {
+            qty: l.qty,
+            rate: l.rate.unwrap(),
+            tax_rate: l.tax_rate.unwrap(),
+        })
+        .collect();
+    let quote = quote("TN", &priced);
     assert_eq!(quote.subtotal, 105_000.00);
     assert_eq!(quote.grand_total, 123_900.00);
 
@@ -381,6 +376,7 @@ fn a_second_invoice_takes_the_next_number() {
             customer_id: buyer.id,
             date: None,
             payment_type: "upi".into(),
+            created_by_user_id: None,
             lines: vec![NewInvoiceLine {
                 item_id: cement.id,
                 qty: 20.0,
@@ -417,6 +413,7 @@ fn a_rejected_save_writes_nothing() {
         customer_id: buyer.id,
         date: None,
         payment_type: "cash".into(),
+        created_by_user_id: None,
         lines: vec![NewInvoiceLine { item_id: 9_999, qty: 1.0, rate: None, tax_rate: None }],
     });
     assert!(rejected.is_err());
@@ -483,6 +480,7 @@ fn rows_without_explicit_prices_skip_the_guard() {
         customer_id: 1,
         date: None,
         payment_type: "cash".into(),
+        created_by_user_id: None,
         lines: vec![NewInvoiceLine { item_id: cement.id, qty: 1.0, rate: None, tax_rate: None }],
     };
 
@@ -502,6 +500,7 @@ fn billed_history(state: &AppState) -> Vec<realinvoice_core::Invoice> {
         customer_id: kaveri,
         date: None,
         payment_type: "upi".into(),
+        created_by_user_id: None,
         lines: vec![NewInvoiceLine { item_id: cement.id, qty: 20.0, rate: None, tax_rate: None }],
     };
     let second = state.db().create_invoice(&second).unwrap();
@@ -512,6 +511,7 @@ fn billed_history(state: &AppState) -> Vec<realinvoice_core::Invoice> {
         customer_id: deccan,
         date: None,
         payment_type: "credit".into(),
+        created_by_user_id: None,
         lines: vec![NewInvoiceLine { item_id: license.id, qty: 2.0, rate: None, tax_rate: None }],
     };
     let third = state.db().create_invoice(&third).unwrap();
@@ -522,6 +522,7 @@ fn billed_history(state: &AppState) -> Vec<realinvoice_core::Invoice> {
         customer_id: kaveri,
         date: Some("2026-08-20".into()),
         payment_type: "cash".into(),
+        created_by_user_id: None,
         lines: vec![NewInvoiceLine { item_id: pipe.id, qty: 4.0, rate: None, tax_rate: None }],
     };
     let older = state.db().create_invoice(&older).unwrap();
@@ -660,4 +661,132 @@ fn searching_history_by_customer_or_number_narrows_the_list() {
         .unwrap();
     assert_eq!(by_number.len(), 1);
     assert_eq!(by_number[0].customer_name, "Kaveri Hardware");
+}
+
+// ------------------------------------------------------------------ sign-in
+
+#[test]
+fn a_first_run_seeds_an_owner_and_hands_back_its_password_once() {
+    let (_dir, state) = console_state();
+
+    let password = state.first_run_password().expect("first run seeds an account");
+    assert!(password.len() >= 8);
+
+    let owner = state.db().verify_login("admin", &password).unwrap().expect("sign-in works");
+    assert_eq!(owner.role, Role::Owner);
+
+    // Signing in consumes the bootstrap credential: it is never shown again.
+    state.begin_session(Session { token: "t".into(), user: owner });
+    assert!(state.first_run_password().is_none());
+}
+
+#[test]
+fn a_restart_does_not_reseed_or_reset_the_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(DB_FILE_NAME);
+
+    let first = AppState::new(path.clone()).unwrap();
+    let password = first.first_run_password().unwrap();
+    drop(first);
+
+    let restarted = AppState::new(path).unwrap();
+    assert!(restarted.first_run_password().is_none(), "only a first run seeds");
+    assert!(restarted.db().verify_login("admin", &password).unwrap().is_some());
+    assert_eq!(restarted.db().count_users().unwrap(), 1);
+}
+
+#[test]
+fn a_session_starts_empty_and_clears_on_sign_out() {
+    let (_dir, state) = console_state();
+    assert!(state.session().is_none(), "nothing is reachable before sign-in");
+
+    let password = state.first_run_password().unwrap();
+    let owner = state.db().verify_login("admin", &password).unwrap().unwrap();
+    state.begin_session(Session { token: "token-1".into(), user: owner.clone() });
+
+    let live = state.session().expect("signed in");
+    assert_eq!(live.user.id, owner.id);
+    assert_eq!(live.token, "token-1");
+
+    state.end_session();
+    assert!(state.session().is_none(), "sign-out leaves nothing behind");
+}
+
+#[test]
+fn an_invoice_is_attributed_to_whoever_is_signed_in() {
+    let (_dir, state) = console_state();
+    let password = state.first_run_password().unwrap();
+    let owner = state.db().verify_login("admin", &password).unwrap().unwrap();
+
+    let cashier = state
+        .db()
+        .create_user(
+            &NewUser {
+                username: "meena".into(),
+                display_name: "Meena R".into(),
+                role: Role::Cashier,
+            },
+            "counter-password",
+        )
+        .unwrap();
+
+    // Two invoices, billed by two different people.
+    let mut example = worked_example(&state);
+    example.created_by_user_id = Some(owner.id);
+    let by_owner = state.db().create_invoice(&example).unwrap();
+
+    let mut second = worked_example(&state);
+    second.created_by_user_id = Some(cashier.id);
+    let by_cashier = state.db().create_invoice(&second).unwrap();
+
+    assert_eq!(by_owner.created_by_user_id, Some(owner.id));
+    assert_eq!(by_cashier.created_by_user_id, Some(cashier.id));
+
+    // The history list names each biller.
+    let listed = state.db().list_invoices(&InvoiceFilter::default()).unwrap();
+    let named: Vec<Option<&str>> = listed.iter().map(|s| s.created_by.as_deref()).collect();
+    assert!(named.contains(&Some("Store Owner")));
+    assert!(named.contains(&Some("Meena R")));
+}
+
+/// The payload type carries no attribution field at all, so a caller cannot bill as
+/// somebody else — `create_invoice` fills it from the session.
+#[test]
+fn attribution_cannot_be_supplied_by_the_caller() {
+    let json = r#"{
+        "customer_id": 1,
+        "payment_type": "upi",
+        "created_by_user_id": 99,
+        "lines": []
+    }"#;
+
+    let payload: NewInvoicePayload = serde_json::from_str(json).unwrap();
+    let new_invoice = NewInvoice::from(payload);
+    assert_eq!(new_invoice.created_by_user_id, None, "the smuggled id is dropped");
+}
+
+#[test]
+fn each_payment_type_is_saved_as_selected() {
+    let (_dir, state) = console_state();
+    let password = state.first_run_password().unwrap();
+    let owner = state.db().verify_login("admin", &password).unwrap().unwrap();
+
+    for chosen in ["upi", "cash", "card"] {
+        let json = format!(r#"{{ "customer_id": 1, "payment_type": "{chosen}", "lines": [] }}"#);
+        let payload: NewInvoicePayload = serde_json::from_str(&json).unwrap();
+
+        let mut new_invoice = NewInvoice::from(payload);
+        new_invoice.created_by_user_id = Some(owner.id);
+        new_invoice.customer_id = state.db().search_customer("9600011223").unwrap().unwrap().id;
+        let rack = state.db().search_item("RACK-42U-PRO").unwrap().remove(0);
+        new_invoice.lines =
+            vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }];
+
+        let saved = state.db().create_invoice(&new_invoice).unwrap();
+        assert_eq!(saved.payment_type, chosen);
+
+        let stored = state.db().get_invoice(saved.id).unwrap().unwrap();
+        assert_eq!(stored.payment_type, chosen);
+        assert_eq!(stored.created_by_user_id, Some(owner.id));
+    }
 }
