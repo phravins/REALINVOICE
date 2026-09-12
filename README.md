@@ -38,6 +38,7 @@ realinvoice/
 | 5 | Office Console — sign-in, payment type, shortcuts | done |
 | 6 | Office Console — layout system and UI pass | done |
 | 7 | Office Console — design tokens, light/dark themes, branding, About | done |
+| 8 | Office Console — flat shell, sidebar, unboxed surfaces | done |
 | — | Sync worker that drains `sync_queue` | not started |
 
 ## Build
@@ -56,4 +57,5 @@ The desktop app needs the usual Tauri v2 Linux dependencies (`libwebkit2gtk-4.1-
 [docs/office-console-stage-4.md](docs/office-console-stage-4.md),
 [docs/office-console-stage-5.md](docs/office-console-stage-5.md),
 [docs/office-console-stage-6-ui.md](docs/office-console-stage-6-ui.md),
-[docs/office-console-stage-7-design.md](docs/office-console-stage-7-design.md).
+[docs/office-console-stage-7-design.md](docs/office-console-stage-7-design.md),
+[docs/office-console-stage-8-flat-ui.md](docs/office-console-stage-8-flat-ui.md).
