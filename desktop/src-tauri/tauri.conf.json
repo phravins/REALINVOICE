@@ -14,8 +14,8 @@
         "title": "REALINVOICE DESKTOP [Node: POS-01]",
         "width": 1180,
         "height": 760,
-        "minWidth": 900,
-        "minHeight": 600,
+        "minWidth": 760,
+        "minHeight": 520,
         "resizable": true
       }
     ],

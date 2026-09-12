@@ -1,187 +1,114 @@
-/* Office Console shell.
-   Dense, high-contrast and system-font only: these machines are low-spec SME billing
-   PCs, so there are no webfonts, no images and no framework to download. */
+/*
+ * RealInvoice Office Console — stylesheet.
+ *
+ * One file, one system. Everything below is built from the tokens in :root — no view
+ * invents its own spacing, colour, control height or radius. If a value here is not a
+ * token, it is because it is genuinely one-off (a QR placeholder grid, a print sheet's
+ * paper white) and it is commented as such.
+ *
+ * Layout is flexbox throughout, plus grid for the few two-dimensional forms. There is no
+ * absolute positioning outside the two overlays that genuinely sit above the page.
+ *
+ *   1. Tokens
+ *   2. Base
+ *   3. Shell layout
+ *   4. Controls
+ *   5. Cards
+ *   6. Tables
+ *   7. Billing view
+ *   8. History view
+ *   9. Login view
+ *  10. Printable sheet
+ *  11. Narrow windows
+ */
+
+/* ====================================================================== 1. Tokens */
 
 :root {
+  /* Spacing scale. Nothing in this file uses a spacing value off this ladder. */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+
+  /* Surfaces, from furthest back to nearest front. */
   --bg: #0f1621;
   --panel: #16202e;
   --panel-2: #1d2938;
   --line: #2a3746;
+  --line-soft: #223040;
+
+  /* Ink. */
   --ink: #e8eef6;
   --ink-dim: #93a3b8;
+  --ink-faint: #5d6c7e;
+
+  /* Accents. */
   --accent: #e9a83d;
+  --accent-ink: #17202c; /* text on an accent fill */
   --ok: #43c06a;
   --err: #e5645f;
+
+  /* Radii. */
+  --r-sm: 4px;
+  --r-md: 6px;
+
+  /* One control height for every input, select and button in the app. */
+  --control-h: 34px;
+
+  /* Chrome band heights, so the content area can be sized off them exactly. */
+  --titlebar-h: 44px;
+  --tabs-h: 38px;
+
+  --font-ui: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+
+  /* The widest a reading column gets before it stops growing. */
+  --content-max: 1120px;
 }
+
+/* ======================================================================== 2. Base */
 
 * { box-sizing: border-box; }
 
+/* Beats any author `display` further down, so toggling `hidden` always works. */
 [hidden] { display: none !important; }
 
-html, body {
+html,
+body {
   height: 100%;
   margin: 0;
+  overflow: hidden; /* the content pane scrolls, never the window */
 }
 
 body {
-  display: flex;
-  flex-direction: column;
   background: var(--bg);
   color: var(--ink);
-  font: 14px/1.45 "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font: 14px/1.45 var(--font-ui);
   -webkit-user-select: none;
   user-select: none;
 }
 
-/* ------------------------------------------------------------------ titlebar */
-
-.titlebar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 16px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
+.mono,
+kbd {
+  font-family: var(--font-mono);
 }
 
-.brand {
-  font-weight: 700;
-  letter-spacing: 0.08em;
+/* Figures line up on the decimal point wherever they appear. */
+.mono,
+.num,
+.qty-input,
+.tot-row dd,
+.hist-count {
+  font-variant-numeric: tabular-nums;
 }
-
-.node {
-  color: var(--ink-dim);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-}
-
-.badge {
-  margin-left: auto;
-  padding: 2px 10px;
-  border: 1px solid currentColor;
-  border-radius: 3px;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-  font-size: 12px;
-}
-
-.badge--connected { color: var(--ok); }
-.badge--offline { color: var(--err); }
-
-/* ---------------------------------------------------------------------- tabs */
-
-.tabs {
-  display: flex;
-  background: var(--panel-2);
-  border-bottom: 1px solid var(--line);
-}
-
-.tab {
-  padding: 9px 20px;
-  border: 0;
-  border-right: 1px solid var(--line);
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  color: var(--ink-dim);
-  font: inherit;
-  cursor: pointer;
-}
-
-.tab:hover { color: var(--ink); }
-
-.tab.is-active {
-  color: var(--ink);
-  background: var(--bg);
-  border-bottom-color: var(--accent);
-}
-
-.tab:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-/* --------------------------------------------------------------------- panes */
-
-main {
-  flex: 1;
-  overflow-y: auto;
-  padding: 18px;
-}
-
-.pane { display: none; }
-.pane.is-active { display: block; }
-
-.soon {
-  padding: 48px;
-  border: 1px dashed var(--line);
-  border-radius: 6px;
-  color: var(--ink-dim);
-  text-align: center;
-  letter-spacing: 0.04em;
-}
-
-.card {
-  max-width: 860px;
-  margin: 0 0 16px;
-  padding: 16px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-}
-
-.card h2 {
-  margin: 0 0 4px;
-  font-size: 14px;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--accent);
-}
-
-.hint {
-  margin: 0 0 12px;
-  color: var(--ink-dim);
-  font-size: 13px;
-}
-
-.row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.btn {
-  padding: 8px 16px;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--ink);
-  font: inherit;
-  cursor: pointer;
-}
-
-.btn:hover { border-color: var(--accent); }
-
-.btn--primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #17202c;
-  font-weight: 600;
-}
-
-.btn[disabled] {
-  opacity: 0.55;
-  cursor: default;
-}
-
-/* ------------------------------------------------------------------- results */
 
 .muted { color: var(--ink-dim); }
 .error { color: var(--err); }
+.ok { color: var(--ok); }
 
-code {
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-  color: var(--ink);
-}
-
-/* Visible to screen readers only. */
 .sr-only {
   position: absolute;
   width: 1px;
@@ -194,189 +121,504 @@ code {
   border: 0;
 }
 
-/* ----------------------------------------------------------------- statusbar */
+/* Scrollbars, so a scrolling panel does not paint a bright gutter over the dark UI. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); }
 
-.statusbar {
-  padding: 6px 16px;
+/* ================================================================ 3. Shell layout */
+
+/*
+ * The shell is one grid column: two fixed chrome rows, a content row that takes
+ * everything left over, then two fixed footers. `minmax(0, 1fr)` is what lets the
+ * content row shrink below its content's height so it scrolls inside itself instead of
+ * pushing the footers off-screen.
+ */
+.shell {
+  display: grid;
+  grid-template-rows: var(--titlebar-h) var(--tabs-h) minmax(0, 1fr) auto auto;
+  height: 100%;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: 0 var(--s4);
   background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.brand {
+  flex: 0 0 auto;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+
+.node {
+  flex: 0 1 auto;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Truncates rather than shoving the badge off the bar on a narrow window. */
+.who {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.who::before {
+  content: "· ";
+  color: var(--ink-faint);
+}
+
+.badge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: var(--s1) var(--s3);
+  border: 1px solid currentColor;
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.badge--connected { color: var(--ok); }
+.badge--offline { color: var(--err); }
+
+.signout {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 var(--s3);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.signout:hover { border-color: var(--err); color: var(--err); }
+
+/* ------------------------------------------------------------------------- tabs */
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.tabs::-webkit-scrollbar { display: none; }
+
+.tab {
+  flex: 0 0 auto;
+  padding: 0 var(--s5);
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-dim);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  /* An inset line rather than a border, so the active tab is exactly as wide as the
+     inactive one and the row never shifts on selection. */
+  box-shadow: inset 0 -2px 0 transparent;
+}
+
+.tab:hover { color: var(--ink); }
+
+.tab.is-active {
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ------------------------------------------------------------------------ panes */
+
+main {
+  min-height: 0; /* pairs with the grid's minmax(0, 1fr) */
+  padding: var(--s4);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.pane { display: none; }
+
+.pane.is-active {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+
+.soon {
+  padding: var(--s6);
+  border: 1px dashed var(--line);
+  border-radius: var(--r-md);
+  color: var(--ink-dim);
+  letter-spacing: 0.04em;
+  text-align: center;
+}
+
+/* --------------------------------------------------------------------- footers */
+
+.shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  padding: var(--s2) var(--s4);
+  background: var(--panel-2);
   border-top: 1px solid var(--line);
   color: var(--ink-dim);
   font-size: 12px;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 
-/* ---------------------------------------------------- new transaction card */
+.shortcuts i { color: var(--ink-faint); font-style: normal; }
 
-.card--txn { max-width: 1100px; }
+.shortcuts kbd {
+  padding: 1px var(--s2);
+  margin-right: var(--s1);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: var(--r-sm);
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.statusbar {
+  padding: var(--s1) var(--s4);
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* =================================================================== 4. Controls */
+
+/*
+ * One height, one radius, one padding rhythm for every control in the app. Variants
+ * below change colour and weight only — never size — so a button is the same button
+ * wherever it appears.
+ */
+.btn,
+input[type="text"],
+input[type="tel"],
+input[type="password"],
+input[type="date"],
+input[type="number"],
+select {
+  height: var(--control-h);
+  padding: 0 var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  font: inherit;
+}
+
+input[type="text"],
+input[type="tel"],
+input[type="password"],
+input[type="date"],
+input[type="number"],
+select {
+  min-width: 0; /* lets inputs shrink inside flex rows instead of forcing overflow */
+  width: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+input::placeholder { color: var(--ink-faint); }
+
+/* The native select chrome paints light-on-light under GTK; draw our own caret. */
+select {
+  padding-right: var(--s5);
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-dim) 50%),
+                    linear-gradient(135deg, var(--ink-dim) 50%, transparent 50%);
+  background-position: right var(--s3) center, right var(--s2) center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+select option { background: var(--panel); color: var(--ink); }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: var(--s2);
+  padding: 0 var(--s4);
+  background: var(--panel-2);
+  color: var(--ink);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.btn:hover { border-color: var(--accent); }
+
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.btn--primary,
+.btn--lock {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.btn--lock { padding: 0 var(--s5); font-weight: 700; }
+.btn--primary:hover,
+.btn--lock:hover { filter: brightness(1.08); }
+
+.btn[disabled] { opacity: 0.55; cursor: default; }
+.btn[disabled]:hover { border-color: var(--line); filter: none; }
+
+/* ====================================================================== 5. Cards */
+
+/* Sections inside a card are separated by one gap, never by per-child margins — that is
+   what kept the spacing drifting between views. */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  width: 100%;
+  max-width: var(--content-max);
+  padding: var(--s4);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
 
 .card-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  padding-bottom: 12px;
+  gap: var(--s3);
+  padding-bottom: var(--s3);
   border-bottom: 1px solid var(--line);
 }
 
-.card-head h2 { margin: 0; }
+.card h2,
+.card-head h2 {
+  margin: 0;
+  color: var(--accent);
+  font-size: 14px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* ===================================================================== 6. Tables */
+
+/*
+ * One table treatment, shared by the billing rows, the history list and the read-only
+ * detail — the three must not drift apart.
+ *
+ * `table-layout: fixed` is what stops columns jumping as content changes length: widths
+ * come from the header cells and nothing else. Every column but the free-text one is
+ * given a width; that one absorbs the remainder, which is also why the same rules serve
+ * tables with six and seven columns.
+ */
+.table-wrap {
+  overflow-x: auto;
+  border-radius: var(--r-sm);
+}
+
+.items {
+  width: 100%;
+  /* The fixed columns below sum to ~590px, and the free text column needs room to be
+     readable rather than wrapping one word per line. Below this the wrap scrolls
+     horizontally and the card's own edges stay put. */
+  min-width: 660px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 13.5px;
+}
+
+.items th {
+  padding: var(--s2) var(--s3);
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-dim);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1.3;
+  text-align: left;
+  text-transform: uppercase;
+  /* Headers wrap rather than spill: with `table-layout: fixed` a wrapped caption cannot
+     change the column width, so wrapping costs nothing and clipping is avoided. */
+}
+
+.items td {
+  padding: var(--s2) var(--s3);
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: middle;
+  /* Long descriptions and customer names wrap instead of spilling or being clipped. */
+  overflow-wrap: anywhere;
+}
+
+.items tbody tr:last-child td { border-bottom: 0; }
+.items tbody tr:hover td { background: rgba(255, 255, 255, 0.02); }
+
+/* Numeric columns right, text columns left — header and body alike. */
+.items .num,
+.items th.num { text-align: right; }
+
+.items .col-code { width: 130px; }
+.items .col-qty { width: 84px; }
+.items .col-rate { width: 112px; }
+.items .col-tax { width: 84px; }
+.items .col-total { width: 132px; }
+.items .col-act { width: 48px; }
+.items .col-when { width: 152px; }
+.items .col-pay { width: 104px; }
+/* .col-desc and the history table's customer column are deliberately unsized. */
+
+.empty-rows {
+  margin: 0;
+  padding: var(--s4) var(--s3);
+  color: var(--ink-dim);
+  font-size: 13px;
+}
+
+/* ============================================================== 7. Billing view */
+
+/* -------------------------------------------------------------------- customer */
 
 .cust-search {
   display: flex;
-  gap: 8px;
-  margin-left: auto;
+  flex: 1 1 260px;
+  gap: var(--s2);
+  justify-content: flex-end;
+  min-width: 0;
 }
 
-.cust-search input {
-  width: 220px;
-  padding: 7px 10px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--ink);
-  font: inherit;
-  -webkit-user-select: text;
-  user-select: text;
-}
+.cust-search input { max-width: 240px; }
 
-.cust-search input:focus { outline: none; border-color: var(--accent); }
-
-.cust-line {
-  padding: 10px 0;
-  font-size: 15px;
-}
-
+.cust-line { font-size: 15px; overflow-wrap: anywhere; }
 .cust-name { font-weight: 600; }
 
 .cust-gstin,
 .cust-pos {
   color: var(--ink-dim);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
 }
 
-/* ------------------------------------------------------- new customer form */
+/* ---------------------------------------------------------- new customer form */
 
 .newcust {
-  margin: 4px 0 14px;
-  padding: 12px;
+  padding: var(--s3);
   background: var(--panel-2);
   border: 1px solid var(--accent);
-  border-radius: 5px;
+  border-radius: var(--r-sm);
 }
 
 .newcust-head {
-  margin-bottom: 10px;
+  margin-bottom: var(--s3);
   color: var(--accent);
   font-size: 12px;
-  text-transform: uppercase;
   letter-spacing: 0.07em;
+  text-transform: uppercase;
 }
 
 .newcust-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--s3);
 }
 
 .newcust-grid label {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--s1);
   color: var(--ink-dim);
   font-size: 12px;
 }
 
-.newcust-grid .opt { color: var(--line); }
-
-.newcust-grid input {
-  /* Labels wrap to different heights ("GSTIN (optional)" takes two lines); pushing each
-     input down aligns every box on one line regardless. */
-  margin-top: auto;
-  padding: 7px 9px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--ink);
-  font: inherit;
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-.newcust-grid input:focus { outline: none; border-color: var(--accent); }
+/* Captions wrap to different heights; pushing the inputs down keeps them on one line. */
+.newcust-grid label input { margin-top: auto; }
+.newcust-grid .opt { color: var(--ink-faint); }
 
 .newcust-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  margin-top: 12px;
+  gap: var(--s3);
+  margin-top: var(--s3);
 }
 
 .newcust-msg { font-size: 13px; }
 
-/* ------------------------------------------------------------- items table */
-
-.table-wrap { overflow-x: auto; }
-
-.items {
-  width: 100%;
-  margin-top: 4px;
-  border-collapse: collapse;
-  font-size: 13.5px;
-}
-
-.items th {
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--line);
-  color: var(--ink-dim);
-  font-size: 11.5px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  text-align: left;
-}
-
-.items td {
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--panel-2);
-  vertical-align: middle;
-}
-
-.items .num { text-align: right; }
-.items .col-code { width: 150px; }
-.items .col-qty { width: 90px; }
-.items .col-rate,
-.items .col-tax { width: 110px; }
-.items .col-total { width: 130px; }
-.items .col-act { width: 44px; }
-
-.items .mono {
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-}
+/* --------------------------------------------------------------- billing rows */
 
 .qty-input {
-  width: 70px;
-  padding: 5px 7px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--ink);
-  font: inherit;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  width: 100%;
+  max-width: 72px;
+  margin-left: auto;
+  padding: 0 var(--s2);
+  height: 28px;
+  font-family: var(--font-mono);
   text-align: right;
-  -webkit-user-select: text;
-  user-select: text;
+  display: block;
 }
 
-.qty-input:focus { outline: none; border-color: var(--accent); }
 .qty-input.is-bad { border-color: var(--err); }
 
+.qty-input:disabled {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-dim);
+}
+
 .row-del {
+  display: block;
   width: 26px;
   height: 26px;
+  margin-left: auto;
   padding: 0;
   background: transparent;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   color: var(--ink-dim);
   font-size: 15px;
   line-height: 1;
@@ -384,61 +626,41 @@ code {
 }
 
 .row-del:hover { border-color: var(--err); color: var(--err); }
+.row-del:disabled { opacity: 0.3; cursor: default; }
+.row-del:disabled:hover { border-color: var(--line); color: var(--ink-dim); }
 
-.empty-rows {
-  margin: 0;
-  padding: 18px 10px;
-  color: var(--ink-dim);
-  font-size: 13px;
-}
-
-.add-item { margin-top: 12px; }
-
-/* ------------------------------------------------------------- item picker */
+/* -------------------------------------------------------------- item picker */
 
 .picker {
-  margin-top: 10px;
-  padding: 12px;
+  padding: var(--s3);
   background: var(--panel-2);
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: var(--r-sm);
 }
 
-.picker-head { display: flex; gap: 8px; }
-
-.picker-head input {
-  flex: 1;
-  padding: 7px 10px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--ink);
-  font: inherit;
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-.picker-head input:focus { outline: none; border-color: var(--accent); }
+.picker-head { display: flex; gap: var(--s2); }
 
 .picker-results {
-  max-height: 210px;
-  margin: 10px 0 0;
+  max-height: 220px;
+  margin: var(--s3) 0 0;
   padding: 0;
   overflow-y: auto;
   list-style: none;
 }
 
-.picker-results li + li { margin-top: 4px; }
+.picker-results li + li { margin-top: var(--s1); }
 
 .picker-pick {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 14px;
+  align-items: baseline;
+  gap: var(--s1) var(--s4);
   width: 100%;
-  padding: 7px 10px;
+  min-height: var(--control-h);
+  padding: var(--s2) var(--s3);
   background: var(--bg);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   color: var(--ink);
   font: inherit;
   text-align: left;
@@ -448,100 +670,146 @@ code {
 .picker-pick:hover { border-color: var(--accent); }
 
 .picker-pick .pk-code {
-  min-width: 130px;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  flex: 0 0 130px; /* matches .col-code, so the picker reads like the table */
   color: var(--accent);
+  font-family: var(--font-mono);
 }
 
 .picker-pick .pk-meta {
   margin-left: auto;
   color: var(--ink-dim);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12.5px;
 }
 
-.picker-empty { padding: 8px 10px; color: var(--ink-dim); font-size: 13px; }
+.picker-empty {
+  padding: var(--s2) var(--s3);
+  color: var(--ink-dim);
+  font-size: 13px;
+}
 
-/* ----------------------------------------------------------------- summary */
+/* ------------------------------------------------------------------- summary */
 
+/* Payment and GST mode on the left, the totals block on the right. */
 .summary {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
-  align-items: flex-end;
+  gap: var(--s4);
+  align-items: flex-start;
   justify-content: space-between;
-  margin-top: 16px;
-  padding-top: 14px;
+  padding-top: var(--s4);
   border-top: 1px solid var(--line);
 }
 
 .summary-left {
   display: flex;
+  flex: 1 1 260px;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--s3);
+  min-width: 0;
 }
 
 .pay {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  color: var(--ink-dim);
-  font-size: 13px;
+  gap: var(--s2);
 }
 
-.pay select {
-  padding: 6px 26px 6px 10px;
+.pay-label { color: var(--ink-dim); font-size: 13px; }
+
+.pay-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  height: var(--control-h);
+  padding: 0 var(--s3);
   background: var(--bg);
   border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--ink);
-  font: inherit;
-  /* Drop the GTK widget chrome, which paints light-on-light here, and draw our own
-     caret so the control stays legible on the dark ground. */
-  -webkit-appearance: none;
-  appearance: none;
-  background-image: linear-gradient(45deg, transparent 50%, var(--ink-dim) 50%),
-                    linear-gradient(135deg, var(--ink-dim) 50%, transparent 50%);
-  background-position: right 12px center, right 7px center;
-  background-size: 5px 5px, 5px 5px;
-  background-repeat: no-repeat;
+  border-radius: var(--r-sm);
+  color: var(--ink-dim);
+  font-size: 13px;
+  cursor: pointer;
 }
 
-.pay select option {
-  background: var(--panel);
+.pay-opt input { accent-color: var(--accent); margin: 0; }
+
+.pay-opt:has(input:checked) {
+  background: var(--panel-2);
+  border-color: var(--accent);
   color: var(--ink);
 }
 
-.pay select:focus { outline: none; border-color: var(--accent); }
+.pay-opt:has(input:disabled) { opacity: 0.55; cursor: default; }
+
+.upi-box {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  max-width: 340px;
+  padding: var(--s3);
+  background: var(--panel-2);
+  border: 1px dashed var(--accent);
+  border-radius: var(--r-sm);
+  color: var(--ink-dim);
+  font-size: 12.5px;
+}
+
+.upi-box p { margin: 0; }
+.upi-box small { color: var(--ink-faint); }
+
+.upi-qr {
+  display: flex;
+  flex: 0 0 56px;
+  align-items: center;
+  justify-content: center;
+  height: 56px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  /* A placeholder chequer, not a scannable code. */
+  background-image:
+    linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%),
+    linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%);
+  background-size: 14px 14px;
+  background-position: 0 0, 7px 7px;
+}
+
+.upi-qr span { padding: 1px var(--s1); background: var(--panel-2); }
 
 .gst-mode {
   color: var(--ink-dim);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
+/* The totals block: right-aligned, boxed, clear of the card edge. */
 .totals {
-  min-width: 290px;
-  margin: 0;
+  flex: 0 1 320px;
+  min-width: 0;
+  max-width: 340px;
+  margin: 0 0 0 auto;
+  padding: var(--s3);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
 }
 
 .tot-row {
   display: flex;
+  gap: var(--s4);
   justify-content: space-between;
-  gap: 24px;
-  padding: 3px 0;
+  padding: var(--s1) 0;
 }
 
 .tot-row dt { color: var(--ink-dim); }
-
-.tot-row dd {
-  margin: 0;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-}
+.tot-row dd { margin: 0; font-family: var(--font-mono); }
 
 .tot-row--grand {
-  margin-top: 6px;
-  padding-top: 8px;
+  margin-top: var(--s2);
+  padding-top: var(--s3);
   border-top: 1px solid var(--line);
   font-size: 18px;
 }
@@ -549,358 +817,136 @@ code {
 .tot-row--grand dt { color: var(--ink); font-weight: 600; }
 .tot-row--grand dd { color: var(--accent); font-weight: 700; }
 
-/* ----------------------------------------------------------------- actions */
+/* ------------------------------------------------------------------- actions */
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 14px;
-  margin-top: 16px;
+  gap: var(--s3);
 }
 
-.action-msg { font-size: 13px; }
-.action-msg.ok { color: var(--ok); }
-
-.btn--lock {
-  padding: 10px 22px;
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #17202c;
-  font-weight: 700;
+.action-msg {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
-.btn--lock:hover { filter: brightness(1.08); }
+/* ----------------------------------------------------------- locked invoice */
 
-/* ------------------------------------------------------------ locked invoice */
-
-/* The allocated number. Empty until a save returns one — never previewed, because the
-   number is only real once core has committed it. */
 .inv-no {
-  padding: 3px 10px;
+  padding: var(--s1) var(--s3);
   border: 1px solid var(--accent);
-  border-radius: 3px;
+  border-radius: var(--r-sm);
   color: var(--accent);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 14px;
   letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 /* A saved invoice is a printed document: nothing on it may still look editable. */
-.card--txn.is-locked {
-  border-color: var(--ok);
-}
+.card--txn.is-locked { border-color: var(--ok); }
 
 .card--txn.is-locked .items td,
-.card--txn.is-locked .cust-line {
-  color: var(--ink-dim);
-}
+.card--txn.is-locked .cust-line { color: var(--ink-dim); }
 
-.qty-input:disabled {
-  background: transparent;
-  border-color: transparent;
-  color: var(--ink-dim);
-}
-
-.row-del:disabled {
-  opacity: 0.3;
-  cursor: default;
-}
-
-.row-del:disabled:hover {
-  border-color: var(--line);
-  color: var(--ink-dim);
-}
-
-.cust-search input:disabled,
-.pay select:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-/* ----------------------------------------------------------------- history */
+/* ============================================================== 8. History view */
 
 .filters {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 10px;
-  padding: 12px 0;
+  gap: var(--s3);
+  padding: var(--s3);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
 }
 
 .filt {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--s1);
   color: var(--ink-dim);
   font-size: 12px;
 }
 
-.filt--grow { flex: 1 1 240px; }
-
-.filt select,
-.filt input {
-  padding: 7px 9px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--ink);
-  font: inherit;
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-.filt select {
-  padding-right: 26px;
-  -webkit-appearance: none;
-  appearance: none;
-  background-image: linear-gradient(45deg, transparent 50%, var(--ink-dim) 50%),
-                    linear-gradient(135deg, var(--ink-dim) 50%, transparent 50%);
-  background-position: right 12px center, right 7px center;
-  background-size: 5px 5px, 5px 5px;
-  background-repeat: no-repeat;
-}
-
-.filt select option { background: var(--panel); color: var(--ink); }
-.filt select:focus,
-.filt input:focus { outline: none; border-color: var(--accent); }
-
-.history .col-when { width: 160px; }
-.history .col-pay { width: 110px; }
+.filt--grow { flex: 1 1 200px; min-width: 0; }
+.filt select { width: 150px; }
+.filt input[type="date"] { width: 150px; }
 
 .hist-row { cursor: pointer; }
-.hist-row:hover td { background: var(--panel-2); }
+.hist-no { color: var(--accent); }
 
 .hist-row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 
-.hist-no { color: var(--accent); }
-
 .hist-count {
-  margin: 10px 0 0;
+  margin: 0;
   color: var(--ink-dim);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12.5px;
 }
 
-/* --------------------------------------------------------- read-only detail */
+/* ------------------------------------------------------------ read-only detail */
 
 .ro-badge {
-  padding: 2px 9px;
-  border: 1px solid var(--ink-dim);
-  border-radius: 3px;
+  padding: var(--s1) var(--s2);
+  border: 1px solid var(--ink-faint);
+  border-radius: var(--r-sm);
   color: var(--ink-dim);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11.5px;
+  white-space: nowrap;
 }
 
 .detail-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--s2);
   margin-left: auto;
 }
 
 .detail-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 22px;
-  padding-bottom: 10px;
+  gap: var(--s1) var(--s5);
   color: var(--ink-dim);
   font-size: 12.5px;
 }
 
 .detail-meta strong { color: var(--ink); font-weight: 500; }
 
-/* ------------------------------------------------------------ printable sheet */
-
-.print-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 20;
-  overflow-y: auto;
-  background: rgba(8, 12, 18, 0.88);
-}
-
-.print-bar {
-  position: sticky;
-  top: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 16px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-  color: var(--ink-dim);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-  font-size: 12.5px;
-}
-
-.print-bar .btn { margin-left: 0; }
-.print-bar #print-now { margin-left: auto; }
-
-/* Deliberately a paper-white sheet inside the dark shell: this is the document, not
-   part of the console. */
-.sheet {
-  max-width: 820px;
-  margin: 22px auto 40px;
-  padding: 34px 38px;
-  background: #fff;
-  color: #16202c;
-  font-size: 13px;
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-.sheet-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 20px;
-  padding-bottom: 14px;
-  border-bottom: 2px solid #16202c;
-}
-
-.sheet-head h1 {
-  margin: 0;
-  font-size: 20px;
-  letter-spacing: 0.1em;
-}
-
-.sheet-seller { margin: 4px 0 0; color: #5a6673; font-size: 12px; }
-
-.sheet-no {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 3px;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-}
-
-.sheet-no strong { font-size: 15px; }
-.sheet-no span { color: #5a6673; font-size: 12px; }
-
-.sheet-buyer { padding: 14px 0; line-height: 1.6; }
-.sheet-buyer strong { display: block; margin-bottom: 4px; font-size: 11px;
-  text-transform: uppercase; letter-spacing: 0.08em; color: #5a6673; }
-
-.sheet-lines {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 8px;
-}
-
-.sheet-lines th,
-.sheet-lines td {
-  padding: 7px 8px;
-  border-bottom: 1px solid #dde3ea;
-  text-align: left;
-}
-
-.sheet-lines thead th {
-  background: #f2f5f8;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #5a6673;
-}
-
-.sheet-lines .num,
-.sheet-totals td { text-align: right; font-family: ui-monospace, Consolas, monospace; }
-
-.sheet-totals {
-  width: 300px;
-  margin: 16px 0 0 auto;
-  border-collapse: collapse;
-}
-
-.sheet-totals th {
-  padding: 5px 8px;
-  color: #5a6673;
-  font-weight: 400;
-  text-align: left;
-}
-
-.sheet-totals td { padding: 5px 8px; }
-
-.sheet-totals .grand th,
-.sheet-totals .grand td {
-  border-top: 2px solid #16202c;
-  font-size: 15px;
-  font-weight: 700;
-  color: #16202c;
-}
-
-.sheet-foot {
-  margin-top: 26px;
-  padding-top: 12px;
-  border-top: 1px solid #dde3ea;
-  color: #5a6673;
-  font-size: 11.5px;
-}
-
-/* Printing sends the sheet alone to paper. */
-@media print {
-  .titlebar, .tabs, main, .statusbar, .print-bar { display: none !important; }
-  .print-overlay { position: static; background: #fff; }
-  .sheet { margin: 0; padding: 0; max-width: none; }
-}
-
-/* ------------------------------------------------------------------- shell */
-
-.shell {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-
-.who {
-  color: var(--ink);
-  font-size: 13px;
-}
-
-.who::before {
-  content: "· ";
-  color: var(--line);
-}
-
-.signout {
-  margin-left: 12px;
-  padding: 3px 11px;
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  color: var(--ink-dim);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.signout:hover { border-color: var(--err); color: var(--err); }
-
-/* The badge no longer pushes right on its own — the user block sits between. */
-.titlebar .badge { margin-left: auto; }
-
-/* ------------------------------------------------------------------- login */
+/* ================================================================ 9. Login view */
 
 .login {
   display: flex;
   align-items: center;
   justify-content: center;
   height: 100%;
-  padding: 24px;
+  padding: var(--s4);
+  overflow-y: auto;
   background:
     radial-gradient(1100px 520px at 50% -10%, #1b2838 0%, transparent 70%),
     var(--bg);
 }
 
 .login-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
   width: 100%;
   max-width: 380px;
-  padding: 30px 30px 26px;
+  padding: var(--s5);
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-md);
 }
 
 .login-card h1 {
@@ -912,9 +958,9 @@ code {
 }
 
 .login-node {
-  margin: 6px 0 24px;
+  margin: 0 0 var(--s3);
   color: var(--ink-dim);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   text-align: center;
 }
@@ -922,56 +968,35 @@ code {
 .login-field {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  margin-bottom: 14px;
+  gap: var(--s1);
   color: var(--ink-dim);
   font-size: 12px;
 }
 
-.login-field input {
-  padding: 9px 11px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: var(--ink);
-  font: inherit;
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-.login-field input:focus { outline: none; border-color: var(--accent); }
-
-.login-submit {
-  width: 100%;
-  margin-top: 6px;
-  padding: 10px;
-}
+.login-submit { width: 100%; margin-top: var(--s2); }
 
 .login-msg {
   min-height: 18px;
-  margin: 12px 0 0;
+  margin: 0;
   font-size: 13px;
   text-align: center;
 }
 
-.login-msg.error { color: var(--err); }
-
 .login-firstrun {
-  margin-top: 18px;
-  padding: 12px 14px;
+  padding: var(--s3);
   background: var(--panel-2);
   border: 1px solid var(--accent);
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   font-size: 12.5px;
 }
 
 .login-firstrun strong { color: var(--accent); }
-.login-firstrun p { margin: 5px 0 10px; color: var(--ink-dim); }
+.login-firstrun p { margin: var(--s1) 0 var(--s3); color: var(--ink-dim); }
 
 .login-firstrun dl {
   display: grid;
   grid-template-columns: 78px 1fr;
-  gap: 3px 10px;
+  gap: var(--s1) var(--s3);
   margin: 0;
 }
 
@@ -979,144 +1004,221 @@ code {
 
 .login-firstrun dd {
   margin: 0;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   color: var(--ink);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
   -webkit-user-select: text;
   user-select: text;
 }
 
-/* ------------------------------------------------------------ payment type */
+/* ========================================================= 10. Printable sheet */
 
-.pay {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+.print-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  overflow: auto;
+  background: rgba(8, 12, 18, 0.88);
 }
 
-.pay-label {
-  margin-right: 2px;
-  color: var(--ink-dim);
-  font-size: 13px;
-}
-
-.pay-opt {
+.print-bar {
+  position: sticky;
+  top: 0;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 13px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
+  gap: var(--s3);
+  padding: var(--s2) var(--s4);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
   color: var(--ink-dim);
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.pay-opt input { accent-color: var(--accent); margin: 0; }
-
-.pay-opt:has(input:checked) {
-  border-color: var(--accent);
-  color: var(--ink);
-  background: var(--panel-2);
-}
-
-.pay-opt:has(input:disabled) { opacity: 0.55; cursor: default; }
-
-.upi-box {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  max-width: 340px;
-  margin-top: 4px;
-  padding: 10px 12px;
-  background: var(--panel-2);
-  border: 1px dashed var(--accent);
-  border-radius: 5px;
-  color: var(--ink-dim);
+  font-family: var(--font-mono);
   font-size: 12.5px;
 }
 
-.upi-box p { margin: 0; }
-.upi-box small { color: var(--line); }
+.print-bar #print-now { margin-left: auto; }
 
-.upi-qr {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 58px;
-  height: 58px;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  /* A placeholder grid, not a scannable code. */
-  background-image:
-    linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%),
-    linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%);
-  background-size: 14px 14px;
-  background-position: 0 0, 7px 7px;
-  color: var(--ink-dim);
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 11px;
+/*
+ * The document itself. Deliberately paper-white inside the dark shell — it is what comes
+ * out of the printer, not part of the console — so it keeps its own small palette.
+ */
+.sheet {
+  /* A document, not a responsive layout. It keeps its page width and the overlay pans,
+     rather than reflowing into something that is not what comes out of the printer.
+     `margin: auto` centres it when there is room and collapses to 0 when there is not. */
+  width: 820px;
+  margin: var(--s5) auto var(--s6);
+  padding: var(--s6);
+  background: #fff;
+  color: #16202c;
+  font-size: 13px;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
-.upi-qr span {
-  padding: 1px 4px;
-  background: var(--panel-2);
-}
-
-/* --------------------------------------------------------------- shortcuts */
-
-.shortcuts {
+.sheet-head {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 16px;
-  background: var(--panel-2);
-  border-top: 1px solid var(--line);
-  color: var(--ink-dim);
-  font-size: 12px;
+  gap: var(--s4);
+  justify-content: space-between;
+  padding-bottom: var(--s3);
+  border-bottom: 2px solid #16202c;
 }
 
-.shortcuts i { color: var(--line); font-style: normal; }
+.sheet-head h1 { margin: 0; font-size: 20px; letter-spacing: 0.1em; }
+.sheet-seller { margin: var(--s1) 0 0; color: #5a6673; font-size: 12px; }
 
-.shortcuts kbd {
-  padding: 1px 6px;
-  margin-right: 5px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-bottom-width: 2px;
-  border-radius: 3px;
-  color: var(--accent);
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+.sheet-no {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--s1);
+  font-family: var(--font-mono);
+}
+
+.sheet-no strong { font-size: 15px; }
+.sheet-no span { color: #5a6673; font-size: 12px; }
+
+.sheet-buyer { padding: var(--s3) 0; line-height: 1.6; }
+
+.sheet-buyer strong {
+  display: block;
+  margin-bottom: var(--s1);
+  color: #5a6673;
   font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
-/* ------------------------------------------------------------------ polish */
+.sheet-lines {
+  width: 100%;
+  margin-top: var(--s2);
+  border-collapse: collapse;
+  /* Auto layout here: the sheet is a fixed page width, so there is no column-jumping to
+     guard against, and the description deserves whatever the figures do not need. */
+}
 
-/* Numeric columns line up on the decimal point now that real figures flow through:
-   one tabular font, one width, no drift between the table and the summary. */
-.items .mono,
-.items .qty-input,
-.tot-row dd,
-.hist-count {
+.sheet-lines th,
+.sheet-lines td {
+  padding: var(--s2);
+  border-bottom: 1px solid #dde3ea;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.sheet-lines thead th {
+  background: #f2f5f8;
+  color: #5a6673;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  /* Short captions like UOM would otherwise stack one letter per line in a narrow
+     auto-sized column. */
+  white-space: nowrap;
+}
+
+.sheet-lines .num,
+.sheet-totals td {
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap; /* an amount must never break across lines */
 }
 
-.items td { padding: 8px 10px; }
-.items th { padding: 9px 10px 7px; }
+.sheet-totals {
+  width: 300px;
+  max-width: 100%;
+  margin: var(--s4) 0 0 auto;
+  border-collapse: collapse;
+}
 
-/* The row under the cursor, so a finger on a trackball does not lose its place. */
-.items tbody tr:hover td { background: rgba(255, 255, 255, 0.02); }
+.sheet-totals th {
+  padding: var(--s1) var(--s2);
+  color: #5a6673;
+  font-weight: 400;
+  text-align: left;
+}
 
-.summary { align-items: flex-start; }
-.summary-left { gap: 12px; }
+.sheet-totals td { padding: var(--s1) var(--s2); }
 
-.totals { min-width: 320px; }
-.tot-row { padding: 4px 0; }
+.sheet-totals .grand th,
+.sheet-totals .grand td {
+  border-top: 2px solid #16202c;
+  color: #16202c;
+  font-size: 15px;
+  font-weight: 700;
+}
 
-/* Give the grand total room to breathe against the tax lines above it. */
-.tot-row--grand { margin-top: 8px; padding-top: 10px; }
+.sheet-foot {
+  margin-top: var(--s5);
+  padding-top: var(--s3);
+  border-top: 1px solid #dde3ea;
+  color: #5a6673;
+  font-size: 11.5px;
+}
 
-.card { padding: 18px; }
-.card-head { gap: 14px; }
+/* Printing sends the sheet alone to paper. */
+@media print {
+  .login, .shell, .print-bar { display: none !important; }
+  .print-overlay { position: static; background: #fff; }
+  .sheet { margin: 0; padding: 0; max-width: none; }
+}
+
+/* ========================================================= 11. Narrow windows */
+
+/*
+ * Below these widths the layout reflows rather than overflowing. Panels keep their own
+ * borders and scroll internally; nothing is ever clipped off the side of the window.
+ */
+@media (max-width: 900px) {
+  /* Stacked, the flex basis on these would apply to their *height* and open a dead gap
+     between the payment block and the totals, so both revert to content height. */
+  .summary { flex-direction: column; }
+  .summary-left { flex: 0 0 auto; }
+
+  .totals {
+    flex: 0 0 auto;
+    max-width: none;
+    margin-left: 0;
+  }
+
+  .cust-search {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
+
+  .cust-search input { max-width: none; }
+
+  .filt select,
+  .filt input[type="date"] { width: 130px; }
+
+  /* Tighten the fixed columns so the free text column keeps a readable width instead of
+     being squeezed to one word per line. */
+  .items .col-code { width: 104px; }
+  .items .col-qty { width: 72px; }
+  .items .col-rate { width: 96px; }
+  .items .col-tax { width: 68px; }
+  .items .col-total { width: 112px; }
+  .items .col-act { width: 40px; }
+  .items .col-when { width: 128px; }
+  .items .col-pay { width: 84px; }
+}
+
+@media (max-width: 700px) {
+  :root { --titlebar-h: 40px; }
+
+  main { padding: var(--s3); }
+  .card { padding: var(--s3); }
+
+  /* The node chip is the least load-bearing thing on the bar, so it goes first. */
+  .node { display: none; }
+
+  .tab { padding: 0 var(--s4); }
+
+  .filt,
+  .filt--grow { flex: 1 1 100%; }
+  .filt select,
+  .filt input[type="date"] { width: 100%; }
+
+  .detail-actions { flex: 1 1 100%; margin-left: 0; }
+  .actions .btn { flex: 1 1 auto; }
+}
