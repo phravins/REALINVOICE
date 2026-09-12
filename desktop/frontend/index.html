@@ -35,7 +35,9 @@
     <!-- The gate. Nothing behind it is rendered, and every command behind it refuses
          to answer without a session, so hiding the shell is not the only protection. -->
     <div class="login" id="login-screen">
-      <form class="login-card" id="login-form" autocomplete="off">
+      <!-- Deliberately unboxed: no panel, no border, no shadow. Just the wordmark, two
+           fields and a button, centred with room to breathe. -->
+      <form class="login-form" id="login-form" autocomplete="off">
         <svg class="logo logo--login" role="img" aria-label="RealInvoice"><use href="#ri-logo" /></svg>
         <p class="login-node" id="login-node">Office Console</p>
 
@@ -56,32 +58,81 @@
     </div>
 
     <div class="shell" id="shell" hidden>
-    <header class="titlebar">
+    <header class="topbar">
       <svg class="logo logo--bar" role="img" aria-label="RealInvoice"><use href="#ri-logo" /></svg>
-      <span class="node" id="node-label">[Node: POS-01]</span>
-      <span class="who" id="who"></span>
-      <span class="badge badge--connected" id="conn-badge">Connected</span>
-      <button class="icon-btn" id="theme-toggle" type="button" aria-label="Switch theme" title="Switch theme">
-        <svg class="icon icon--sun" viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="12" cy="12" r="4.2" />
-          <path d="M12 2.6v2.6M12 18.8v2.6M4.3 12H1.7M22.3 12h-2.6M6.6 6.6 4.8 4.8M19.2 19.2l-1.8-1.8M6.6 17.4l-1.8 1.8M19.2 4.8l-1.8 1.8" />
-        </svg>
-        <svg class="icon icon--moon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M20.5 14.5A8.6 8.6 0 0 1 9.5 3.5a8.6 8.6 0 1 0 11 11z" />
-        </svg>
-      </button>
-      <button class="signout" id="signout">Sign Out</button>
+
+      <!-- Deliberately empty. A global search belongs here once there is something
+           worth searching across every pane; wiring one now would be a new feature. -->
+      <div class="topbar-center"></div>
+
+      <div class="topbar-actions">
+        <span class="status-dot status-dot--connected" id="conn-badge"
+              role="status" title="Connected">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6.5 19.5a4.5 4.5 0 0 1-.6-8.96 6 6 0 0 1 11.66-1.6A4.25 4.25 0 0 1 18 19.5z" />
+          </svg>
+          <span class="sr-only" id="conn-label">Connected</span>
+        </span>
+
+        <button class="icon-btn icon-btn--bar" id="theme-toggle" type="button"
+                aria-label="Switch theme" title="Switch theme">
+          <svg class="icon icon--sun" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="4.2" />
+            <path d="M12 2.6v2.6M12 18.8v2.6M4.3 12H1.7M22.3 12h-2.6M6.6 6.6 4.8 4.8M19.2 19.2l-1.8-1.8M6.6 17.4l-1.8 1.8M19.2 4.8l-1.8 1.8" />
+          </svg>
+          <svg class="icon icon--moon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20.5 14.5A8.6 8.6 0 0 1 9.5 3.5a8.6 8.6 0 1 0 11 11z" />
+          </svg>
+        </button>
+
+        <div class="avatar-wrap">
+          <button class="avatar" id="avatar-btn" type="button" aria-haspopup="menu"
+                  aria-expanded="false" aria-label="Account menu"><span id="avatar-initial">?</span></button>
+          <div class="menu" id="user-menu" role="menu" hidden>
+            <div class="menu-head">
+              <span class="menu-name" id="menu-name"></span>
+              <span class="menu-role" id="menu-role"></span>
+            </div>
+            <button class="menu-item" id="menu-about" role="menuitem" type="button">Account &amp; About</button>
+            <button class="menu-item menu-item--danger" id="menu-signout" role="menuitem" type="button">Sign Out</button>
+          </div>
+        </div>
+      </div>
     </header>
 
-    <nav class="tabs" id="tabs" role="tablist">
-      <button class="tab is-active" role="tab" data-pane="billing" aria-selected="true">Billing</button>
-      <button class="tab" role="tab" data-pane="history" aria-selected="false">History</button>
-      <button class="tab" role="tab" data-pane="inventory" aria-selected="false">Inventory</button>
-      <button class="tab" role="tab" data-pane="analytics" aria-selected="false">Analytics</button>
-      <button class="tab" role="tab" data-pane="sync" aria-selected="false">Sync</button>
-      <button class="tab" role="tab" data-pane="settings" aria-selected="false">Settings</button>
+    <nav class="sidebar" id="tabs" role="tablist">
+      <button class="nav-item is-active" role="tab" data-pane="billing" aria-selected="true">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14v17l-2.3-1.6-2.35 1.6-2.35-1.6-2.35 1.6L7.3 18.9 5 20.5z"/><path d="M8.6 8.4h6.8M8.6 12.2h6.8"/></svg>
+        <span>Billing</span>
+      </button>
+      <button class="nav-item" role="tab" data-pane="history" aria-selected="false">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.2V12l3.2 2"/></svg>
+        <span>History</span>
+      </button>
+      <button class="nav-item" role="tab" data-pane="inventory" aria-selected="false">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.6 7.6 12 3.4l8.4 4.2v8.8L12 20.6l-8.4-4.2z"/><path d="m3.6 7.6 8.4 4.3 8.4-4.3M12 11.9v8.7"/></svg>
+        <span>Inventory</span>
+      </button>
+      <button class="nav-item" role="tab" data-pane="analytics" aria-selected="false">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16"/><path d="M7 20v-6.4M12 20V6.6M17 20v-9.2"/></svg>
+        <span>Analytics</span>
+      </button>
+      <button class="nav-item" role="tab" data-pane="sync" aria-selected="false">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 0 1-13.7 5.6M4 12a8 8 0 0 1 13.7-5.6"/><path d="M17.7 3.2v3.2h-3.2M6.3 20.8v-3.2h3.2"/></svg>
+        <span>Sync</span>
+      </button>
+      <button class="nav-item" role="tab" data-pane="settings" aria-selected="false">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.3 14.3a1.6 1.6 0 0 0 .32 1.77l.06.06a1.94 1.94 0 1 1-2.74 2.74l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-.97 1.46v.17a1.94 1.94 0 1 1-3.88 0v-.09a1.6 1.6 0 0 0-1.05-1.46 1.6 1.6 0 0 0-1.77.32l-.06.06a1.94 1.94 0 1 1-2.74-2.74l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.46-.97h-.17a1.94 1.94 0 1 1 0-3.88h.09a1.6 1.6 0 0 0 1.46-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a1.94 1.94 0 1 1 2.74-2.74l.06.06a1.6 1.6 0 0 0 1.77.32h.08a1.6 1.6 0 0 0 .97-1.46v-.17a1.94 1.94 0 1 1 3.88 0v.09a1.6 1.6 0 0 0 .97 1.46 1.6 1.6 0 0 0 1.77-.32l.06-.06a1.94 1.94 0 1 1 2.74 2.74l-.06.06a1.6 1.6 0 0 0-.32 1.77v.08a1.6 1.6 0 0 0 1.46.97h.17a1.94 1.94 0 1 1 0 3.88h-.09a1.6 1.6 0 0 0-1.46.97z"/></svg>
+        <span>Settings</span>
+      </button>
+
+      <div class="sidebar-foot">
+        <span class="sidebar-app" id="side-app">RealInvoice</span>
+        <span class="sidebar-status">Local &mdash; not yet synced</span>
+      </div>
     </nav>
 
+    <div class="content">
     <main>
       <section class="pane is-active" id="pane-billing" role="tabpanel">
         <div class="card card--txn">
@@ -136,7 +187,15 @@
               </thead>
               <tbody id="items-body"></tbody>
             </table>
-            <p class="empty-rows" id="empty-rows">No items yet — use Add Item to start billing.</p>
+            <div class="empty" id="empty-rows">
+              <svg class="empty-art" viewBox="0 0 96 72" aria-hidden="true">
+                <path class="empty-blob" d="M20 16c8-12 26-16 38-9s18 25 11 37-27 17-39 10S12 28 20 16z" />
+                <path class="empty-line" d="M30 22h26a4 4 0 0 1 4 4v28a4 4 0 0 1-4 4H30a4 4 0 0 1-4-4V26a4 4 0 0 1 4-4z" />
+                <path class="empty-line" d="M33.5 33.5h19M33.5 40h19M33.5 46.5h12" />
+              </svg>
+              <p class="empty-title">No items added yet</p>
+              <p class="empty-hint">Press <kbd>F2</kbd> or use Add Item to start a bill</p>
+            </div>
           </div>
 
           <div class="add-item">
@@ -228,7 +287,15 @@
               </thead>
               <tbody id="history-body"></tbody>
             </table>
-            <p class="empty-rows" id="history-empty">No invoices match.</p>
+            <div class="empty" id="history-empty">
+              <svg class="empty-art" viewBox="0 0 96 72" aria-hidden="true">
+                <path class="empty-blob" d="M20 16c8-12 26-16 38-9s18 25 11 37-27 17-39 10S12 28 20 16z" />
+                <circle class="empty-line" cx="44" cy="34" r="13" />
+                <path class="empty-line" d="m54 44 10 10" />
+              </svg>
+              <p class="empty-title">No invoices match</p>
+              <p class="empty-hint">Try a wider date range, or clear the search</p>
+            </div>
           </div>
           <p class="hist-count" id="history-count"></p>
         </div>
@@ -278,13 +345,19 @@
       <section class="pane" id="pane-analytics" role="tabpanel"><div class="soon">Coming soon</div></section>
       <section class="pane" id="pane-sync" role="tabpanel"><div class="soon">Coming soon</div></section>
       <section class="pane" id="pane-settings" role="tabpanel">
-        <div class="card about">
-          <div class="about-head">
-            <svg class="logo logo--about" role="img" aria-label="RealInvoice"><use href="#ri-logo" /></svg>
-            <p class="about-tagline">Offline-first GST invoicing for Indian SMEs</p>
+        <div class="page">
+          <div class="page-head">
+            <h2>Account Information</h2>
+            <!-- No Edit action here: nothing on this page is editable yet, and a button
+                 that does nothing is worse than no button. It arrives with the user
+                 management screen. -->
           </div>
-          <dl class="about-grid" id="about-grid"></dl>
-          <p class="about-foot">Every field above is read from the running build.</p>
+          <dl class="rows" id="about-rows"></dl>
+
+          <div class="page-head page-head--sub">
+            <h2>About</h2>
+          </div>
+          <dl class="rows" id="about-app-rows"></dl>
         </div>
       </section>
     </main>
@@ -307,6 +380,7 @@
       <span><kbd>Esc</kbd> Clear Transaction</span>
     </footer>
     <footer class="statusbar"><span id="status-line">Ready.</span></footer>
+    </div>
     </div>
 
     <script src="app.js"></script>

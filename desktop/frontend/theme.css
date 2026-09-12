@@ -44,8 +44,21 @@
 
   /* -------------------------------------------------------------- chrome size */
   --control-h: 36px;
-  --titlebar-h: 52px;
-  --tabs-h: 42px;
+  --topbar-h: 52px;
+  --sidebar-w: 216px;
+
+  /* ------------------------------------------------------------------ top bar
+     The bar stays dark in both themes, the way the reference does it — it is app
+     chrome, not a surface the content sits on, so it does not follow the theme. */
+  --topbar-bg: #10202b;
+  --topbar-ink: #eef3f8;
+  --topbar-ink-dim: #9fb2c0;
+  --topbar-hover: rgba(255, 255, 255, 0.09);
+
+  /* The avatar circle. Teal against the indigo accent, so a person reads as a person
+     and not as another action. */
+  --avatar-bg: #197f78;
+  --avatar-ink: #ffffff;
 
   --content-max: 1160px;
 

@@ -153,13 +153,13 @@
 
   /* ----------------------------------------------------------------------- tabs */
 
-  var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
+  var navItems = Array.prototype.slice.call(document.querySelectorAll(".nav-item"));
 
   function showPane(name) {
-    tabs.forEach(function (tab) {
-      var active = tab.dataset.pane === name;
-      tab.classList.toggle("is-active", active);
-      tab.setAttribute("aria-selected", active ? "true" : "false");
+    navItems.forEach(function (item) {
+      var active = item.dataset.pane === name;
+      item.classList.toggle("is-active", active);
+      item.setAttribute("aria-selected", active ? "true" : "false");
     });
     Array.prototype.forEach.call(document.querySelectorAll(".pane"), function (pane) {
       pane.classList.toggle("is-active", pane.id === "pane-" + name);
@@ -175,9 +175,9 @@
     }
   }
 
-  tabs.forEach(function (tab) {
-    tab.addEventListener("click", function () {
-      showPane(tab.dataset.pane);
+  navItems.forEach(function (item) {
+    item.addEventListener("click", function () {
+      showPane(item.dataset.pane);
     });
   });
 
@@ -187,10 +187,11 @@
     if (!invoke) return bridgeMissing("node_status");
     invoke("node_status")
       .then(function (info) {
-        $("node-label").textContent = "[Node: " + info.node + "]";
         var badge = $("conn-badge");
-        badge.textContent = info.connected ? "Connected" : "Offline";
-        badge.className = "badge " + (info.connected ? "badge--connected" : "badge--offline");
+        var label = info.connected ? "Connected" : "Offline";
+        badge.className = "status-dot " + (info.connected ? "status-dot--connected" : "status-dot--offline");
+        badge.title = label;
+        $("conn-label").textContent = label;
         status("db: " + info.db_path);
       })
       .catch(function (err) {
@@ -714,7 +715,8 @@
       .catch(function (err) {
         body.innerHTML = "";
         $("history-empty").hidden = false;
-        $("history-empty").textContent = "Could not load invoices: " + errText(err);
+        $("history-empty").querySelector(".empty-title").textContent = "Could not load invoices";
+        $("history-empty").querySelector(".empty-hint").textContent = errText(err);
         status("list_invoices failed: " + errText(err));
       });
   }
@@ -924,7 +926,10 @@
 
   document.addEventListener("keydown", function (event) {
     if (event.key !== "Escape") return;
-    if (!$("print-overlay").hidden) {
+    if (!$("user-menu").hidden) {
+      closeUserMenu();
+      event.stopImmediatePropagation();
+    } else if (!$("print-overlay").hidden) {
       $("print-overlay").hidden = true;
       event.stopImmediatePropagation();
     } else if (!$("history-detail").hidden) {
@@ -953,8 +958,11 @@
   function showShell() {
     $("login-screen").hidden = true;
     $("shell").hidden = false;
-    $("who").textContent = user.display_name + " · " + user.role;
+    $("avatar-initial").textContent = (user.display_name || user.username || "?").trim().charAt(0);
+    $("menu-name").textContent = user.display_name;
+    $("menu-role").textContent = user.role + " · " + user.username;
     loadNodeStatus();
+    refreshAbout();
     showPane("billing");
     $("mobile-input").focus();
   }
@@ -1043,7 +1051,38 @@
   }
 
   $("login-form").addEventListener("submit", signIn);
-  $("signout").addEventListener("click", signOut);
+  /* ------------------------------------------------------------------ user menu */
+
+  function closeUserMenu() {
+    $("user-menu").hidden = true;
+    $("avatar-btn").setAttribute("aria-expanded", "false");
+  }
+
+  function toggleUserMenu() {
+    var open = $("user-menu").hidden;
+    $("user-menu").hidden = !open;
+    $("avatar-btn").setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  $("avatar-btn").addEventListener("click", function (event) {
+    event.stopPropagation();
+    toggleUserMenu();
+  });
+
+  $("menu-about").addEventListener("click", function () {
+    closeUserMenu();
+    showPane("settings");
+  });
+
+  $("menu-signout").addEventListener("click", function () {
+    closeUserMenu();
+    signOut();
+  });
+
+  // Any click outside the menu dismisses it.
+  document.addEventListener("click", function (event) {
+    if (!$("user-menu").hidden && !event.target.closest(".avatar-wrap")) closeUserMenu();
+  });
 
   /* -------------------------------------------------------------- payment type */
 
@@ -1166,30 +1205,42 @@
 
   /** Everything here is read from the running build; nothing is duplicated in the UI. */
   function refreshAbout() {
-    var grid = $("about-grid");
-    if (!grid || !invoke || !user) return;
+    if (!invoke || !user) return;
 
     invoke("app_info")
       .then(function (info) {
-        var rows = [
+        // The sidebar's version line, in place of the reference's "OpenCloud 7.2.4".
+        $("side-app").textContent = info.name + " " + info.version;
+
+        rowList($("about-rows"), [
+          ["Username", user.username],
+          ["Display name", user.display_name],
+          ["Role", user.role],
+          ["Node", info.node],
+          ["Theme", currentTheme() === "dark" ? "Dark" : "Light"],
+        ]);
+
+        rowList($("about-app-rows"), [
           ["Application", info.name],
           ["Version", info.version],
           ["Identifier", info.identifier],
           ["Build date", info.build_date],
-          ["Node", info.node],
-          ["Signed in", user.display_name + " (" + user.role + ")"],
-          ["Theme", currentTheme() === "dark" ? "Dark" : "Light"],
           ["Database", info.db_path],
-        ];
-        grid.innerHTML = rows
-          .map(function (row) {
-            return "<dt>" + escapeHtml(row[0]) + "</dt><dd>" + escapeHtml(row[1]) + "</dd>";
-          })
-          .join("");
+        ]);
       })
       .catch(function (err) {
-        grid.innerHTML = '<dt>Error</dt><dd class="error">' + escapeHtml(errText(err)) + "</dd>";
+        rowList($("about-rows"), [["Error", errText(err)]]);
       });
+  }
+
+  /** Label-left / value-right rows, separated by dividers — no boxes. */
+  function rowList(el, rows) {
+    if (!el) return;
+    el.innerHTML = rows
+      .map(function (row) {
+        return "<dt>" + escapeHtml(row[0]) + "</dt><dd>" + escapeHtml(row[1]) + "</dd>";
+      })
+      .join("");
   }
 
   /* ----------------------------------------------------------------- wiring */

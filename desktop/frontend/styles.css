@@ -79,157 +79,235 @@ kbd {
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
-/* ================================================================ 3. Shell layout */
+/* ================================================================ 2. Shell layout */
 
 /*
- * The shell is one grid column: two fixed chrome rows, a content row that takes
- * everything left over, then two fixed footers. `minmax(0, 1fr)` is what lets the
- * content row shrink below its content's height so it scrolls inside itself instead of
- * pushing the footers off-screen.
+ * Top bar across the full width, then a sidebar and a content column beneath it. The
+ * `minmax(0, …)` tracks are what let both the sidebar and the content scroll inside
+ * themselves rather than pushing the window around.
  */
 .shell {
   display: grid;
-  grid-template-rows: var(--titlebar-h) var(--tabs-h) minmax(0, 1fr) auto auto;
+  grid-template-rows: var(--topbar-h) minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  grid-template-areas:
+    "topbar  topbar"
+    "sidebar content";
   height: 100%;
 }
 
-.titlebar {
+/* ---------------------------------------------------------------------- top bar */
+
+/*
+ * One solid dark band, flush to the window edges — no border, no radius, no shadow
+ * box. It is chrome, so it keeps its own colours in both themes.
+ */
+.topbar {
+  grid-area: topbar;
   display: flex;
   align-items: center;
-  gap: var(--s3);
-  padding: 0 var(--s5);
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  box-shadow: var(--shadow-sm);
-  overflow: hidden;
-  z-index: 2;
+  gap: var(--s4);
+  padding: 0 var(--s4);
+  background: var(--topbar-bg);
+  color: var(--topbar-ink);
+  /* No overflow clipping: the account menu is positioned against this bar and would be
+     cut off by it. The bar's children are fixed-size or flexible, so nothing spills. */
 }
 
-.node {
-  flex: 0 1 auto;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  white-space: nowrap;
-}
+/* The wordmark takes currentColor, so on the dark bar it must take the bar's ink
+   rather than the theme's text colour. */
+.topbar .logo { color: var(--topbar-ink); }
 
-/* Truncates rather than shoving the badge off the bar on a narrow window. */
-.who {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.topbar-center { flex: 1 1 auto; min-width: 0; }
 
-.who::before {
-  content: "· ";
-  color: var(--text-muted);
-}
-
-.badge {
-  display: inline-flex;
+.topbar-actions {
+  display: flex;
   align-items: center;
   gap: var(--s2);
   flex: 0 0 auto;
-  margin-left: auto;
-  padding: var(--s1) var(--s3);
-  border: 1px solid transparent;
-  border-radius: 999px;
-  font-size: var(--t-caption-size);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
 }
 
-/* The dot carries the status colour, so the label stays readable in both themes. */
-.badge::before {
-  content: "";
-  width: 6px;
-  height: 6px;
+/* Status reads as an icon, coloured by state; the label is for screen readers. */
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-sm);
+  color: var(--topbar-ink-dim);
+}
+
+.status-dot--connected { color: var(--success); }
+.status-dot--offline { color: var(--danger); }
+
+/* Icon buttons sitting on the dark bar take its ink, not the theme's. */
+.icon-btn--bar { color: var(--topbar-ink-dim); }
+
+.icon-btn--bar:hover {
+  background: var(--topbar-hover);
+  border-color: transparent;
+  color: var(--topbar-ink);
+}
+
+/* ----------------------------------------------------------------------- avatar */
+
+.avatar-wrap { position: relative; }
+
+.avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: var(--avatar-bg);
+  border: 0;
   border-radius: 50%;
-  background: currentColor;
+  color: var(--avatar-ink);
+  font: inherit;
+  font-size: var(--t-small-size);
+  font-weight: 650;
+  text-transform: uppercase;
+  cursor: pointer;
 }
 
-.badge--connected {
-  color: var(--success);
-  background: var(--success-soft);
-  border-color: var(--success-soft);
+.avatar:hover { filter: brightness(1.1); }
+
+.avatar:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--topbar-bg), 0 0 0 4px var(--avatar-bg);
 }
 
-.badge--offline {
-  color: var(--danger);
-  background: var(--danger-soft);
-  border-color: var(--danger-soft);
-}
-
-.signout {
-  flex: 0 0 auto;
-  height: 26px;
-  padding: 0 var(--s3);
-  background: transparent;
+.menu {
+  position: absolute;
+  top: calc(100% + var(--s2));
+  right: 0;
+  z-index: 30;
+  min-width: 210px;
+  padding: var(--s2);
+  background: var(--surface);
   border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
+}
+
+.menu-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s2) var(--s3) var(--s3);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--s2);
+}
+
+.menu-name { color: var(--text); font-weight: 600; }
+.menu-role { color: var(--text-secondary); font-size: var(--t-caption-size); }
+
+.menu-item {
+  display: block;
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item:hover { background: var(--surface-hover); }
+.menu-item--danger:hover { color: var(--danger); }
+
+.menu-item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ---------------------------------------------------------------------- sidebar */
+
+/*
+ * Flat, on the same ground as the content — the reference's sidebar is not a separate
+ * dark panel, only the top bar is dark.
+ */
+.sidebar {
+  grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  padding: var(--s3) var(--s2);
+  background: var(--bg-app);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex: 0 0 auto;
+  padding: var(--s2) var(--s3);
+  background: transparent;
+  border: 0;
   border-radius: var(--r-sm);
   color: var(--text-secondary);
   font: inherit;
-  font-size: 12px;
-  white-space: nowrap;
+  text-align: left;
   cursor: pointer;
 }
 
-.signout:hover { border-color: var(--danger); color: var(--danger); }
-
-/* ------------------------------------------------------------------------- tabs */
-
-.tabs {
-  display: flex;
-  align-items: stretch;
-  padding: 0 var(--s4);
-  gap: var(--s1);
-  background: var(--surface-2);
-  border-bottom: 1px solid var(--border);
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-}
-
-.tabs::-webkit-scrollbar { display: none; }
-
-.tab {
+.nav-item .icon {
   flex: 0 0 auto;
-  padding: 0 var(--s4);
-  border: 0;
-  background: transparent;
-  color: var(--text-secondary);
-  font: inherit;
-  font-weight: 500;
-  white-space: nowrap;
-  cursor: pointer;
-  /* An inset line rather than a border, so the active tab is exactly as wide as the
-     inactive one and the row never shifts on selection. */
-  box-shadow: inset 0 -2px 0 transparent;
+  width: 18px;
+  height: 18px;
 }
 
-.tab:hover { color: var(--text); background: var(--surface-hover); }
+.nav-item:hover { background: var(--surface-hover); color: var(--text); }
 
-.tab.is-active {
-  color: var(--accent-text);
-  background: var(--accent-soft);
-  box-shadow: inset 0 -2px 0 var(--accent);
+/* A subtle wash and a bolder label, nothing boxed. */
+.nav-item.is-active {
+  background: var(--surface-hover);
+  color: var(--text);
+  font-weight: 650;
 }
 
-.tab:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+.nav-item.is-active .icon { color: var(--accent); }
+
+.nav-item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
-/* ------------------------------------------------------------------------ panes */
+/* App name and sync state, where the reference puts its version line. */
+.sidebar-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: auto;
+  padding: var(--s3);
+  color: var(--text-muted);
+  font-size: var(--t-caption-size);
+}
+
+.sidebar-app { color: var(--text-secondary); }
+
+/* Sync state, where the reference shows "Up to date". */
+.sidebar-status { color: var(--text-muted); }
+
+/* ---------------------------------------------------------------------- content */
+
+.content {
+  grid-area: content;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  min-width: 0;
+  background: var(--bg-app);
+}
 
 main {
-  min-height: 0; /* pairs with the grid's minmax(0, 1fr) */
-  padding: var(--s4);
+  min-height: 0;
+  padding: var(--s5);
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -244,8 +322,6 @@ main {
 
 .soon {
   padding: var(--s6);
-  border: 1px dashed var(--border);
-  border-radius: var(--r-md);
   color: var(--text-secondary);
   letter-spacing: 0.04em;
   text-align: center;
@@ -409,21 +485,20 @@ select option { background: var(--surface); color: var(--text); }
 
 /* ====================================================================== 5. Cards */
 
-/* Sections inside a card are separated by one gap, never by per-child margins — that is
-   what kept the spacing drifting between views. */
+/*
+ * Content sits on the flat page, not inside a floating panel. Sections are separated by
+ * one gap and, where a break is genuinely needed, a thin divider — not a border on all
+ * four sides of everything.
+ */
 .card {
   display: flex;
   flex-direction: column;
   gap: var(--s4);
   width: 100%;
   max-width: var(--content-max);
-  padding: var(--s5);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  /* Elevation, not just an outline: on light this is what lifts the card off the page,
-     and on dark it is what stops every panel reading as one flat sheet. */
-  box-shadow: var(--shadow-md);
+  padding: 0;
+  background: transparent;
+  border: 0;
 }
 
 .card-head {
@@ -511,13 +586,6 @@ select option { background: var(--surface); color: var(--text); }
 .items .col-when { width: 152px; }
 .items .col-pay { width: 104px; }
 /* .col-desc and the history table's customer column are deliberately unsized. */
-
-.empty-rows {
-  margin: 0;
-  padding: var(--s4) var(--s3);
-  color: var(--text-secondary);
-  font-size: 13px;
-}
 
 /* ============================================================== 7. Billing view */
 
@@ -630,11 +698,11 @@ select option { background: var(--surface); color: var(--text); }
 
 /* -------------------------------------------------------------- item picker */
 
+/* A soft fill groups the picker without adding another outline to the page. */
 .picker {
   padding: var(--s3);
   background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-md);
 }
 
 .picker-head { display: flex; gap: var(--s2); }
@@ -785,15 +853,16 @@ select option { background: var(--surface); color: var(--text); }
 }
 
 /* The totals block: right-aligned, boxed, clear of the card edge. */
+/* Grouped by a soft fill rather than an outline — enough separation to read as a
+   block, without becoming another box on the page. */
 .totals {
   flex: 0 1 320px;
   min-width: 0;
   max-width: 340px;
   margin: 0 0 0 auto;
-  padding: var(--s3);
-  background: var(--bg-app);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
+  padding: var(--s3) var(--s4);
+  background: var(--surface-2);
+  border-radius: var(--r-md);
 }
 
 .tot-row {
@@ -848,13 +917,17 @@ select option { background: var(--surface); color: var(--text); }
 }
 
 /* A saved invoice is a printed document: nothing on it may still look editable. */
-.card--txn.is-locked { border-color: var(--success); }
+.card--txn.is-locked {
+  padding-left: var(--s4);
+  border-left: 3px solid var(--success);
+}
 
 .card--txn.is-locked .items td,
 .card--txn.is-locked .cust-line { color: var(--text-secondary); }
 
 /* ============================================================== 8. History view */
 
+/* A toolbar row, grouped by a soft fill rather than an outlined box. */
 .filters {
   display: flex;
   flex-wrap: wrap;
@@ -862,8 +935,7 @@ select option { background: var(--surface); color: var(--text); }
   gap: var(--s3);
   padding: var(--s3);
   background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-md);
 }
 
 .filt {
@@ -924,43 +996,34 @@ select option { background: var(--surface); color: var(--text); }
 
 /* ================================================================ 9. Login view */
 
+/*
+ * Nothing contains the form. No card, no border, no shadow — just the wordmark, two
+ * fields and a button, centred with room around them.
+ */
 .login {
   display: flex;
   align-items: center;
   justify-content: center;
   height: 100%;
-  padding: var(--s4);
+  padding: var(--s6) var(--s5);
   overflow-y: auto;
-  background:
-    radial-gradient(1200px 560px at 50% -12%, var(--accent-soft) 0%, transparent 70%),
-    var(--bg-app);
+  background: var(--bg-app);
 }
 
-.login-card {
+.login-form {
   display: flex;
   flex-direction: column;
-  gap: var(--s3);
+  gap: var(--s4);
   width: 100%;
-  max-width: 380px;
-  padding: var(--s5);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
+  max-width: 320px;
 }
 
-.login-card h1 {
-  margin: 0;
-  color: var(--accent);
-  font-size: 21px;
-  letter-spacing: 0.16em;
-  text-align: center;
-}
+.logo--login { align-self: center; }
 
 .login-node {
-  margin: 0 0 var(--s3);
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  font-size: 12px;
+  margin: 0 0 var(--s5);
+  color: var(--text-muted);
+  font-size: var(--t-small-size);
   text-align: center;
 }
 
@@ -969,27 +1032,46 @@ select option { background: var(--surface); color: var(--text); }
   flex-direction: column;
   gap: var(--s1);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--t-small-size);
 }
 
-.login-submit { width: 100%; margin-top: var(--s2); }
+/* Underlined rather than boxed: the field reads as a line to write on, and only the
+   focused one draws attention. */
+.login-field input {
+  padding: 0 var(--s1);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-strong);
+  border-radius: 0;
+}
+
+.login-field input:hover { border-bottom-color: var(--text-secondary); }
+
+.login-field input:focus {
+  border-bottom-color: var(--accent);
+  border-bottom-width: 2px;
+  box-shadow: none;
+}
+
+.login-submit { width: 100%; margin-top: var(--s3); }
 
 .login-msg {
   min-height: 18px;
   margin: 0;
-  font-size: 13px;
+  font-size: var(--t-small-size);
   text-align: center;
 }
 
+/* The one exception: first-run credentials are a notice, and a notice needs an edge. */
 .login-firstrun {
   padding: var(--s3);
   background: var(--surface-2);
-  border: 1px solid var(--accent);
-  border-radius: var(--r-sm);
-  font-size: 12.5px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  font-size: var(--t-small-size);
 }
 
-.login-firstrun strong { color: var(--accent); }
+.login-firstrun strong { color: var(--accent-text); }
 .login-firstrun p { margin: var(--s1) 0 var(--s3); color: var(--text-secondary); }
 
 .login-firstrun dl {
@@ -1202,16 +1284,20 @@ select option { background: var(--surface); color: var(--text); }
   .items .col-pay { width: 84px; }
 }
 
-@media (max-width: 700px) {
-  :root { --titlebar-h: 40px; }
+@media (max-width: 980px) {
+  /* Give the content back some width before anything has to reflow. */
+  :root { --sidebar-w: 180px; }
+}
 
-  main { padding: var(--s3); }
-  .card { padding: var(--s3); }
+@media (max-width: 760px) {
+  /* An icon rail: the labels go, the navigation stays. */
+  :root { --sidebar-w: 56px; --topbar-h: 48px; }
 
-  /* The node chip is the least load-bearing thing on the bar, so it goes first. */
-  .node { display: none; }
+  .nav-item { justify-content: center; padding: var(--s2); }
+  .nav-item span { display: none; }
+  .sidebar-foot { display: none; }
 
-  .tab { padding: 0 var(--s4); }
+  main { padding: var(--s4); }
 
   .filt,
   .filt--grow { flex: 1 1 100%; }
@@ -1239,9 +1325,8 @@ select option { background: var(--surface); color: var(--text); }
   aspect-ratio: 168 / 32;
 }
 
-.logo--bar { height: 26px; }
-.logo--login { height: 32px; align-self: center; }
-.logo--about { height: 30px; }
+.logo--bar { height: 24px; }
+.logo--login { height: 34px; }
 
 /* --------------------------------------------------------------- theme toggle */
 
@@ -1286,49 +1371,117 @@ select option { background: var(--surface); color: var(--text); }
 :root[data-theme="dark"] .icon--moon,
 :root:not([data-theme="dark"]) .icon--sun { display: none; }
 
-/* ================================================================== 13. About */
+/* ================================================== 14. Pages and row lists */
 
-.about { max-width: 760px; }
-
-.about-head {
+/*
+ * The settings/account layout: a title with an optional action on the right, then
+ * label-left / value-right rows split by thin dividers. No bordered inputs unless a
+ * field is actually being edited.
+ */
+.page {
   display: flex;
   flex-direction: column;
-  align-items: flex-start; /* the mark lines up with the tagline under it */
-  gap: var(--s2);
-  padding-bottom: var(--s4);
-  border-bottom: 1px solid var(--border);
+  gap: var(--s3);
+  width: 100%;
+  max-width: 760px;
 }
 
-.about-tagline {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: var(--t-small-size);
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
 }
 
-.about-grid {
-  display: grid;
-  grid-template-columns: minmax(110px, max-content) 1fr;
-  gap: var(--s3) var(--s5);
-  margin: 0;
-}
-
-.about-grid dt {
-  color: var(--text-secondary);
-  font-size: var(--t-small-size);
-}
-
-.about-grid dd {
+.page-head h2 {
   margin: 0;
   color: var(--text);
-  font-family: var(--font-mono);
-  font-size: var(--t-small-size);
+  font-size: var(--t-h1-size);
+  font-weight: var(--t-h1-weight);
+  line-height: var(--lh-tight);
+}
+
+/* A second heading further down the page is a section, not a page title. */
+.page-head--sub {
+  margin-top: var(--s4);
+}
+
+.page-head--sub h2 { font-size: var(--t-h2-size); font-weight: var(--t-h2-weight); }
+
+.page-head .btn { margin-left: auto; }
+
+.rows {
+  display: grid;
+  grid-template-columns: minmax(140px, 220px) 1fr;
+  margin: 0;
+}
+
+.rows dt,
+.rows dd {
+  margin: 0;
+  padding: var(--s3) 0;
+  border-top: 1px solid var(--border);
+}
+
+/* The first row's divider would double up with the heading's spacing. */
+.rows dt:first-of-type,
+.rows dt:first-of-type + dd { border-top: 0; }
+
+.rows dt { color: var(--text-secondary); }
+
+.rows dd {
+  color: var(--text);
   overflow-wrap: anywhere;
   -webkit-user-select: text;
   user-select: text;
 }
 
-.about-foot {
+/* ============================================================ 15. Empty states */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s6) var(--s4);
+  text-align: center;
+}
+
+.empty-art {
+  width: 128px;
+  height: 96px;
+  margin-bottom: var(--s2);
+}
+
+.empty-blob { fill: var(--accent-soft); }
+
+.empty-line {
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.empty-title {
   margin: 0;
-  color: var(--text-muted);
-  font-size: var(--t-caption-size);
+  color: var(--text);
+  font-size: var(--t-h2-size);
+  font-weight: var(--t-h2-weight);
+}
+
+.empty-hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--t-small-size);
+}
+
+.empty-hint kbd {
+  padding: 1px var(--s2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--r-sm);
+  color: var(--accent-text);
+  font-size: 11px;
 }
