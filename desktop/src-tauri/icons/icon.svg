@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  RealInvoice app icon — the brand mark from the branding stage, adapted for an app icon:
+  a solid indigo tile with the wordmark's "R" in white. Solid rather than the UI's
+  outlined treatment, because an outline disappears at 16px in a taskbar.
+
+  This SVG is the single source for every generated icon; see tools/generate-icons.sh.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="114" ry="114" fill="#4f46e5"/>
+  <g transform="translate(-16 0) scale(16)" fill="#ffffff">
+    <path d="M11.4 23.2V8.8h6.9a4.3 4.3 0 0 1 1.2 8.43l3.1 5.97h-3.3l-2.85-5.6H14.3v5.6zm2.9-8.1h3.9a1.75 1.75 0 0 0 0-3.5h-3.9z"/>
+  </g>
+</svg>
