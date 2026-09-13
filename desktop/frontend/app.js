@@ -1746,6 +1746,7 @@
     var TONES = {
       ok: "text-success",
       warn: "text-warning",
+      bad: "text-error",
       idle: "text-base-content/45",
     };
 
@@ -1757,6 +1758,16 @@
       tone = "idle";
       text = "Checking…";
       title = "Reading sync status";
+    } else if (view.token_rejected) {
+      // The one state that needs somebody to do something. It is not "offline" — the
+      // back office answered, and what it said was no.
+      tone = "bad";
+      text = "Sync disabled — invalid token";
+      title = view.last_error || "The back office rejected this till's token";
+    } else if (view.configured && !view.token_set) {
+      tone = "idle";
+      text = "Not registered";
+      title = "No token for this till yet — Settings › Sync";
     } else if (!view.configured) {
       // Not an error. A till nobody has pointed at a back office yet is waiting to be
       // set up, and a red badge on a fresh install would be a lie.
@@ -1837,8 +1848,12 @@
     }
 
     var state;
-    if (!view.configured) {
+    if (view.token_rejected) {
+      state = "Sync disabled — invalid token";
+    } else if (!view.configured) {
       state = "Not linked — no address set";
+    } else if (!view.token_set) {
+      state = "Not registered — no token entered";
     } else if (view.healthy) {
       state = "Connected";
     } else {
@@ -1853,13 +1868,26 @@
       ["Last sent", whenSynced(view.last_success)],
     ];
 
+    rows.push([
+      "Token",
+      view.token_rejected
+        ? "Rejected by the back office " + (view.token_hint || "")
+        : view.token_set
+          ? "Set " + (view.token_hint || "")
+          : "None entered yet",
+    ]);
+
     if (view.last_batch > 0 && view.last_success) {
       rows.push(["Last batch", view.last_batch + " record(s)"]);
     }
     if (view.last_error) {
       rows.push(["Last problem", view.last_error]);
     }
-    if (view.consecutive_failures > 0) {
+    if (view.token_rejected) {
+      // Deliberately not "retrying": the worker has stopped, and saying otherwise would
+      // leave somebody waiting for a recovery that is never coming on its own.
+      rows.push(["Retrying", "Stopped — waiting for a working token"]);
+    } else if (view.consecutive_failures > 0) {
       rows.push([
         "Retrying",
         "attempt " + (view.consecutive_failures + 1) + ", in about " +
@@ -1872,6 +1900,19 @@
     // Do not fight somebody who is mid-edit in the address box.
     var box = $("sync-endpoint");
     if (document.activeElement !== box) box.value = view.endpoint || "";
+
+    // The token box stays empty: the stored value is never sent back to the screen, so
+    // there is nothing to put in it. Typing replaces what is stored.
+    var alert = $("token-alert");
+    if (view.token_rejected) {
+      alert.textContent =
+        "The back office rejected this till's token. Nothing has been lost — every " +
+        "invoice is still queued here and will be sent as soon as a working token is " +
+        "entered below.";
+      alert.classList.remove("hidden");
+    } else {
+      alert.classList.add("hidden");
+    }
   }
 
   function syncNow() {
@@ -1912,6 +1953,36 @@
       });
   }
 
+  function saveToken(event) {
+    if (event) event.preventDefault();
+    if (!invoke) return bridgeMissing("set_sync_token");
+
+    var box = $("sync-token");
+    var button = $("token-save");
+    button.disabled = true;
+    setMsg("token-msg", "Saving…", false);
+
+    invoke("set_sync_token", { token: box.value })
+      .then(function (view) {
+        button.disabled = false;
+        // Cleared straight away. The value is stored; leaving it on screen only leaves a
+        // credential sitting in a text box for whoever walks past the counter next.
+        box.value = "";
+        setMsg("token-msg", view.token_set ? "Saved." : "Cleared.", false);
+        status(view.token_set ? "Token saved for this till." : "Token cleared.");
+        syncState = view;
+        paintBadge(view);
+        renderSyncPage(view);
+        setTimeout(refreshSync, 1500);
+        setTimeout(refreshSync, 3500);
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        setMsg("token-msg", errText(err), true);
+      });
+  }
+
+  $("token-form").addEventListener("submit", saveToken);
   $("sync-now").addEventListener("click", syncNow);
   $("endpoint-form").addEventListener("submit", saveEndpoint);
   // The badge is a shortcut to the page that explains it.

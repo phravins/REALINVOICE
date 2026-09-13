@@ -18,9 +18,13 @@ x-realinvoice-node: POS-01
 content-type: application/json
 ```
 
-The token is a **placeholder** — `realinvoice-dev-token`, the same on every node. It
-authenticates nothing. Real per-node issuance is a later hardening stage, and until then
-the endpoint must not treat this header as proof of anything.
+The token is **issued per node** by the back office when the till is registered. There is
+no default, no fallback and nothing hardcoded: a node with no token does not send at all,
+so an unregistered till cannot manufacture a 401 against itself.
+
+It is stored in that node's own SQLite `settings` table, never in source and never in a
+file that could be committed. The desktop never renders it back — the Sync screen shows
+only whether one is set and its last four characters.
 
 ## The body
 
@@ -106,8 +110,20 @@ with the other two at 0. Never both.
 | Status | What the till does |
 | --- | --- |
 | any 2xx | Marks that batch sent and moves on to the next. |
+| **401** | Marks nothing, and **stops**. See below. |
 | any other | Marks **nothing**. The same batch is retried, unchanged, after a backoff. |
 | no answer | Same as above. |
+
+### 401 means stop, not retry
+
+A revoked or invalid token does not become valid by being sent again, so a 401 puts the
+worker into a disabled state instead of a retry loop: it stops attempting, the badge reads
+**"Sync disabled — invalid token"**, and the Sync screen asks for a new one. Nothing is
+lost — the queue is untouched and goes as soon as a working token is entered.
+
+It resumes only on a human action: saving a token, or pressing Sync Now. Use 401 **only**
+for credential problems. A 401 for a malformed batch or a server fault would take the till
+off sync until somebody visits the counter.
 
 The body of a 2xx is not read. A non-2xx must therefore never mean "I took some of it":
 partial acceptance would silently lose the rows that were not taken, because the till
@@ -121,6 +137,7 @@ marks a batch all or nothing.
 | Batch size | 50 rows |
 | Backoff | doubles from the poll interval, capped at 5 minutes |
 | Request timeout | 20s |
+| After a 401 | stopped, until a token is saved or Sync Now is pressed |
 
 Backoff starts at the poll interval rather than at zero, so one failure costs one ordinary
 poll and only a run of them backs further off. A till that has been offline overnight

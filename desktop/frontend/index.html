@@ -631,6 +631,28 @@
               <span class="text-xs text-base-content/60" id="endpoint-msg" aria-live="polite"></span>
             </form>
           </div>
+
+          <div class="flex flex-col gap-2">
+            <h2 class="text-lg font-semibold tracking-tight">This till's token</h2>
+            <p class="max-w-prose text-sm text-base-content/60">Register this till in the
+              back office and paste the token it gives you. It is stored on this computer
+              only, and is never shown again once saved — if you lose it, issue a new one.</p>
+
+            <!-- Raised to the top of the section when the back office refuses the token,
+                 because that is the one case where somebody has to act. -->
+            <p class="hidden max-w-prose rounded-field border border-error/30 bg-error/10 px-3 py-2 text-sm text-error"
+               id="token-alert"></p>
+
+            <form class="flex flex-wrap items-end gap-3" id="token-form" autocomplete="off">
+              <label class="flex min-w-64 flex-1 flex-col gap-1 text-xs text-base-content/60">Token
+                <input id="sync-token" type="password" spellcheck="false"
+                       autocomplete="off" placeholder="paste the token from the back office"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 font-mono" />
+              </label>
+              <button type="submit" id="token-save" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Save token</button>
+              <span class="text-xs text-base-content/60" id="token-msg" aria-live="polite"></span>
+            </form>
+          </div>
         </div>
       </section>
 

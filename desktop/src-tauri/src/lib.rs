@@ -54,6 +54,7 @@ pub fn run() {
             commands::sync_status,
             commands::sync_now,
             commands::set_sync_endpoint,
+            commands::set_sync_token,
             commands::create_invoice,
             commands::add_line_item,
             commands::list_todays_invoices,

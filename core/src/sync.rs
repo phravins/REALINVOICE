@@ -44,15 +44,12 @@ pub const DEFAULT_POLL_SECONDS: u64 = 10;
 /// link coming back.
 pub const MAX_BACKOFF_SECONDS: u64 = 300;
 
-/// Placeholder credential.
+/// Settings keys. Stored in core's `settings` table — this node's own SQLite file — so
+/// they survive a restart and are editable from the Sync screen without a rebuild.
 ///
-/// Real per-node token issuance is a later hardening stage. Until then every node sends
-/// the same string, which authenticates nothing — the endpoint it is sent to must be
-/// treated as untrusted, and this must not be mistaken for a security boundary.
-pub const PLACEHOLDER_TOKEN: &str = "realinvoice-dev-token";
-
-/// Settings keys. Stored in core's `settings` table, so the endpoint survives a restart
-/// and is editable from the Sync screen without a rebuild.
+/// The token is a credential issued to this node and belongs nowhere else: not in source,
+/// not in a config file that could be committed, and not in any log line. There is no
+/// default and no fallback. A node with no token does not sync.
 pub const ENDPOINT_KEY: &str = "sync.endpoint";
 pub const TOKEN_KEY: &str = "sync.token";
 
@@ -64,6 +61,9 @@ pub struct SyncConfig {
     pub endpoint: String,
     /// Which till this is. Travels in the body and in a header.
     pub node_id: String,
+    /// The credential the back office issued for this node. Empty means none has been
+    /// entered, and the worker does not attempt anything — sending an empty bearer would
+    /// be a request that can only ever be rejected.
     pub token: String,
     pub poll_interval: Duration,
     pub batch_size: usize,
@@ -76,7 +76,7 @@ impl SyncConfig {
         Ok(Self {
             endpoint: db.get_setting(ENDPOINT_KEY)?.unwrap_or_default(),
             node_id: node_id.to_string(),
-            token: db.get_setting(TOKEN_KEY)?.unwrap_or_else(|| PLACEHOLDER_TOKEN.to_string()),
+            token: db.get_setting(TOKEN_KEY)?.unwrap_or_default(),
             poll_interval: Duration::from_secs(DEFAULT_POLL_SECONDS),
             batch_size: DEFAULT_BATCH_SIZE,
             max_backoff: Duration::from_secs(MAX_BACKOFF_SECONDS),
@@ -103,6 +103,17 @@ pub struct SyncStatus {
     pub retry_in_seconds: u64,
     /// False until an endpoint is configured.
     pub configured: bool,
+    /// Whether a token has been entered for this node. The token itself is never put in
+    /// here: this struct crosses into JavaScript, and a credential that reaches the
+    /// frontend can be read out of it.
+    pub token_set: bool,
+    /// The last four characters, for somebody checking they pasted the right one.
+    pub token_hint: Option<String>,
+    /// True once the back office has answered 401. The worker stops attempting: a
+    /// revoked token will not become valid by being sent again, and a till retrying a
+    /// rejected credential every ten seconds is noise at both ends. Cleared when a new
+    /// token is saved, or when somebody presses Sync Now.
+    pub token_rejected: bool,
     /// How often the worker polls when healthy, so the UI can decide what "recent" means
     /// without hardcoding a number the worker owns.
     pub poll_seconds: u64,
@@ -120,9 +131,29 @@ impl SyncStatus {
             consecutive_failures: 0,
             retry_in_seconds: 0,
             configured: !config.endpoint.trim().is_empty(),
+            token_set: !config.token.trim().is_empty(),
+            token_hint: token_hint(&config.token),
+            token_rejected: false,
             poll_seconds: config.poll_interval.as_secs().max(1),
         }
     }
+}
+
+/// The tail of a token, for somebody checking they pasted the right one.
+///
+/// Never the whole thing. Four characters is enough to tell two tokens apart by eye and
+/// not enough to use, and a token short enough that four characters would give it away is
+/// hidden completely.
+pub fn token_hint(token: &str) -> Option<String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    if token.chars().count() <= 8 {
+        return Some("••••".to_string());
+    }
+    let tail: String = token.chars().skip(token.chars().count() - 4).collect();
+    Some(format!("••••{tail}"))
 }
 
 /// One queued row, as it goes over the wire.
@@ -214,8 +245,16 @@ impl SyncHandle {
 
     /// Asks the worker to poll now instead of waiting out its timer. Returns immediately;
     /// the button must not block the screen on a network round trip.
+    ///
+    /// Also clears a rejected token. Pressing this is a person saying "try again", which
+    /// is the one thing that should lift a self-imposed stop — the alternative is a till
+    /// that has to be restarted after the back office re-issues its credential.
     #[cfg(feature = "sync")]
     pub fn sync_now(&self) {
+        {
+            let mut status = self.status.lock().unwrap_or_else(|p| p.into_inner());
+            status.token_rejected = false;
+        }
         self.wake.notify_one();
     }
 
@@ -225,6 +264,20 @@ impl SyncHandle {
         let mut status = self.status.lock().unwrap_or_else(|p| p.into_inner());
         status.endpoint = endpoint.to_string();
         status.configured = !endpoint.trim().is_empty();
+    }
+
+    /// Records that a new token has been stored, and lifts a rejection.
+    ///
+    /// Takes the token only to derive the hint and forget it. The handle keeps no
+    /// credential: the worker reads the stored one at the top of each attempt, so there is
+    /// no second copy to leak or to go stale.
+    pub fn token_changed(&self, token: &str) {
+        let mut status = self.status.lock().unwrap_or_else(|p| p.into_inner());
+        status.token_set = !token.trim().is_empty();
+        status.token_hint = token_hint(token);
+        status.token_rejected = false;
+        status.last_error = None;
+        status.consecutive_failures = 0;
     }
 }
 
@@ -280,18 +333,28 @@ mod worker {
                 _ = handle.wake.notified() => {}
             }
 
+            // A rejected token is not a transient failure, so the worker does not keep
+            // throwing it at the back office. It waits to be given a new one — saving a
+            // token or pressing Sync Now clears this — rather than looping on a
+            // credential that has already been refused.
+            if handle.status().token_rejected {
+                continue;
+            }
+
             match attempt(&db, &config, &client, &handle).await {
                 Outcome::Idle | Outcome::Sent => failures = 0,
-                Outcome::Failed => failures = failures.saturating_add(1),
+                Outcome::Failed | Outcome::Rejected => failures = failures.saturating_add(1),
             }
         }
     }
 
     enum Outcome {
-        /// No endpoint configured, so there was nothing to attempt.
+        /// No endpoint or no token, so there was nothing to attempt.
         Idle,
         Sent,
         Failed,
+        /// The back office refused the credential. Retrying it changes nothing.
+        Rejected,
     }
 
     async fn attempt(
@@ -320,12 +383,25 @@ mod worker {
             s.pending = pending;
             s.endpoint = endpoint.clone();
             s.configured = !endpoint.trim().is_empty();
+            s.token_set = !token.trim().is_empty();
+            s.token_hint = token_hint(&token);
         });
 
         if endpoint.trim().is_empty() {
             // Not an error: a till that has not been pointed at a back office yet is
             // waiting to be configured, not failing. Saying "failed" here would turn the
             // badge red on every fresh install.
+            set(handle, |s| {
+                s.last_error = None;
+                s.consecutive_failures = 0;
+            });
+            return Outcome::Idle;
+        }
+
+        if token.trim().is_empty() {
+            // Also not an error, and deliberately not a request. An empty bearer can only
+            // ever be refused, so sending one would manufacture a 401 out of a node that
+            // simply has not been registered yet — and then disable itself over it.
             set(handle, |s| {
                 s.last_error = None;
                 s.consecutive_failures = 0;
@@ -383,10 +459,26 @@ mod worker {
                 });
                 Outcome::Sent
             }
+            Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                // The credential was refused: revoked, or never valid. Nothing is marked,
+                // so the queue is intact and will go as soon as a working token is
+                // entered. What must not happen is retrying this every ten seconds
+                // forever, so the worker disables itself and says why.
+                set(handle, |s| {
+                    s.token_rejected = true;
+                    s.last_error = Some(
+                        "the back office rejected this till's token — enter the one issued \
+                         for this node"
+                            .to_string(),
+                    );
+                    s.consecutive_failures = s.consecutive_failures.saturating_add(1);
+                });
+                Outcome::Rejected
+            }
             Ok(response) => {
-                // Any non-2xx leaves the batch queued. Nothing is marked, so the same
-                // rows go again next time — the far end rejecting a batch must never cost
-                // a record.
+                // Any other non-2xx leaves the batch queued. Nothing is marked, so the
+                // same rows go again next time — the far end rejecting a batch must never
+                // cost a record.
                 let status = response.status();
                 set(handle, |s| {
                     s.last_error = Some(format!("the back office answered {status}"));
@@ -456,5 +548,68 @@ mod tests {
         assert_eq!(backoff_for(40, poll, max), max);
         // No overflow panic on an absurd failure count.
         assert_eq!(backoff_for(u32::MAX, poll, max), max);
+    }
+
+    #[test]
+    fn a_token_hint_identifies_without_revealing() {
+        // Enough to tell two tokens apart by eye, never enough to use.
+        assert_eq!(token_hint("rin_live_9f3c2a7b4e1d8c6f"), Some("••••8c6f".to_string()));
+        assert_eq!(token_hint("  rin_live_9f3c2a7b4e1d8c6f  "), Some("••••8c6f".to_string()));
+
+        // A token short enough that four characters would give away most of it is hidden
+        // completely rather than half-shown.
+        assert_eq!(token_hint("short"), Some("••••".to_string()));
+        assert_eq!(token_hint("12345678"), Some("••••".to_string()));
+        assert_eq!(token_hint("123456789"), Some("••••6789".to_string()));
+
+        // Nothing entered is nothing shown.
+        assert_eq!(token_hint(""), None);
+        assert_eq!(token_hint("   "), None);
+    }
+
+    #[test]
+    fn the_status_never_carries_the_token_itself() {
+        let config = SyncConfig {
+            endpoint: "https://backoffice.example.com/api/sync".into(),
+            node_id: "POS-01".into(),
+            token: "rin_live_9f3c2a7b4e1d8c6f".into(),
+            poll_interval: Duration::from_secs(10),
+            batch_size: 50,
+            max_backoff: Duration::from_secs(300),
+        };
+
+        let status = SyncStatus::new(&config);
+        assert!(status.token_set);
+        assert_eq!(status.token_hint, Some("••••8c6f".to_string()));
+        assert!(!status.token_rejected);
+
+        // This struct is what crosses into JavaScript. A credential that reaches the
+        // frontend can be read out of it, so the whole token must not be in here.
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(!json.contains("rin_live_9f3c2a7b4e1d8c6f"), "{json}");
+        assert!(!json.contains("9f3c2a7b"), "{json}");
+        assert!(json.contains("••••8c6f"));
+    }
+
+    #[test]
+    fn an_unregistered_node_is_not_a_rejected_one() {
+        // A till nobody has issued a token for yet has token_set false and
+        // token_rejected false: it is waiting to be registered, not refused. The two
+        // states say different things to the person reading the badge, and the worker
+        // treats them differently — one is idle, the other is stopped.
+        let config = SyncConfig {
+            endpoint: "https://backoffice.example.com/api/sync".into(),
+            node_id: "POS-01".into(),
+            token: String::new(),
+            poll_interval: Duration::from_secs(10),
+            batch_size: 50,
+            max_backoff: Duration::from_secs(300),
+        };
+
+        let status = SyncStatus::new(&config);
+        assert!(!status.token_set);
+        assert_eq!(status.token_hint, None);
+        assert!(!status.token_rejected);
+        assert!(status.configured, "an address is set; only the credential is missing");
     }
 }

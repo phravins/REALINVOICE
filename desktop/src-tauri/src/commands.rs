@@ -359,7 +359,10 @@ pub fn node_status(state: State<'_, AppState>) -> Result<NodeStatus, String> {
 /// unconfigured node is not connected and not failing; it is waiting to be pointed at a
 /// back office, which the screen says in those words rather than in red.
 pub fn healthy(status: &SyncStatus) -> bool {
-    if !status.configured || status.consecutive_failures > 0 {
+    if !status.configured || !status.token_set || status.token_rejected {
+        return false;
+    }
+    if status.consecutive_failures > 0 {
         return false;
     }
 
@@ -417,6 +420,34 @@ pub fn sync_now(state: State<'_, AppState>) -> Result<(), String> {
     require_session(&state)?;
     state.sync().ok_or_else(|| "The sync worker is not running.".to_string())?.sync_now();
     Ok(())
+}
+
+/// Stores the token the back office issued for this node. Owner-only.
+///
+/// The token is written to core's `settings` table — this node's own SQLite file — and
+/// nowhere else. It is never returned to the frontend afterwards: `sync_status` carries
+/// only whether one is set and its last four characters, because anything that reaches
+/// JavaScript can be read out of the page.
+///
+/// Saving lifts a rejection. Somebody pasting a credential is saying "try this one", and
+/// a worker that stayed disabled until the app restarted would be the wrong answer to
+/// exactly the situation this command exists to fix.
+#[tauri::command]
+pub fn set_sync_token(token: String, state: State<'_, AppState>) -> Result<SyncView, String> {
+    require_owner(&state)?;
+    let token = token.trim().to_string();
+
+    state.db().set_setting(sync::TOKEN_KEY, &token).map_err(|e| e.to_string())?;
+
+    if let Some(handle) = state.sync() {
+        handle.token_changed(&token);
+        if !token.is_empty() {
+            // Try it straight away, so somebody who has just pasted a token finds out now
+            // whether it works rather than in ten seconds.
+            handle.sync_now();
+        }
+    }
+    sync_status(state)
 }
 
 /// Points this node at a back office. Owner-only: where a shop's invoices are sent is not
