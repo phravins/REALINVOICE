@@ -5,12 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>REALINVOICE DESKTOP</title>
     <!--
-      tailwind.css is compiled from ../assets/css/app.css by tools/build-css.sh and holds
-      the design system: the type scale, both daisyUI themes and the icon classes.
+      tailwind.css is compiled from ../assets/css/app.css by tools/build-css.sh and is the
+      whole of the app's own look: the type scale, both daisyUI themes and the icons.
 
-      theme.css and styles.css are the previous hand-written system. They load after it,
-      so they still win for the panes that have not been converted yet, and they come out
-      pane by pane. Nothing new should be added to them.
+      theme.css and styles.css are now only the printed document. A bill on paper is not
+      themed — black ink on white, the same in either theme — so it keeps its own palette
+      and its own rules rather than inheriting the screen's. Nothing on screen should use
+      them.
     -->
     <link rel="stylesheet" href="tailwind.css" />
     <link rel="stylesheet" href="theme.css" />
@@ -117,10 +118,13 @@
          the Back-Office Web. There is no separate dark title bar: the chrome is the
          sidebar plus the thin bar over the page. -->
     <aside class="sticky top-0 flex h-screen w-48 shrink-0 flex-col border-r border-base-300 bg-base-100">
-      <div class="flex items-center gap-2 px-4 py-4 text-base-content">
+      <div class="flex flex-col gap-0.5 px-4 py-4 text-base-content">
         <svg class="h-6 w-[126px] shrink-0" role="img" aria-label="RealInvoice">
           <use href="#ri-logo" />
         </svg>
+        <!-- Version and sync state, where the reference puts its own version line.
+             Filled by refreshAbout() from the running build. -->
+        <span class="pl-9 text-2xs text-base-content/45" id="side-app">RealInvoice</span>
       </div>
 
       <nav class="flex-1 overflow-y-auto px-2.5 pt-1" id="tabs" role="tablist">
@@ -346,14 +350,14 @@
       </section>
 
       <section class="pane" id="pane-history" role="tabpanel">
-        <div class="card" id="history-list-card">
-          <div class="card-head">
-            <h2>Invoice History</h2>
-          </div>
+        <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-1 flex-col gap-4 p-4" id="history-list-card">
+          <header class="flex flex-wrap items-center justify-between gap-4">
+            <h1 class="text-xl font-semibold tracking-tight">Invoice History</h1>
+          </header>
 
-          <div class="filters">
-            <label class="filt">Range
-              <select id="f-range">
+          <div class="flex flex-wrap items-end gap-3">
+            <label class="flex flex-col gap-1 text-xs text-base-content/60 w-36">Range
+              <select id="f-range" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8">
                 <option value="today" selected>Today</option>
                 <option value="week">This week</option>
                 <option value="month">This month</option>
@@ -361,103 +365,126 @@
                 <option value="custom">Custom range</option>
               </select>
             </label>
-            <label class="filt" id="f-from-wrap" hidden>From
-              <input id="f-from" type="date" />
+            <label class="flex flex-col gap-1 text-xs text-base-content/60 w-40" id="f-from-wrap" hidden>From
+              <input id="f-from" type="date" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
             </label>
-            <label class="filt" id="f-to-wrap" hidden>To
-              <input id="f-to" type="date" />
+            <label class="flex flex-col gap-1 text-xs text-base-content/60 w-40" id="f-to-wrap" hidden>To
+              <input id="f-to" type="date" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
             </label>
-            <label class="filt filt--grow">Search
+            <label class="flex flex-col gap-1 text-xs text-base-content/60 min-w-56 flex-1">Search
               <input id="f-text" type="text" autocomplete="off"
-                     placeholder="Customer name or invoice number" />
+                     placeholder="Customer name or invoice number" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
             </label>
-            <button id="f-apply" class="btn">Apply</button>
+            <button id="f-apply" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">
+              <span class="hero-funnel size-4" aria-hidden="true"></span> Apply
+            </button>
           </div>
 
-          <div class="table-wrap">
-            <table class="items history" id="history-table">
+          <div class="flex flex-1 flex-col overflow-x-auto">
+            <table class="w-full text-left" id="history-table">
               <thead>
-                <tr>
-                  <th class="col-code">Invoice #</th>
-                  <th class="col-when">Date / Time</th>
+                <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                  <th class="w-36">Invoice #</th>
+                  <th class="w-40">Date / Time</th>
                   <th>Customer</th>
-                  <th class="col-pay">Payment</th>
-                  <th class="num col-total">Grand Total (₹)</th>
+                  <th class="w-24">Payment</th>
+                  <th class="w-36 text-right">Grand Total (₹)</th>
                 </tr>
               </thead>
               <tbody id="history-body"></tbody>
             </table>
-            <div class="empty" id="history-empty">
-              <svg class="empty-art" viewBox="0 0 96 72" aria-hidden="true">
-                <path class="empty-blob" d="M20 16c8-12 26-16 38-9s18 25 11 37-27 17-39 10S12 28 20 16z" />
-                <circle class="empty-line" cx="44" cy="34" r="13" />
-                <path class="empty-line" d="m54 44 10 10" />
-              </svg>
-              <p class="empty-title">No invoices match</p>
-              <p class="empty-hint">Try a wider date range, or clear the search</p>
+            <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center"
+                 id="history-empty">
+              <span class="hero-magnifying-glass size-8 text-base-content/25" aria-hidden="true"></span>
+              <p class="text-sm font-medium text-base-content">No invoices match</p>
+              <p class="text-xs text-base-content/60">Try a wider date range, or clear the search</p>
             </div>
           </div>
-          <p class="hist-count" id="history-count"></p>
+          <p class="text-xs text-base-content/45" id="history-count"></p>
         </div>
 
         <!-- Read-only. Invoices are append-only once saved: no edit, delete or reopen. -->
-        <div class="card" id="history-detail" hidden>
-          <div class="card-head">
-            <h2>Invoice</h2>
-            <span class="inv-no" id="d-inv-no"></span>
-            <span class="ro-badge">Read-only</span>
-            <div class="detail-actions">
-              <button id="d-reprint" class="btn btn--lock">Reprint</button>
-              <button id="d-back" class="btn">Back to list</button>
+        <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-1 flex-col gap-4 p-4" id="history-detail" hidden>
+          <header class="flex flex-wrap items-center gap-3">
+            <h1 class="text-xl font-semibold tracking-tight">Invoice</h1>
+            <span class="rounded-field bg-base-300 px-2 py-0.5 font-mono text-xs text-base-content"
+                  id="d-inv-no"></span>
+            <span class="inline-flex items-center gap-1 rounded-field bg-base-200 px-2 py-0.5 text-2xs font-medium text-base-content/70">Read-only</span>
+            <div class="ml-auto flex flex-wrap items-center gap-2">
+              <button id="d-reprint" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">
+                <span class="hero-printer size-4" aria-hidden="true"></span> Reprint
+              </button>
+              <button id="d-back" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Back to list</button>
             </div>
-          </div>
+          </header>
 
-          <div class="cust-line" id="d-customer"></div>
-          <div class="detail-meta" id="d-meta"></div>
+          <div class="text-sm text-base-content/60" id="d-customer"></div>
+          <div class="flex flex-wrap gap-x-6 gap-y-1 font-mono text-xs text-base-content/45"
+               id="d-meta"></div>
 
-          <div class="table-wrap">
-            <table class="items">
+          <div class="flex flex-1 flex-col overflow-x-auto">
+            <table class="w-full text-left">
               <thead>
-                <tr>
-                  <th class="col-code">Item Code</th>
-                  <th class="col-desc">Description</th>
-                  <th class="num col-qty">Qty</th>
-                  <th class="num col-rate">Rate (₹)</th>
-                  <th class="num col-tax">Tax %</th>
-                  <th class="num col-total">Total (₹)</th>
+                <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                  <th class="w-32">Item Code</th>
+                  <th>Description</th>
+                  <th class="w-20 text-right">Qty</th>
+                  <th class="w-28 text-right">Rate (₹)</th>
+                  <th class="w-20 text-right">Tax %</th>
+                  <th class="w-32 text-right">Total (₹)</th>
                 </tr>
               </thead>
               <tbody id="d-lines"></tbody>
             </table>
           </div>
 
-          <div class="summary">
-            <div class="summary-left">
-              <span class="gst-mode" id="d-gst-mode"></span>
-            </div>
+          <div class="flex flex-wrap items-start gap-4">
+            <span class="flex-1 font-mono text-xs text-base-content/45" id="d-gst-mode"></span>
             <!-- Same renderTotals() as the billing card, fed saved data. -->
-            <dl class="totals" id="detail-totals"></dl>
+            <dl class="w-full max-w-sm rounded-field border border-base-300 p-4"
+                id="detail-totals"></dl>
           </div>
         </div>
       </section>
 
-      <section class="pane" id="pane-inventory" role="tabpanel"><div class="soon">Coming soon</div></section>
-      <section class="pane" id="pane-analytics" role="tabpanel"><div class="soon">Coming soon</div></section>
-      <section class="pane" id="pane-sync" role="tabpanel"><div class="soon">Coming soon</div></section>
+      <section class="pane" id="pane-inventory" role="tabpanel">
+        <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center">
+          <span class="hero-cube size-8 text-base-content/25" aria-hidden="true"></span>
+          <p class="text-sm font-medium text-base-content">Inventory is coming</p>
+          <p class="text-xs text-base-content/60">This pane is not built yet. Billing and
+            History are.</p>
+        </div>
+      </section>
+      <section class="pane" id="pane-analytics" role="tabpanel">
+        <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center">
+          <span class="hero-chart-bar size-8 text-base-content/25" aria-hidden="true"></span>
+          <p class="text-sm font-medium text-base-content">Analytics is coming</p>
+          <p class="text-xs text-base-content/60">This pane is not built yet. Billing and
+            History are.</p>
+        </div>
+      </section>
+      <section class="pane" id="pane-sync" role="tabpanel">
+        <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center">
+          <span class="hero-arrow-path size-8 text-base-content/25" aria-hidden="true"></span>
+          <p class="text-sm font-medium text-base-content">Sync is coming</p>
+          <p class="text-xs text-base-content/60">This pane is not built yet. Billing and
+            History are.</p>
+        </div>
+      </section>
       <section class="pane" id="pane-settings" role="tabpanel">
-        <div class="page">
-          <div class="page-head">
-            <h2>Account Information</h2>
+        <div class="flex flex-col gap-2">
+          <header>
+            <h1 class="text-xl font-semibold tracking-tight">Account Information</h1>
             <!-- No Edit action here: nothing on this page is editable yet, and a button
-                 that does nothing is worse than no button. It arrives with the user
-                 management screen. -->
-          </div>
-          <dl class="rows" id="about-rows"></dl>
+                 that does nothing is worse than no button. Accounts are managed under
+                 Users. -->
+          </header>
+          <dl class="grid grid-cols-[minmax(140px,220px)_1fr]" id="about-rows"></dl>
 
-          <div class="page-head page-head--sub">
-            <h2>About</h2>
-          </div>
-          <dl class="rows" id="about-app-rows"></dl>
+          <header class="mt-6">
+            <h2 class="text-lg font-semibold tracking-tight">About</h2>
+          </header>
+          <dl class="grid grid-cols-[minmax(140px,220px)_1fr]" id="about-app-rows"></dl>
         </div>
       </section>
 
@@ -465,40 +492,50 @@
            edit or delete: changing somebody's password or removing their access is a
            thing to get right, not to bolt on. -->
       <section class="pane" id="pane-users" role="tabpanel">
-        <div class="page">
-          <div class="page-head">
-            <h2>Users</h2>
-            <button class="btn" id="user-add-toggle">Add User</button>
-          </div>
-          <p class="page-lede">Everyone who can sign in on this computer. Owners can bill
-            and manage these accounts; cashiers can only bill.</p>
+        <div class="flex flex-col gap-4">
+          <header class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h1 class="text-xl font-semibold tracking-tight">Users</h1>
+              <p class="mt-1 max-w-prose text-sm text-base-content/60">Everyone who can
+                sign in on this computer. Owners can bill and manage these accounts;
+                cashiers can only bill.</p>
+            </div>
+            <button id="user-add-toggle" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">
+              <span class="hero-plus size-4" aria-hidden="true"></span> Add User
+            </button>
+          </header>
 
-          <form class="userform" id="user-form" autocomplete="off" hidden>
-            <div class="userform-grid">
-              <label class="field">Display Name
-                <input id="user-name" type="text" required placeholder="e.g. Anand Kumar" />
+          <form class="flex flex-col gap-4 border-b border-base-300 pb-6" id="user-form"
+                autocomplete="off" hidden>
+            <div class="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-4">
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Display Name
+                <input id="user-name" type="text" required placeholder="e.g. Anand Kumar"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
               </label>
-              <label class="field">Username
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Username
                 <input id="user-user" type="text" autocapitalize="off" spellcheck="false"
-                       required placeholder="what they will type to sign in" />
+                       required placeholder="what they will type to sign in"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
               </label>
-              <label class="field">Role
-                <select id="user-role">
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Role
+                <select id="user-role" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8 mt-auto">
                   <option value="cashier" selected>Cashier</option>
                   <option value="owner">Owner</option>
                 </select>
               </label>
-              <label class="field">Password
-                <input id="user-pass" type="password" autocomplete="new-password" required />
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Password
+                <input id="user-pass" type="password" autocomplete="new-password" required
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
               </label>
-              <label class="field">Confirm Password
-                <input id="user-pass2" type="password" autocomplete="new-password" required />
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Confirm Password
+                <input id="user-pass2" type="password" autocomplete="new-password" required
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
               </label>
             </div>
-            <div class="userform-actions">
-              <button type="submit" class="btn btn--lock" id="user-save">Create User</button>
-              <button type="button" class="btn" id="user-cancel">Cancel</button>
-              <span class="form-msg" id="user-msg" aria-live="polite"></span>
+            <div class="flex flex-wrap items-center gap-3">
+              <button type="submit" id="user-save" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Create User</button>
+              <button type="button" id="user-cancel" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+              <span class="text-xs text-base-content/60" id="user-msg" aria-live="polite"></span>
             </div>
           </form>
 

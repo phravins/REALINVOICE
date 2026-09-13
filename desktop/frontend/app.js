@@ -717,12 +717,18 @@
         body.innerHTML = list
           .map(function (row, index) {
             return (
-              '<tr class="hist-row" data-open="' + index + '" tabindex="0" role="button">' +
-              '<td class="mono hist-no">' + escapeHtml(row.invoice.invoice_no) + "</td>" +
-              '<td class="mono">' + escapeHtml(stamp(row.invoice)) + "</td>" +
-              "<td>" + escapeHtml(row.customer_name) + "</td>" +
-              '<td class="mono">' + escapeHtml(row.invoice.payment_type) + "</td>" +
-              '<td class="num mono">' + money(row.invoice.grand_total) + "</td>" +
+              '<tr class="cursor-pointer border-b border-base-300 text-sm last:border-0 ' +
+              'hover:bg-base-200/60 focus:bg-base-200/60 focus:outline-none" data-open="' +
+              index + '" tabindex="0" role="button">' +
+              '<td class="py-2 font-mono font-medium text-base-content">' +
+              escapeHtml(row.invoice.invoice_no) + "</td>" +
+              '<td class="py-2 font-mono text-base-content/60">' +
+              escapeHtml(stamp(row.invoice)) + "</td>" +
+              '<td class="py-2">' + escapeHtml(row.customer_name) + "</td>" +
+              '<td class="py-2 font-mono text-base-content/60">' +
+              escapeHtml(row.invoice.payment_type) + "</td>" +
+              '<td class="py-2 text-right font-mono tabular-nums">' +
+              money(row.invoice.grand_total) + "</td>" +
               "</tr>"
             );
           })
@@ -749,8 +755,11 @@
       .catch(function (err) {
         body.innerHTML = "";
         $("history-empty").hidden = false;
-        $("history-empty").querySelector(".empty-title").textContent = "Could not load invoices";
-        $("history-empty").querySelector(".empty-hint").textContent = errText(err);
+        // Addressed by position, not by a styling class: the two <p>s are the title and
+        // the hint, and that stays true however they are styled.
+        var lines = $("history-empty").querySelectorAll("p");
+        lines[0].textContent = "Could not load invoices";
+        lines[1].textContent = errText(err);
         status("list_invoices failed: " + errText(err));
       });
   }
@@ -772,18 +781,23 @@
 
         $("d-inv-no").textContent = invoice.invoice_no;
         $("d-customer").innerHTML =
-          '<span class="cust-name">' + escapeHtml(buyer.name) + "</span>" +
-          ' <span class="cust-gstin">— GSTIN: ' +
+          '<span class="font-medium text-base-content">' + escapeHtml(buyer.name) + "</span>" +
+          ' <span class="text-base-content/60">— GSTIN: ' +
           escapeHtml(buyer.gstin || "unregistered") + "</span>" +
-          ' <span class="cust-pos">· ' + escapeHtml(buyer.mobile) +
+          ' <span class="text-base-content/45">· ' + escapeHtml(buyer.mobile) +
           " · place of supply " + escapeHtml(buyer.place_of_supply) + "</span>";
 
+        function meta(label, value) {
+          return (
+            "<span>" + label + ' <strong class="font-medium text-base-content">' +
+            escapeHtml(value) + "</strong></span>"
+          );
+        }
+
         $("d-meta").innerHTML =
-          '<span>Raised <strong class="mono">' + escapeHtml(stamp(invoice)) + "</strong></span>" +
-          '<span>Payment <strong class="mono">' + escapeHtml(invoice.payment_type) +
-          "</strong></span>" +
-          '<span>Sync <strong class="mono">' + escapeHtml(invoice.sync_status) +
-          "</strong></span>";
+          meta("Raised", stamp(invoice)) +
+          meta("Payment", invoice.payment_type) +
+          meta("Sync", invoice.sync_status);
 
         // Same row renderer as the billing table, without the editable controls.
         $("d-lines").innerHTML = lineRowsHtml(detailLines(detail), false);
@@ -984,9 +998,7 @@
     $("setup-screen").hidden = true;
     $("login-screen").hidden = false;
     $("login-pass").value = "";
-    var msg = $("login-msg");
-    msg.className = "login-msg" + (isError ? " error" : " muted");
-    msg.textContent = message || "";
+    setMsg("login-msg", message, isError);
     $("login-user").focus();
   }
 
@@ -1021,21 +1033,19 @@
     var username = $("login-user").value.trim();
     var password = $("login-pass").value;
     if (!username || !password) {
-      $("login-msg").className = "login-msg error";
-      $("login-msg").textContent = "Enter a username and password.";
+      setMsg("login-msg", "Enter a username and password.", true);
       return;
     }
 
     var button = $("login-submit");
     button.disabled = true;
-    $("login-msg").className = "login-msg muted";
-    $("login-msg").textContent = "Signing in…";
+    setMsg("login-msg", "Signing in…", false);
 
     invoke("login", { username: username, password: password })
       .then(function (session) {
         button.disabled = false;
         user = session.user;
-        $("login-msg").textContent = "";
+        setMsg("login-msg", "", false);
         newTransaction();
         showShell();
         status("Signed in as " + user.display_name + ".");
@@ -1043,8 +1053,7 @@
       .catch(function (err) {
         button.disabled = false;
         $("login-pass").value = "";
-        $("login-msg").className = "login-msg error";
-        $("login-msg").textContent = errText(err);
+        setMsg("login-msg", errText(err), true);
         $("login-pass").focus();
       });
   }
@@ -1107,7 +1116,11 @@
 
   function setMsg(id, text, isError) {
     var el = $(id);
-    el.className = (id === "setup-msg" ? "login-msg" : "form-msg") + (isError ? " error" : " muted");
+    var base =
+      id === "setup-msg" || id === "login-msg"
+        ? "min-h-[18px] text-center text-xs "
+        : "text-xs ";
+    el.className = base + (isError ? "text-error" : "text-base-content/60");
     el.textContent = text || "";
   }
 
@@ -1162,23 +1175,38 @@
         // signed-in account is marked in place; there is no heading repeating the name
         // that the first row already gives.
         $("user-list").innerHTML = users
-          .map(function (u) {
+          .map(function (u, index) {
+            function pair(label, valueHtml, first) {
+              var edge = first ? "" : " border-t border-base-300";
+              return (
+                '<dt class="py-3 text-sm text-base-content/60' + edge + '">' + label +
+                '</dt><dd class="py-3 text-sm text-base-content' + edge + '">' +
+                valueHtml + "</dd>"
+              );
+            }
+
+            var you = u.id === user.id
+              ? ' <span class="ml-2 rounded-field border border-base-300 px-2 py-0.5 ' +
+                'align-middle text-2xs font-normal text-base-content/60">you</span>'
+              : "";
+
+            // Accounts are separated by space and a rule, not by a panel.
             return (
-              '<dl class="rows user-rows">' +
-              "<dt>Display Name</dt><dd>" +
-              escapeHtml(u.display_name) +
-              (u.id === user.id ? ' <span class="tag">you</span>' : "") +
-              "</dd>" +
-              "<dt>Username</dt><dd>" + escapeHtml(u.username) + "</dd>" +
-              "<dt>Role</dt><dd>" + escapeHtml(u.role === "owner" ? "Owner" : "Cashier") + "</dd>" +
-              "<dt>Created</dt><dd>" + escapeHtml(dateOnly(u.created_at)) + "</dd>" +
+              '<dl class="grid grid-cols-[minmax(140px,220px)_1fr]' +
+              (index === 0 ? "" : " mt-6 border-t border-base-300 pt-6") + '">' +
+              pair("Display Name", escapeHtml(u.display_name) + you, true) +
+              pair("Username", escapeHtml(u.username)) +
+              pair("Role", escapeHtml(u.role === "owner" ? "Owner" : "Cashier")) +
+              pair("Created", escapeHtml(dateOnly(u.created_at))) +
               "</dl>"
             );
           })
           .join("");
       })
       .catch(function (err) {
-        $("user-list").innerHTML = '<p class="empty">' + escapeHtml(errText(err)) + "</p>";
+        $("user-list").innerHTML =
+          '<p class="py-6 text-center text-sm text-error">' + escapeHtml(errText(err)) +
+          "</p>";
       });
   }
 
@@ -1406,8 +1434,10 @@
 
     invoke("app_info")
       .then(function (info) {
-        // The sidebar's version line, in place of the reference's "OpenCloud 7.2.4".
-        $("side-app").textContent = info.name + " " + info.version;
+        // The sidebar's version line. Guarded: this pane must still render its rows if
+        // the shell ever stops carrying that element.
+        var sideApp = $("side-app");
+        if (sideApp) sideApp.textContent = info.name + " " + info.version;
 
         rowList($("about-rows"), [
           ["Username", user.username],
@@ -1434,8 +1464,16 @@
   function rowList(el, rows) {
     if (!el) return;
     el.innerHTML = rows
-      .map(function (row) {
-        return "<dt>" + escapeHtml(row[0]) + "</dt><dd>" + escapeHtml(row[1]) + "</dd>";
+      .map(function (row, index) {
+        // The first row's divider would double up with the heading's spacing.
+        var edge = index === 0 ? "" : " border-t border-base-300";
+        return (
+          '<dt class="py-3 text-sm text-base-content/60' + edge + '">' +
+          escapeHtml(row[0]) +
+          '</dt><dd class="py-3 text-sm text-base-content break-words' + edge + '">' +
+          escapeHtml(row[1]) +
+          "</dd>"
+        );
       })
       .join("");
   }

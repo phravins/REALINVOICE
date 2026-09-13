@@ -57,26 +57,49 @@ the same elements carry `flex`, and a class beats the UA stylesheet. `app.css` r
 anything. The same applies to `.pane` / `.pane.is-active`, which `showPane()` toggles: the
 rule has to live in a stylesheet because a class is what the JS has to work with.
 
-## What this commit changes on screen
+## What changed on screen
 
-The dark top bar is gone. The brand moves to the head of the sidebar and the account to
-its foot, with a thin bar over the page holding the connection state and the theme
-toggle — the Back-Office Web's shell, arrived at by copying it rather than by taste.
+The dark top bar is gone. The brand moves to the head of the sidebar with the version
+under it, and the account to its foot, with a thin bar over the page holding the
+connection state and the theme toggle — the Back-Office Web's shell, arrived at by copying
+it rather than by taste.
 
-Converted: the sign-in screen, the first-run setup screen, the sidebar, the header bar,
-the shortcut bar and the status bar. The nav icons are Heroicons rather than hand-drawn
-paths.
+Everything on screen is converted: sign-in, first-run setup, the sidebar and header bar,
+Billing, History and its read-only detail, Settings, Users, both footers, and the
+placeholder panes — which are now real empty states with an icon and a line saying what is
+missing, rather than the words "Coming soon".
 
-Not yet converted: the Billing, History, Settings and Users panes, and the printable
-sheet. `theme.css` and `styles.css` still load *after* the new stylesheet so those panes
-keep working unchanged; they come out pane by pane, and nothing new should be added to
-them. The printable sheet keeps its own paper palette either way — a bill on paper is not
-themed.
+**The printed document is deliberately not converted.** A bill on paper is not themed: it
+is black ink on white at the same size whichever theme the screen is in. It keeps its own
+`--paper-*` palette and its own rules, so `styles.css` now holds the sheet and nothing
+else — down from about 38 KB to 4.5 KB — and `theme.css` survives only as the tokens that
+sheet reads. Nothing on screen should use either.
+
+## Two hooks that had to move
+
+Converting markup breaks any JavaScript that finds an element by how it looks. Two did:
+
+- The quantity box was found with `.closest(".qty-input")`. It now matches
+  `input[data-index]` — what makes that input the quantity is that it carries a row index,
+  and that survives a restyle. Its invalid marker moved from `.is-bad` to `border-error`.
+- The history empty state's two lines were addressed as `.empty-title` and `.empty-hint`.
+  They are now the first and second `<p>` inside it, which stays true however they are
+  styled.
+
+A third was a real break rather than a rename: the sidebar's version line was dropped in
+the shell rewrite while `refreshAbout()` still wrote to it, so opening Settings threw and
+the pane rendered one row reading `null is not an object`. The line is back under the
+brand, and the write is guarded.
 
 ## Verified
 
-Wiped the database and drove the app under Xvfb: the setup screen, the shell after
-creating an owner, and the sign-in screen on a restart, in both themes. 86 tests pass.
+Wiped the database and drove the app under Xvfb, in both themes: the setup screen, the
+shell after creating an owner, sign-in (including a rejected password, since the error
+line's styling was one of the things that moved), a full invoice — customer attached, item
+picked, ₹45,000 at 18% splitting to CGST 4,050 + SGST 4,050 for ₹53,100, saved as
+RI-2026-0001 and locked — the history list and its read-only detail, Settings, Users with
+its add form, a placeholder pane, and the printable sheet still rendering on paper white
+after the stylesheet was cut back. 86 tests pass.
 
 Not verified: a full `tauri build`. The stylesheet step was added to `build-release.sh`
 rather than to `beforeBuildCommand`, precisely because a bundle build is not something
