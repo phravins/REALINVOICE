@@ -39,23 +39,32 @@ realinvoice/
 | 6 | Office Console — layout system and UI pass | done |
 | 7 | Office Console — design tokens, light/dark themes, branding, About | done |
 | 8 | Office Console — flat shell, sidebar, unboxed surfaces | done |
+| 9 | Office Console — installers, icons, install guide | Linux done; Windows configured, unbuilt |
 | — | Sync worker that drains `sync_queue` | not started |
+
+## Install
+
+End users: **[docs/INSTALL.md](docs/INSTALL.md)** — download, double-click, done. No
+terminal, no toolchain.
 
 ## Build
 
+Developers: **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**.
+
 ```sh
-cargo test -p realinvoice-core     # core: unit + integration tests
-cargo build                        # whole workspace
-cd desktop/src-tauri && cargo tauri dev
+cargo test --workspace             # 86 tests
+cargo run -p realinvoice-desktop   # the app
+./build-release.sh                 # release installers, and where they landed
 ```
 
-The desktop app needs the usual Tauri v2 Linux dependencies (`libwebkit2gtk-4.1-dev`,
-`libgtk-3-dev`, `librsvg2-dev`, `patchelf`, `libxdo-dev`); see
-[docs/office-console-stage-1.md](docs/office-console-stage-1.md) and
+Linux build dependencies and release/bundling notes are in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md); stage notes are in
+[docs/office-console-stage-1.md](docs/office-console-stage-1.md),
 [docs/office-console-stage-2.md](docs/office-console-stage-2.md),
 [docs/office-console-stage-3.md](docs/office-console-stage-3.md),
 [docs/office-console-stage-4.md](docs/office-console-stage-4.md),
 [docs/office-console-stage-5.md](docs/office-console-stage-5.md),
 [docs/office-console-stage-6-ui.md](docs/office-console-stage-6-ui.md),
 [docs/office-console-stage-7-design.md](docs/office-console-stage-7-design.md),
-[docs/office-console-stage-8-flat-ui.md](docs/office-console-stage-8-flat-ui.md).
+[docs/office-console-stage-8-flat-ui.md](docs/office-console-stage-8-flat-ui.md),
+[docs/office-console-stage-9-packaging.md](docs/office-console-stage-9-packaging.md).
