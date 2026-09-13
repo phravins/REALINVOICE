@@ -207,132 +207,142 @@
 
       <main class="flex flex-1 flex-col overflow-y-auto px-3 pb-3 pt-2 sm:px-4 sm:pb-4 sm:pt-3">
       <section class="pane is-active" id="pane-billing" role="tabpanel">
-        <div class="card">
-          <!-- Shown only once an invoice is saved. It replaces the editing header, so a
-               locked card reads as a finished record rather than a form full of
-               greyed-out controls. -->
-          <div class="saved-banner" id="saved-banner" hidden>
-            <svg class="saved-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <circle cx="12" cy="12" r="9.2" />
-              <path d="m7.9 12.4 2.8 2.8 5.4-5.6" />
-            </svg>
-            <div class="saved-text">
-              <p class="saved-title" id="saved-title"></p>
-              <p class="saved-sub" id="saved-sub"></p>
-            </div>
-            <div class="saved-actions">
-              <button id="print-preview" class="btn" type="button">Print preview</button>
-              <button id="new-txn" class="btn btn--lock" type="button">New Transaction</button>
-            </div>
+        <!-- Shown only once an invoice is saved. It replaces the editing header, so a
+             locked card reads as a finished record rather than a form full of
+             greyed-out controls. -->
+        <div class="flex flex-wrap items-center gap-3 rounded-box border border-success/30 bg-success/10 px-4 py-3"
+             id="saved-banner" hidden>
+          <span class="hero-check-circle size-6 shrink-0 text-success" aria-hidden="true"></span>
+          <div class="min-w-0 flex-1">
+            <p class="text-sm font-medium text-base-content" id="saved-title"></p>
+            <p class="text-xs text-base-content/60" id="saved-sub"></p>
           </div>
-
-          <div class="card-head" id="txn-head">
-            <h2>New Transaction</h2>
-            <span class="inv-no" id="inv-no" hidden></span>
-            <div class="cust-search">
-              <label class="sr-only" for="mobile-input">Customer mobile number</label>
-              <input
-                id="mobile-input"
-                type="tel"
-                inputmode="numeric"
-                autocomplete="off"
-                placeholder="Customer mobile"
-              />
-              <button id="search-btn" class="btn btn--primary">Search</button>
-            </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button id="print-preview" type="button" class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Print preview</button>
+            <button id="new-txn" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">New Transaction</button>
           </div>
+        </div>
 
-          <div class="cust-line" id="customer-line" aria-live="polite">
-            <span class="muted">Search a mobile number to attach a customer.</span>
+        <header class="flex flex-wrap items-center justify-between gap-4" id="txn-head">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold tracking-tight">New Transaction</h1>
+            <span class="rounded-field bg-base-300 px-2 py-0.5 font-mono text-xs text-base-content"
+                  id="inv-no" hidden></span>
+          </div>
+          <div class="flex flex-none items-center gap-2">
+            <label class="sr-only" for="mobile-input">Customer mobile number</label>
+            <input id="mobile-input" type="tel" inputmode="numeric" autocomplete="off"
+                   placeholder="Customer mobile" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 w-56" />
+            <button id="search-btn" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Search</button>
+          </div>
+        </header>
+
+        <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-1 flex-col gap-4 p-4">
+          <div class="text-sm text-base-content/60" id="customer-line" aria-live="polite">
+            <span>Search a mobile number to attach a customer.</span>
           </div>
 
           <!-- Shown only when a mobile number resolves to nobody. -->
-          <div class="newcust" id="new-customer" hidden>
-            <div class="newcust-head">Register new customer</div>
-            <div class="newcust-grid">
-              <label>Name<input id="nc-name" type="text" autocomplete="off" /></label>
-              <label>Mobile<input id="nc-mobile" type="tel" inputmode="numeric" autocomplete="off" /></label>
-              <label>GSTIN <span class="opt">(optional)</span><input id="nc-gstin" type="text" autocomplete="off" /></label>
-              <label>Place of supply<input id="nc-pos" type="text" maxlength="2" placeholder="TN" autocomplete="off" /></label>
+          <div class="flex flex-col gap-4 rounded-field border border-base-300 bg-base-200/60 p-4"
+               id="new-customer" hidden>
+            <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45">Register new customer</p>
+            <div class="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Name
+                <input id="nc-name" type="text" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Mobile
+                <input id="nc-mobile" type="tel" inputmode="numeric" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">GSTIN
+                <span class="text-base-content/45">(optional)</span>
+                <input id="nc-gstin" type="text" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Place of supply
+                <input id="nc-pos" type="text" maxlength="2" placeholder="TN" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
             </div>
-            <div class="newcust-actions">
-              <button id="nc-save" class="btn btn--primary">Create customer</button>
-              <button id="nc-cancel" class="btn">Cancel</button>
-              <span class="newcust-msg" id="nc-msg"></span>
+            <div class="flex flex-wrap items-center gap-3">
+              <button id="nc-save" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Create customer</button>
+              <button id="nc-cancel" type="button" class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+              <span class="text-xs text-base-content/60" id="nc-msg"></span>
             </div>
           </div>
 
-          <div class="table-wrap">
-            <table class="items" id="items-table">
+          <div class="flex flex-1 flex-col overflow-x-auto">
+            <table class="w-full text-left" id="items-table">
               <thead>
-                <tr>
-                  <th class="col-code">Item Code</th>
-                  <th class="col-desc">Description</th>
-                  <th class="num col-qty">Qty</th>
-                  <th class="num col-rate">Rate (₹)</th>
-                  <th class="num col-tax">Tax %</th>
-                  <th class="num col-total">Total (₹)</th>
-                  <th class="col-act"><span class="sr-only">Remove</span></th>
+                <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                  <th class="w-32">Item Code</th>
+                  <th>Description</th>
+                  <th class="w-20 text-right">Qty</th>
+                  <th class="w-28 text-right">Rate (₹)</th>
+                  <th class="w-20 text-right">Tax %</th>
+                  <th class="w-32 text-right">Total (₹)</th>
+                  <th class="w-10"><span class="sr-only">Remove</span></th>
                 </tr>
               </thead>
               <tbody id="items-body"></tbody>
             </table>
-            <div class="empty" id="empty-rows">
-              <svg class="empty-art" viewBox="0 0 96 72" aria-hidden="true">
-                <path class="empty-blob" d="M20 16c8-12 26-16 38-9s18 25 11 37-27 17-39 10S12 28 20 16z" />
-                <path class="empty-line" d="M30 22h26a4 4 0 0 1 4 4v28a4 4 0 0 1-4 4H30a4 4 0 0 1-4-4V26a4 4 0 0 1 4-4z" />
-                <path class="empty-line" d="M33.5 33.5h19M33.5 40h19M33.5 46.5h12" />
-              </svg>
-              <p class="empty-title">No items added yet</p>
-              <p class="empty-hint">Press <kbd>F2</kbd> or use Add Item to start a bill</p>
+            <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center"
+                 id="empty-rows">
+              <span class="hero-document-text size-8 text-base-content/25" aria-hidden="true"></span>
+              <p class="text-sm font-medium text-base-content">No items added yet</p>
+              <p class="text-xs text-base-content/60">Press
+                <kbd class="rounded-field border border-base-300 bg-base-200 px-1.5 py-0.5 font-mono text-2xs text-base-content/70">F2</kbd>
+                or use Add Item to start a bill</p>
             </div>
           </div>
 
-          <div class="add-item" id="add-item">
-            <button id="add-item-btn" class="btn">+ Add Item</button>
+          <div id="add-item">
+            <button id="add-item-btn" type="button" class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">
+              <span class="hero-plus size-4" aria-hidden="true"></span> Add Item
+            </button>
           </div>
 
           <!-- Item picker: opened by Add Item, closed on pick or Escape. -->
-          <div class="picker" id="item-picker" hidden>
-            <div class="picker-head">
+          <div class="flex flex-col gap-2 rounded-field border border-base-300 bg-base-200/60 p-3"
+               id="item-picker" hidden>
+            <div class="flex items-center gap-2">
               <label class="sr-only" for="item-query">Search items</label>
-              <input id="item-query" type="text" autocomplete="off" placeholder="Item code or description" />
-              <button id="picker-close" class="btn">Close</button>
+              <input id="item-query" type="text" autocomplete="off"
+                     placeholder="Item code or description" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
+              <button id="picker-close" type="button" class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Close</button>
             </div>
-            <ul class="picker-results" id="picker-results"></ul>
-          </div>
-
-          <div class="summary">
-            <div class="summary-left">
-              <div class="pay" id="pay-group" role="radiogroup" aria-label="Payment type">
-                <span class="pay-label">Payment</span>
-                <label class="pay-opt"><input type="radio" name="payment" value="upi" /><span>UPI</span></label>
-                <label class="pay-opt"><input type="radio" name="payment" value="cash" checked /><span>Cash</span></label>
-                <label class="pay-opt"><input type="radio" name="payment" value="card" /><span>Card</span></label>
-              </div>
-
-              <p class="pay-static" id="pay-static" hidden></p>
-
-              <!-- Placeholder until QR generation lands with the payments stage. -->
-              <div class="upi-box" id="upi-box" hidden>
-                <div class="upi-qr" aria-hidden="true">
-                  <span>QR</span>
-                </div>
-                <p>Scan screen code to pay via UPI<br /><small>Live QR codes come in a later stage.</small></p>
-              </div>
-
-              <span class="gst-mode" id="gst-mode"></span>
-            </div>
-            <!-- Filled by renderTotals(), the same function the history detail uses. -->
-            <dl class="totals" id="billing-totals"></dl>
-          </div>
-
-          <div class="actions" id="txn-actions">
-            <span class="action-msg" id="action-msg"></span>
-            <button id="print-lock" class="btn btn--lock">Print &amp; Lock (F5)</button>
+            <ul class="max-h-64 overflow-y-auto" id="picker-results"></ul>
           </div>
         </div>
 
+        <div class="flex flex-wrap items-start gap-4">
+          <div class="flex min-w-60 flex-1 flex-col gap-3">
+            <div class="flex flex-wrap items-center gap-2" id="pay-group" role="radiogroup"
+                 aria-label="Payment type">
+              <span class="mr-1 text-sm text-base-content/60">Payment</span>
+              <label class="inline-flex cursor-pointer items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 py-1.5 text-sm has-[:checked]:border-base-content/30 has-[:checked]:bg-base-200">
+                <input type="radio" name="payment" value="upi" class="accent-primary" /><span>UPI</span></label>
+              <label class="inline-flex cursor-pointer items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 py-1.5 text-sm has-[:checked]:border-base-content/30 has-[:checked]:bg-base-200">
+                <input type="radio" name="payment" value="cash" checked class="accent-primary" /><span>Cash</span></label>
+              <label class="inline-flex cursor-pointer items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 py-1.5 text-sm has-[:checked]:border-base-content/30 has-[:checked]:bg-base-200">
+                <input type="radio" name="payment" value="card" class="accent-primary" /><span>Card</span></label>
+            </div>
+
+            <p class="text-sm text-base-content/60" id="pay-static" hidden></p>
+
+            <!-- Placeholder until QR generation lands with the payments stage. -->
+            <div class="flex items-center gap-3 rounded-field border border-base-300 bg-base-100 p-3"
+                 id="upi-box" hidden>
+              <div class="flex size-16 shrink-0 items-center justify-center rounded-field border border-dashed border-base-300 text-2xs text-base-content/45"
+                   aria-hidden="true"><span>QR</span></div>
+              <p class="text-xs text-base-content/60">Scan screen code to pay via UPI<br />
+                <span class="text-base-content/45">Live QR codes come in a later stage.</span></p>
+            </div>
+
+            <span class="font-mono text-xs text-base-content/45" id="gst-mode"></span>
+          </div>
+
+          <!-- Filled by renderTotals(), the same function the history detail uses. -->
+          <dl class="rounded-box border border-base-300 bg-base-100 shadow-sm w-full max-w-sm p-4" id="billing-totals"></dl>
+        </div>
+
+        <div class="flex flex-wrap items-center justify-end gap-3" id="txn-actions">
+          <span class="text-sm text-base-content/60" id="action-msg"></span>
+          <button id="print-lock" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Print &amp; Lock (F5)</button>
+        </div>
       </section>
 
       <section class="pane" id="pane-history" role="tabpanel">
@@ -501,9 +511,11 @@
          whether that comes from Print & Lock or from Reprint. -->
     <div class="print-overlay" id="print-overlay" hidden>
       <div class="print-bar">
-        <span id="print-label"></span>
-        <button id="print-now" class="btn btn--lock">Print</button>
-        <button id="print-close" class="btn">Close</button>
+        <span class="font-mono text-sm" id="print-label"></span>
+        <button id="print-now" type="button"
+                class="inline-flex h-9 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Print</button>
+        <button id="print-close" type="button"
+                class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Close</button>
       </div>
       <div class="sheet" id="print-sheet"></div>
     </div>

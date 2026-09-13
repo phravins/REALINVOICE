@@ -59,6 +59,13 @@ var UI = (function () {
     formSelect: "h-9 appearance-none pr-8 " + FORM_CONTROL_BASE,
     formError: "border-error focus:border-error focus:ring-error/15",
 
+    /** A panel: bordered, faintly shadowed, on the page's own darker ground. */
+    card: "rounded-box border border-base-300 bg-base-100 shadow-sm p-4",
+
+    /** A page title and the line under it. */
+    pageTitle: "text-xl font-semibold tracking-tight",
+    pageSubtitle: "mt-1 text-sm text-base-content/60",
+
     /** The uppercase micro label: sidebar sections, table headers, field captions. */
     microLabel: "text-2xs font-medium uppercase tracking-wider text-base-content/45",
 

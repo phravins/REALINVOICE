@@ -81,10 +81,19 @@
    * CGST + SGST, inter-state shows IGST — never both.
    */
   function renderTotals(el, t) {
-    function row(label, value, cls) {
+    function row(label, value, grand) {
       return (
-        '<div class="tot-row' + (cls || "") + '"><dt>' + label + "</dt><dd>" +
-        rupees(value) + "</dd></div>"
+        '<div class="flex items-baseline justify-between gap-4 ' +
+        (grand
+          ? 'mt-2 border-t border-base-300 pt-3"><dt class="text-base font-semibold">'
+          : 'py-1"><dt class="text-sm text-base-content/60">') +
+        label +
+        "</dt><dd class=" +
+        (grand
+          ? '"font-mono text-2xl font-semibold tabular-nums">'
+          : '"font-mono text-sm tabular-nums">') +
+        rupees(value) +
+        "</dd></div>"
       );
     }
 
@@ -94,7 +103,7 @@
     } else {
       html += row("IGST", t.igst);
     }
-    el.innerHTML = html + row("Grand Total", t.grand_total, " tot-row--grand");
+    el.innerHTML = html + row("Grand Total", t.grand_total, true);
   }
 
   /** A saved invoice's totals, in the shape renderTotals expects. */
@@ -119,25 +128,33 @@
     return lines
       .map(function (line, index) {
         var qty = editable
-          ? '<input class="qty-input" type="number" min="0" step="any" value="' +
+          ? '<input class="h-7 w-full max-w-20 rounded-field border border-base-300 ' +
+            'bg-base-100 px-2 text-right font-mono text-sm tabular-nums ' +
+            'focus:border-base-content/30 focus:outline-none focus:ring-2 ' +
+            'focus:ring-base-content/10" type="number" min="0" step="any" value="' +
             line.qty + '" data-index="' + index + '" aria-label="Quantity for ' +
             escapeHtml(line.item_code) + '" />'
-          : '<span class="mono">' + line.qty + "</span>";
+          : '<span class="font-mono tabular-nums">' + line.qty + "</span>";
 
         var remove = editable
-          ? '<td class="num"><button class="row-del" data-remove="' + index +
+          ? '<td class="text-right"><button class="flex size-7 items-center ' +
+            'justify-center rounded-field text-base-content/45 transition-colors ' +
+            'hover:bg-base-200 hover:text-error" data-remove="' + index +
             '" title="Remove row" aria-label="Remove ' + escapeHtml(line.item_code) +
-            '">×</button></td>'
+            '"><span class="hero-x-mark size-4" aria-hidden="true"></span></button></td>'
           : "";
 
+        var num = ' class="py-2 text-right font-mono tabular-nums"';
+
         return (
-          "<tr>" +
-          '<td class="mono">' + escapeHtml(line.item_code) + "</td>" +
-          "<td>" + escapeHtml(line.description) + "</td>" +
-          '<td class="num">' + qty + "</td>" +
-          '<td class="num mono">' + money(line.rate) + "</td>" +
-          '<td class="num mono">' + money(line.tax_rate) + "</td>" +
-          '<td class="num mono" data-total="' + index + '">' + money(line.total) + "</td>" +
+          '<tr class="border-b border-base-300 text-sm last:border-0 hover:bg-base-200/60">' +
+          '<td class="py-2 font-mono">' + escapeHtml(line.item_code) + "</td>" +
+          '<td class="py-2">' + escapeHtml(line.description) + "</td>" +
+          '<td class="py-2 text-right">' + qty + "</td>" +
+          "<td" + num + ">" + money(line.rate) + "</td>" +
+          "<td" + num + ">" + money(line.tax_rate) + "</td>" +
+          '<td class="py-2 text-right font-mono tabular-nums" data-total="' + index +
+          '">' + money(line.total) + "</td>" +
           remove +
           "</tr>"
         );
@@ -208,15 +225,15 @@
   function renderCustomer() {
     var line = $("customer-line");
     if (!customer) {
-      line.innerHTML = '<span class="muted">Search a mobile number to attach a customer.</span>';
+      line.innerHTML = "<span>Search a mobile number to attach a customer.</span>";
       return;
     }
     line.innerHTML =
-      '<span class="cust-name">' + escapeHtml(customer.name) + "</span>" +
-      ' <span class="cust-gstin">— GSTIN: ' +
+      '<span class="font-medium text-base-content">' + escapeHtml(customer.name) + "</span>" +
+      ' <span class="text-base-content/60">— GSTIN: ' +
       escapeHtml(customer.gstin || "unregistered") +
       "</span>" +
-      ' <span class="cust-pos">· ' + escapeHtml(customer.mobile) +
+      ' <span class="text-base-content/45">· ' + escapeHtml(customer.mobile) +
       " · place of supply " + escapeHtml(customer.place_of_supply) + "</span>";
   }
 
@@ -337,12 +354,14 @@
   });
 
   $("items-body").addEventListener("input", function (event) {
-    var input = event.target.closest(".qty-input");
+    // Hooked on the data attribute, not on a styling class: what makes this input the
+    // quantity is that it carries a row index, and that survives a restyle.
+    var input = event.target.closest("input[data-index]");
     if (!input) return;
 
     var qty = parseFloat(input.value);
     var valid = isFinite(qty) && qty > 0;
-    input.classList.toggle("is-bad", !valid && input.value !== "");
+    input.classList.toggle("border-error", !valid && input.value !== "");
     // A half-typed quantity prices as zero rather than throwing the totals away.
     rows[Number(input.dataset.index)].qty = valid ? qty : 0;
     requote();
@@ -364,24 +383,31 @@
   function runItemSearch(query) {
     var list = $("picker-results");
     if (!invoke) {
-      list.innerHTML = '<li class="picker-empty error">Tauri bridge unavailable.</li>';
+      list.innerHTML =
+        '<li class="px-3 py-2 text-sm text-error">Tauri bridge unavailable.</li>';
       return;
     }
 
     invoke("search_item", { query: query })
       .then(function (items) {
         if (!items.length) {
-          list.innerHTML = '<li class="picker-empty">No items match.</li>';
+          list.innerHTML =
+            '<li class="px-3 py-2 text-sm text-base-content/60">No items match.</li>';
           return;
         }
         list.innerHTML = items
           .map(function (item, index) {
             return (
-              '<li><button class="picker-pick" data-pick="' + index + '">' +
-              '<span class="pk-code">' + escapeHtml(item.item_code) + "</span>" +
-              "<span>" + escapeHtml(item.description) + "</span>" +
-              '<span class="pk-meta">₹' + money(item.rate) + " · " +
-              money(item.tax_rate) + "% · " + escapeHtml(item.uom) + "</span>" +
+              '<li><button type="button" data-pick="' + index + '" ' +
+              'class="flex w-full items-baseline gap-3 rounded-field px-3 py-2 ' +
+              'text-left text-sm transition-colors hover:bg-base-200">' +
+              '<span class="w-32 shrink-0 font-mono">' + escapeHtml(item.item_code) +
+              "</span>" +
+              '<span class="min-w-0 flex-1 truncate">' + escapeHtml(item.description) +
+              "</span>" +
+              '<span class="shrink-0 font-mono text-xs text-base-content/45">₹' +
+              money(item.rate) + " · " + money(item.tax_rate) + "% · " +
+              escapeHtml(item.uom) + "</span>" +
               "</button></li>"
             );
           })
@@ -389,7 +415,8 @@
         list.dataset.items = JSON.stringify(items);
       })
       .catch(function (err) {
-        list.innerHTML = '<li class="picker-empty error">' + escapeHtml(errText(err)) + "</li>";
+        list.innerHTML =
+          '<li class="px-3 py-2 text-sm text-error">' + escapeHtml(errText(err)) + "</li>";
       });
   }
 
