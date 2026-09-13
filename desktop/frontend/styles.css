@@ -1114,34 +1114,14 @@ select option { background: var(--surface); color: var(--text); }
   text-align: center;
 }
 
-/* The one exception: first-run credentials are a notice, and a notice needs an edge. */
-.login-firstrun {
-  padding: var(--s3);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
+/* The setup screen's one paragraph of explanation. Sits between the wordmark and the
+   first field, so it is read before anything is typed rather than after. */
+.login-lede {
+  margin: calc(var(--s5) * -1) 0 0;
+  color: var(--text-secondary);
   font-size: var(--t-small-size);
-}
-
-.login-firstrun strong { color: var(--accent-text); }
-.login-firstrun p { margin: var(--s1) 0 var(--s3); color: var(--text-secondary); }
-
-.login-firstrun dl {
-  display: grid;
-  grid-template-columns: 78px 1fr;
-  gap: var(--s1) var(--s3);
-  margin: 0;
-}
-
-.login-firstrun dt { color: var(--text-secondary); }
-
-.login-firstrun dd {
-  margin: 0;
-  color: var(--text);
-  font-family: var(--font-mono);
-  overflow-wrap: anywhere;
-  -webkit-user-select: text;
-  user-select: text;
+  line-height: var(--lh-normal);
+  text-align: center;
 }
 
 /* ========================================================= 10. Printable sheet */
@@ -1487,6 +1467,73 @@ select option { background: var(--surface); color: var(--text); }
   -webkit-user-select: text;
   user-select: text;
 }
+
+/* A line of context under a page title. Same role as the empty states' explanation:
+   say what this screen is for before listing anything. */
+.page-lede {
+  max-width: 62ch;
+  margin: calc(var(--s2) * -1) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--t-small-size);
+  line-height: var(--lh-normal);
+}
+
+/* Accounts are separated by a gap, not a box. The rule the rows already carry does the
+   dividing; the space says where one person ends and the next begins. */
+.user-rows + .user-rows {
+  margin-top: var(--s5);
+  padding-top: var(--s5);
+  border-top: 1px solid var(--border-strong);
+}
+
+/* Marks the signed-in account in the user list. */
+.tag {
+  margin-left: var(--s2);
+  padding: 2px var(--s2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  font-size: var(--t-small-size);
+  font-weight: 400;
+  vertical-align: middle;
+}
+
+/* The add-user form. Unboxed like the rest of the settings pages — it is separated from
+   the list by space and a rule, not by a panel. */
+.userform {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  padding-bottom: var(--s5);
+  border-bottom: 1px solid var(--border);
+}
+
+.userform-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--s4);
+}
+
+.userform-grid .field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  color: var(--text-secondary);
+  font-size: var(--t-small-size);
+}
+
+/* Captions wrap to different heights; pushing the controls down keeps a row level. */
+.userform-grid .field input,
+.userform-grid .field select { margin-top: auto; }
+
+.userform-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.form-msg { font-size: var(--t-small-size); }
 
 /* ============================================================ 15. Empty states */
 

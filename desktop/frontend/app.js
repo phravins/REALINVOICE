@@ -170,6 +170,10 @@
     } else if (name === "settings") {
       refreshAbout();
       status("About RealInvoice.");
+    } else if (name === "users") {
+      showUserForm(false);
+      loadUsers();
+      status("Accounts that can sign in on this machine.");
     } else if (name !== "billing") {
       status(name + ": coming soon.");
     }
@@ -950,6 +954,7 @@
   function showLogin(message, isError) {
     user = null;
     $("shell").hidden = true;
+    $("setup-screen").hidden = true;
     $("login-screen").hidden = false;
     $("login-pass").value = "";
     var msg = $("login-msg");
@@ -958,9 +963,21 @@
     $("login-user").focus();
   }
 
+  /** The first-run screen, shown in place of the gate when there are no accounts yet. */
+  function showSetup() {
+    user = null;
+    $("shell").hidden = true;
+    $("login-screen").hidden = true;
+    $("setup-screen").hidden = false;
+    $("setup-name").focus();
+  }
+
   function showShell() {
     $("login-screen").hidden = true;
+    $("setup-screen").hidden = true;
     $("shell").hidden = false;
+    // Cashiers never see the Users item. The commands behind it refuse them anyway.
+    $("nav-users").hidden = user.role !== "owner";
     $("avatar-initial").textContent = (user.display_name || user.username || "?").trim().charAt(0);
     $("menu-name").textContent = user.display_name;
     $("menu-role").textContent = user.role + " · " + user.username;
@@ -991,7 +1008,6 @@
       .then(function (session) {
         button.disabled = false;
         user = session.user;
-        $("login-firstrun").hidden = true;
         $("login-msg").textContent = "";
         newTransaction();
         showShell();
@@ -1030,20 +1046,11 @@
       .then(function (info) {
         $("login-node").textContent = "Office Console · Node " + info.node;
 
-        if (info.first_run_password) {
-          var box = $("login-firstrun");
-          box.hidden = false;
-          box.innerHTML =
-            "<strong>First run on this machine</strong>" +
-            "<p>An owner account was created. Write this down — it is shown once.</p>" +
-            "<dl><dt>Username</dt><dd>" + escapeHtml(info.first_run_username) + "</dd>" +
-            "<dt>Password</dt><dd>" + escapeHtml(info.first_run_password) + "</dd></dl>";
-          $("login-user").value = info.first_run_username;
-        }
-
         if (info.session) {
           user = info.session.user;
           showShell();
+        } else if (info.needs_setup) {
+          showSetup();
         } else {
           showLogin("");
         }
@@ -1054,6 +1061,166 @@
   }
 
   $("login-form").addEventListener("submit", signIn);
+
+  /* ------------------------------------------------------------- first-run setup */
+
+  /**
+   * Shared by both places an account is created. Returns an error string, or "" when the
+   * details are usable. The same rules are enforced in core — this is here so somebody
+   * mistyping a password finds out before a round trip, not instead of one.
+   */
+  function accountProblem(displayName, username, password, confirm) {
+    if (!displayName) return "Enter a display name.";
+    if (!username) return "Enter a username.";
+    if (/\s/.test(username)) return "A username cannot contain spaces.";
+    if (password.length < 8) return "The password must be at least 8 characters.";
+    if (password !== confirm) return "The two passwords do not match.";
+    return "";
+  }
+
+  function setMsg(id, text, isError) {
+    var el = $(id);
+    el.className = (id === "setup-msg" ? "login-msg" : "form-msg") + (isError ? " error" : " muted");
+    el.textContent = text || "";
+  }
+
+  function createFirstUser(event) {
+    if (event) event.preventDefault();
+    if (!invoke) return bridgeMissing("create_first_user");
+
+    var displayName = $("setup-name").value.trim();
+    var username = $("setup-user").value.trim();
+    var password = $("setup-pass").value;
+    var problem = accountProblem(displayName, username, password, $("setup-pass2").value);
+    if (problem) return setMsg("setup-msg", problem, true);
+
+    var button = $("setup-submit");
+    button.disabled = true;
+    setMsg("setup-msg", "Creating your account…", false);
+
+    invoke("create_first_user", {
+      displayName: displayName,
+      username: username,
+      password: password,
+    })
+      .then(function (session) {
+        button.disabled = false;
+        // Straight into the shell: they just chose these credentials, so asking them to
+        // type them again would be ceremony, not security.
+        user = session.user;
+        $("setup-pass").value = "";
+        $("setup-pass2").value = "";
+        setMsg("setup-msg", "", false);
+        newTransaction();
+        showShell();
+        status("Welcome, " + user.display_name + ". This account owns this machine.");
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        setMsg("setup-msg", errText(err), true);
+      });
+  }
+
+  $("setup-form").addEventListener("submit", createFirstUser);
+
+  /* -------------------------------------------------------------------- users */
+
+  /** The account list, in the same label/value rows the About page uses. */
+  function loadUsers() {
+    if (!invoke || !user || user.role !== "owner") return;
+
+    invoke("list_users")
+      .then(function (users) {
+        // One block of rows per account, separated by space rather than by a card. The
+        // signed-in account is marked in place; there is no heading repeating the name
+        // that the first row already gives.
+        $("user-list").innerHTML = users
+          .map(function (u) {
+            return (
+              '<dl class="rows user-rows">' +
+              "<dt>Display Name</dt><dd>" +
+              escapeHtml(u.display_name) +
+              (u.id === user.id ? ' <span class="tag">you</span>' : "") +
+              "</dd>" +
+              "<dt>Username</dt><dd>" + escapeHtml(u.username) + "</dd>" +
+              "<dt>Role</dt><dd>" + escapeHtml(u.role === "owner" ? "Owner" : "Cashier") + "</dd>" +
+              "<dt>Created</dt><dd>" + escapeHtml(dateOnly(u.created_at)) + "</dd>" +
+              "</dl>"
+            );
+          })
+          .join("");
+      })
+      .catch(function (err) {
+        $("user-list").innerHTML = '<p class="empty">' + escapeHtml(errText(err)) + "</p>";
+      });
+  }
+
+  /** "2025-04-07T18:22:10" → "07 Apr 2025". Timestamps are stored local, so no parsing. */
+  function dateOnly(stamp) {
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    var parts = String(stamp || "").slice(0, 10).split("-");
+    if (parts.length !== 3) return stamp || "—";
+    return parts[2] + " " + (months[Number(parts[1]) - 1] || parts[1]) + " " + parts[0];
+  }
+
+  function showUserForm(on) {
+    $("user-form").hidden = !on;
+    $("user-add-toggle").hidden = on;
+    if (on) $("user-name").focus();
+  }
+
+  function resetUserForm() {
+    $("user-name").value = "";
+    $("user-user").value = "";
+    $("user-pass").value = "";
+    $("user-pass2").value = "";
+    $("user-role").value = "cashier";
+    setMsg("user-msg", "", false);
+  }
+
+  function createUser(event) {
+    if (event) event.preventDefault();
+    if (!invoke) return bridgeMissing("create_user");
+
+    var displayName = $("user-name").value.trim();
+    var username = $("user-user").value.trim();
+    var password = $("user-pass").value;
+    var problem = accountProblem(displayName, username, password, $("user-pass2").value);
+    if (problem) return setMsg("user-msg", problem, true);
+
+    var button = $("user-save");
+    button.disabled = true;
+    setMsg("user-msg", "Creating…", false);
+
+    invoke("create_user", {
+      displayName: displayName,
+      username: username,
+      password: password,
+      role: $("user-role").value,
+    })
+      .then(function (created) {
+        button.disabled = false;
+        resetUserForm();
+        showUserForm(false);
+        loadUsers();
+        status(created.display_name + " can now sign in as a " + created.role + ".");
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        setMsg("user-msg", errText(err), true);
+      });
+  }
+
+  $("user-add-toggle").addEventListener("click", function () {
+    resetUserForm();
+    showUserForm(true);
+  });
+  $("user-cancel").addEventListener("click", function () {
+    resetUserForm();
+    showUserForm(false);
+  });
+  $("user-form").addEventListener("submit", createUser);
   /* ------------------------------------------------------------------ user menu */
 
   function closeUserMenu() {

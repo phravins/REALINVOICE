@@ -46,16 +46,6 @@ pub fn new_session_token() -> String {
     uuid::Uuid::from_bytes(bytes).to_string()
 }
 
-/// Generates a readable one-time password for the seeded owner account.
-///
-/// Avoids characters that are misread off a terminal (`0`/`O`, `1`/`l`/`I`), because
-/// somebody has to type this by hand on first launch.
-pub fn generate_initial_password() -> String {
-    const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let mut rng = rand::rng();
-    (0..16).map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())] as char).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,14 +93,5 @@ mod tests {
             (0..64).map(|_| new_session_token()).collect();
         assert_eq!(tokens.len(), 64);
         assert_eq!(tokens.iter().next().unwrap().len(), 36, "uuid-shaped");
-    }
-
-    #[test]
-    fn the_initial_password_is_long_and_unambiguous() {
-        let generated = generate_initial_password();
-        assert_eq!(generated.len(), 16);
-        assert!(generated.len() >= MIN_PASSWORD_LEN);
-        assert!(!generated.contains(['0', 'O', '1', 'l', 'I']), "{generated}");
-        assert_ne!(generated, generate_initial_password());
     }
 }

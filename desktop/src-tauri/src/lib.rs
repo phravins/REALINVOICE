@@ -25,12 +25,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Reachable without a session; everything below it requires one.
             commands::auth_status,
+            commands::create_first_user,
             commands::login,
             commands::logout,
             commands::get_theme,
             commands::set_theme,
             commands::node_status,
             commands::app_info,
+            commands::list_users,
+            commands::create_user,
             commands::search_customer,
             commands::create_customer,
             commands::search_item,

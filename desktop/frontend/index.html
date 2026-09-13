@@ -51,9 +51,37 @@
 
         <button type="submit" class="btn btn--lock login-submit" id="login-submit">Sign In</button>
         <p class="login-msg" id="login-msg" aria-live="polite"></p>
+      </form>
+    </div>
 
-        <!-- Shown once, on a first run, for an app launched without a terminal to read. -->
-        <div class="login-firstrun" id="login-firstrun" hidden></div>
+    <!-- Shown instead of the gate when this installation has no accounts at all. Same
+         unboxed treatment: whoever sees this screen is setting the shop up, and it should
+         feel like the same product, not a technical detour. -->
+    <div class="login" id="setup-screen" hidden>
+      <form class="login-form" id="setup-form" autocomplete="off">
+        <svg class="logo logo--login" role="img" aria-label="RealInvoice"><use href="#ri-logo" /></svg>
+        <p class="login-node">Create your account</p>
+        <p class="login-lede">This is the first time RealInvoice has run on this computer.
+          The account you create now is the owner — it can bill, and it can add logins for
+          your staff later.</p>
+
+        <label class="login-field">Display Name
+          <input id="setup-name" type="text" autocomplete="name" required
+                 placeholder="e.g. Priya Raman" />
+        </label>
+        <label class="login-field">Username
+          <input id="setup-user" type="text" autocomplete="off" autocapitalize="off"
+                 spellcheck="false" required placeholder="what you will type to sign in" />
+        </label>
+        <label class="login-field">Password
+          <input id="setup-pass" type="password" autocomplete="new-password" required />
+        </label>
+        <label class="login-field">Confirm Password
+          <input id="setup-pass2" type="password" autocomplete="new-password" required />
+        </label>
+
+        <button type="submit" class="btn btn--lock login-submit" id="setup-submit">Create Account</button>
+        <p class="login-msg" id="setup-msg" aria-live="polite"></p>
       </form>
     </div>
 
@@ -124,6 +152,12 @@
       <button class="nav-item" role="tab" data-pane="settings" aria-selected="false">
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.3 14.3a1.6 1.6 0 0 0 .32 1.77l.06.06a1.94 1.94 0 1 1-2.74 2.74l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-.97 1.46v.17a1.94 1.94 0 1 1-3.88 0v-.09a1.6 1.6 0 0 0-1.05-1.46 1.6 1.6 0 0 0-1.77.32l-.06.06a1.94 1.94 0 1 1-2.74-2.74l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.46-.97h-.17a1.94 1.94 0 1 1 0-3.88h.09a1.6 1.6 0 0 0 1.46-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a1.94 1.94 0 1 1 2.74-2.74l.06.06a1.6 1.6 0 0 0 1.77.32h.08a1.6 1.6 0 0 0 .97-1.46v-.17a1.94 1.94 0 1 1 3.88 0v.09a1.6 1.6 0 0 0 .97 1.46 1.6 1.6 0 0 0 1.77-.32l.06-.06a1.94 1.94 0 1 1 2.74 2.74l-.06.06a1.6 1.6 0 0 0-.32 1.77v.08a1.6 1.6 0 0 0 1.46.97h.17a1.94 1.94 0 1 1 0 3.88h-.09a1.6 1.6 0 0 0-1.46.97z"/></svg>
         <span>Settings</span>
+      </button>
+      <!-- Hidden for cashiers by the shell, and refused for cashiers by the commands
+           behind it. Removing it from the sidebar is the courtesy, not the control. -->
+      <button class="nav-item" role="tab" data-pane="users" aria-selected="false" id="nav-users" hidden>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9.5" cy="8.2" r="3.4"/><path d="M3.4 19.6c0-3 2.7-5.4 6.1-5.4s6.1 2.4 6.1 5.4"/><path d="M16.2 5.2a3.2 3.2 0 0 1 0 6.1M17.5 14.5c2.1.5 3.6 2.3 3.6 4.4"/></svg>
+        <span>Users</span>
       </button>
 
       <div class="sidebar-foot">
@@ -376,6 +410,51 @@
             <h2>About</h2>
           </div>
           <dl class="rows" id="about-app-rows"></dl>
+        </div>
+      </section>
+
+      <!-- Owner-only. Lists who can sign in on this machine and adds more. There is no
+           edit or delete: changing somebody's password or removing their access is a
+           thing to get right, not to bolt on. -->
+      <section class="pane" id="pane-users" role="tabpanel">
+        <div class="page">
+          <div class="page-head">
+            <h2>Users</h2>
+            <button class="btn" id="user-add-toggle">Add User</button>
+          </div>
+          <p class="page-lede">Everyone who can sign in on this computer. Owners can bill
+            and manage these accounts; cashiers can only bill.</p>
+
+          <form class="userform" id="user-form" autocomplete="off" hidden>
+            <div class="userform-grid">
+              <label class="field">Display Name
+                <input id="user-name" type="text" required placeholder="e.g. Anand Kumar" />
+              </label>
+              <label class="field">Username
+                <input id="user-user" type="text" autocapitalize="off" spellcheck="false"
+                       required placeholder="what they will type to sign in" />
+              </label>
+              <label class="field">Role
+                <select id="user-role">
+                  <option value="cashier" selected>Cashier</option>
+                  <option value="owner">Owner</option>
+                </select>
+              </label>
+              <label class="field">Password
+                <input id="user-pass" type="password" autocomplete="new-password" required />
+              </label>
+              <label class="field">Confirm Password
+                <input id="user-pass2" type="password" autocomplete="new-password" required />
+              </label>
+            </div>
+            <div class="userform-actions">
+              <button type="submit" class="btn btn--lock" id="user-save">Create User</button>
+              <button type="button" class="btn" id="user-cancel">Cancel</button>
+              <span class="form-msg" id="user-msg" aria-live="polite"></span>
+            </div>
+          </form>
+
+          <div id="user-list"></div>
         </div>
       </section>
     </main>

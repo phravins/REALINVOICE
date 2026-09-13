@@ -7,7 +7,7 @@
 
 use realinvoice_core::{
     auth, gst, Customer, Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine, InvoiceSummary, Item,
-    NewCustomer, NewInvoice, NewInvoiceLine,
+    NewCustomer, NewInvoice, NewInvoiceLine, NewUser, Role, User,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -16,31 +16,27 @@ use crate::state::{AppState, Session, NODE_NAME};
 
 // ------------------------------------------------------------------- sign-in
 
-/// What the login screen needs before anyone has signed in.
+/// What the sign-in screen needs before anyone has signed in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthStatus {
     pub node: String,
     pub session: Option<Session>,
-    /// The one-time password created on a first run, shown once so an app launched from a
-    /// desktop icon — with no terminal to read — is not locked out of itself. Cleared the
-    /// moment anyone signs in.
-    pub first_run_password: Option<String>,
-    pub first_run_username: Option<String>,
+    /// True when this installation has no accounts at all, so the shell asks for one to
+    /// be created instead of asking to sign in to an account that does not exist.
+    pub needs_setup: bool,
 }
 
-/// Whether anyone is signed in. The only command, besides `login`, that works without a
-/// session — the shell asks it on startup to decide what to show.
+/// Whether anyone is signed in, and whether this copy has been set up at all. One of the
+/// three commands — with `create_first_user` and `login` — that work without a session;
+/// the shell asks it on startup to decide what to show.
 #[tauri::command]
-pub fn auth_status(state: State<'_, AppState>) -> AuthStatus {
-    let first_run_password = state.first_run_password();
-    AuthStatus {
+pub fn auth_status(state: State<'_, AppState>) -> Result<AuthStatus, String> {
+    let count = state.db().count_users().map_err(|e| e.to_string())?;
+    Ok(AuthStatus {
         node: NODE_NAME.to_string(),
         session: state.session(),
-        first_run_username: first_run_password
-            .is_some()
-            .then(|| realinvoice_core::seed::DEFAULT_OWNER_USERNAME.to_string()),
-        first_run_password,
-    }
+        needs_setup: count == 0,
+    })
 }
 
 /// Signs in. One message for a bad username and a bad password alike, so the screen
@@ -69,12 +65,115 @@ pub fn logout(state: State<'_, AppState>) {
     state.end_session();
 }
 
+/// Creates the very first account and signs it in.
+///
+/// Unauthenticated by necessity — there is nobody to authenticate against yet — so it is
+/// guarded by the only thing that makes it safe: it refuses outright once an account
+/// exists. The check and the insert share the database lock, so a second caller racing
+/// the first finds the table populated and is turned away. The role is not a parameter:
+/// whoever sets the machine up owns it.
+#[tauri::command]
+pub fn create_first_user(
+    display_name: String,
+    username: String,
+    password: String,
+    state: State<'_, AppState>,
+) -> Result<Session, String> {
+    let user = {
+        let mut db = state.db();
+        if db.count_users().map_err(|e| e.to_string())? > 0 {
+            return Err("This copy of RealInvoice has already been set up.".to_string());
+        }
+        let new = NewUser {
+            username: username.trim().to_string(),
+            display_name: display_name.trim().to_string(),
+            role: Role::Owner,
+        };
+        db.create_user(&new, &password).map_err(|e| e.to_string())?
+    };
+
+    // Straight in. Making someone re-type what they just typed proves nothing.
+    let session = Session { token: auth::new_session_token(), user };
+    state.begin_session(session.clone());
+    Ok(session)
+}
+
+/// Every account on this machine. Owner-only: who else can sign in is not a cashier's
+/// business.
+#[tauri::command]
+pub fn list_users(state: State<'_, AppState>) -> Result<Vec<User>, String> {
+    require_owner(&state)?;
+    state.db().list_users().map_err(|e| e.to_string())
+}
+
+/// Adds an account. Owner-only, and the caller picks the role.
+#[tauri::command]
+pub fn create_user(
+    display_name: String,
+    username: String,
+    password: String,
+    role: String,
+    state: State<'_, AppState>,
+) -> Result<User, String> {
+    require_owner(&state)?;
+    let role = Role::parse(&role).ok_or_else(|| "Unknown role.".to_string())?;
+    let new = NewUser {
+        username: username.trim().to_string(),
+        display_name: display_name.trim().to_string(),
+        role,
+    };
+
+    let mut db = state.db();
+    // Said in the words of somebody running a shop, rather than core's field-level
+    // wording. The UNIQUE constraint inside `create_user` is still what guarantees it —
+    // this only decides what the screen says in the case that actually happens.
+    if db.find_user(&new.username).map_err(|e| e.to_string())?.is_some() {
+        return Err("That username is already taken.".to_string());
+    }
+    db.create_user(&new, &password).map_err(|e| e.to_string())
+}
+
 /// The gate every other command goes through.
 ///
 /// Hiding the shell in the frontend is presentation; this is what actually stops an
 /// unauthenticated caller reading customers or writing an invoice.
 fn require_session(state: &State<'_, AppState>) -> Result<Session, String> {
-    state.session().ok_or_else(|| "Not signed in.".to_string())
+    session_of(state.session())
+}
+
+/// The gate on the commands that manage accounts.
+///
+/// Hiding the Users screen from cashiers is presentation; this is what stops one calling
+/// `create_user` directly and promoting itself.
+fn require_owner(state: &State<'_, AppState>) -> Result<Session, String> {
+    owner_of(state.session())
+}
+
+/// [`require_session`] without the Tauri handle, so it can be tested.
+pub(crate) fn session_of(session: Option<Session>) -> Result<Session, String> {
+    session.ok_or_else(|| "Not signed in.".to_string())
+}
+
+/// [`require_owner`] without the Tauri handle, so it can be tested. Not being signed in
+/// and being signed in as a cashier are both refusals — there is no third answer.
+pub(crate) fn owner_of(session: Option<Session>) -> Result<Session, String> {
+    let session = session_of(session)?;
+    match session.user.role {
+        Role::Owner => Ok(session),
+        _ => Err("Only an owner can manage accounts.".to_string()),
+    }
+}
+
+/// Test hooks for the two gates, which the commands themselves need a running app to
+/// reach.
+#[doc(hidden)]
+pub fn require_session_for_test(session: Option<Session>) -> Result<Session, String> {
+    session_of(session)
+}
+
+#[doc(hidden)]
+pub fn require_owner_for_test(session: Option<Session>) -> Result<Session, String> {
+    owner_of(session)
 }
 
 /// What the About pane shows. Every field comes from the running binary, so bumping the

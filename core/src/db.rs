@@ -175,7 +175,16 @@ impl Db {
             .optional()?)
     }
 
-    /// How many accounts exist. Used to decide whether first-run seeding is needed.
+    /// Every account, oldest first. Owner-only in the UI; core does not gate it.
+    pub fn list_users(&self) -> Result<Vec<User>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, username, display_name, role, created_at FROM users ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], user_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// How many accounts exist. Zero means the app has never been set up.
     pub fn count_users(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?)
     }
