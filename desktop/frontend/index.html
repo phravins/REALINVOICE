@@ -135,8 +135,26 @@
     <div class="content">
     <main>
       <section class="pane is-active" id="pane-billing" role="tabpanel">
-        <div class="card card--txn">
-          <div class="card-head">
+        <div class="card">
+          <!-- Shown only once an invoice is saved. It replaces the editing header, so a
+               locked card reads as a finished record rather than a form full of
+               greyed-out controls. -->
+          <div class="saved-banner" id="saved-banner" hidden>
+            <svg class="saved-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9.2" />
+              <path d="m7.9 12.4 2.8 2.8 5.4-5.6" />
+            </svg>
+            <div class="saved-text">
+              <p class="saved-title" id="saved-title"></p>
+              <p class="saved-sub" id="saved-sub"></p>
+            </div>
+            <div class="saved-actions">
+              <button id="print-preview" class="btn" type="button">Print preview</button>
+              <button id="new-txn" class="btn btn--lock" type="button">New Transaction</button>
+            </div>
+          </div>
+
+          <div class="card-head" id="txn-head">
             <h2>New Transaction</h2>
             <span class="inv-no" id="inv-no" hidden></span>
             <div class="cust-search">
@@ -198,7 +216,7 @@
             </div>
           </div>
 
-          <div class="add-item">
+          <div class="add-item" id="add-item">
             <button id="add-item-btn" class="btn">+ Add Item</button>
           </div>
 
@@ -214,12 +232,14 @@
 
           <div class="summary">
             <div class="summary-left">
-              <div class="pay" role="radiogroup" aria-label="Payment type">
+              <div class="pay" id="pay-group" role="radiogroup" aria-label="Payment type">
                 <span class="pay-label">Payment</span>
                 <label class="pay-opt"><input type="radio" name="payment" value="upi" /><span>UPI</span></label>
                 <label class="pay-opt"><input type="radio" name="payment" value="cash" checked /><span>Cash</span></label>
                 <label class="pay-opt"><input type="radio" name="payment" value="card" /><span>Card</span></label>
               </div>
+
+              <p class="pay-static" id="pay-static" hidden></p>
 
               <!-- Placeholder until QR generation lands with the payments stage. -->
               <div class="upi-box" id="upi-box" hidden>
@@ -235,11 +255,9 @@
             <dl class="totals" id="billing-totals"></dl>
           </div>
 
-          <div class="actions">
+          <div class="actions" id="txn-actions">
             <span class="action-msg" id="action-msg"></span>
             <button id="print-lock" class="btn btn--lock">Print &amp; Lock (F5)</button>
-            <button id="print-preview" class="btn" hidden>Print preview</button>
-            <button id="new-txn" class="btn btn--lock" hidden>New Transaction</button>
           </div>
         </div>
 
@@ -301,7 +319,7 @@
         </div>
 
         <!-- Read-only. Invoices are append-only once saved: no edit, delete or reopen. -->
-        <div class="card card--txn" id="history-detail" hidden>
+        <div class="card" id="history-detail" hidden>
           <div class="card-head">
             <h2>Invoice</h2>
             <span class="inv-no" id="d-inv-no"></span>

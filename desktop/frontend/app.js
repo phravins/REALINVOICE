@@ -436,12 +436,10 @@
 
   /**
    * Clears a stale message. Anything that changes the transaction makes a previous
-   * confirmation or error wrong, and a stale line next to fresh totals is how a counter
-   * mis-bills. A save confirmation is exempt: the screen is locked, so nothing beneath it
-   * can change.
+   * error wrong, and a stale line next to fresh totals is how a counter mis-bills.
+   * The saved confirmation is not kept here — the banner carries it.
    */
   function clearMessage() {
-    if (locked) return;
     var msg = $("action-msg");
     msg.className = "action-msg";
     msg.textContent = "";
@@ -481,24 +479,26 @@
    */
   function setLocked(on) {
     locked = on;
-    document.querySelector(".card--txn").classList.toggle("is-locked", on);
 
-    $("mobile-input").disabled = on;
-    $("search-btn").disabled = on;
-    $("add-item-btn").disabled = on;
-    Array.prototype.forEach.call(document.querySelectorAll('input[name="payment"]'), function (radio) {
-      radio.disabled = on;
-    });
-    $("print-lock").hidden = on;
-    $("print-preview").hidden = !on;
-    $("new-txn").hidden = !on;
+    // The editing header (customer search) and the editing controls are removed, not
+    // disabled. A row of greyed-out buttons reads as broken; their absence reads as
+    // finished.
+    $("txn-head").hidden = on;
+    $("saved-banner").hidden = !on;
+    $("add-item").hidden = on;
+    $("txn-actions").hidden = on;
 
-    Array.prototype.forEach.call(document.querySelectorAll(".qty-input"), function (input) {
-      input.disabled = on;
-    });
-    Array.prototype.forEach.call(document.querySelectorAll(".row-del"), function (button) {
-      button.disabled = on;
-    });
+    // "Saving…" was the last thing this row said; the banner has superseded it.
+    clearMessage();
+
+    // Payment becomes a stated fact rather than a choice still on offer.
+    $("pay-group").hidden = on;
+    $("pay-static").hidden = !on;
+    $("upi-box").hidden = on || selectedPayment() !== "upi";
+
+    // Re-rendering swaps the Qty boxes and remove buttons for plain text, because
+    // lineRowsHtml only draws them when the table is editable.
+    renderRows();
 
     if (on) {
       hideNewCustomer();
@@ -590,13 +590,16 @@
     });
     renderTotals($("billing-totals"), totalsOf(invoice));
 
+    $("saved-title").textContent = "Invoice " + invoice.invoice_no + " saved";
+    $("saved-sub").textContent =
+      rupees(invoice.grand_total) + " · " + saved.lines.length + " item" +
+      (saved.lines.length === 1 ? "" : "s") + " · queued for sync";
+    $("pay-static").textContent = invoice.payment_type.toUpperCase();
+
     // Keep the saved invoice for the print preview the locked card now offers.
     lastSaved = saved;
     setLocked(true);
 
-    var msg = $("action-msg");
-    msg.className = "action-msg ok";
-    msg.textContent = "Saved — Invoice #" + invoice.invoice_no;
     status(
       "Saved " + invoice.invoice_no + " · " + rupees(invoice.grand_total) + " · " +
         saved.lines.length + " line(s) · " + saved.queued_sync_rows + " row(s) queued for sync."

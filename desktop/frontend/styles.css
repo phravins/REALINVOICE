@@ -59,7 +59,6 @@ kbd {
 
 .muted { color: var(--text-secondary); }
 .error { color: var(--danger); }
-.ok { color: var(--success); }
 
 .sr-only {
   position: absolute;
@@ -916,14 +915,67 @@ select option { background: var(--surface); color: var(--text); }
   white-space: nowrap;
 }
 
-/* A saved invoice is a printed document: nothing on it may still look editable. */
-.card--txn.is-locked {
-  padding-left: var(--s4);
-  border-left: 3px solid var(--success);
+/* ------------------------------------------------------- saved invoice banner */
+
+/*
+ * A saved invoice is a finished record. It says so once, clearly, at the top — and the
+ * editing controls are removed rather than greyed out, so nothing on screen looks
+ * half-usable.
+ */
+.saved-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3) var(--s4);
+  padding: var(--s4);
+  background: var(--success-soft);
+  border-radius: var(--r-md);
 }
 
-.card--txn.is-locked .items td,
-.card--txn.is-locked .cust-line { color: var(--text-secondary); }
+.saved-icon {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: var(--success);
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.saved-text { flex: 1 1 240px; min-width: 0; }
+
+.saved-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--t-h2-size);
+  font-weight: var(--t-h2-weight);
+}
+
+.saved-sub {
+  margin: 2px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--t-small-size);
+}
+
+.saved-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-left: auto;
+}
+
+/* Read-only values take the place of the controls they replace. */
+.pay-static {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--t-body-size);
+}
+
+.pay-static::before {
+  content: "Payment ";
+  color: var(--text-secondary);
+}
 
 /* ============================================================== 8. History view */
 
