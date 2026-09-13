@@ -22,6 +22,10 @@ thiserror = "2"
 bcrypt = "0.19"
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.9"
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+# rustls rather than the system OpenSSL: the installer has to work on a counter PC
+# without anyone installing a TLS library first.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [profile.release]
 opt-level = "s"

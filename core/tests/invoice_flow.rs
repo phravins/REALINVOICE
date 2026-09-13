@@ -3,7 +3,7 @@
 
 use realinvoice_core::{
     seed, CoreError, DateRange, Db, InvoiceFilter, ItemFilter, NewCustomer, NewInvoice,
-    NewInvoiceLine, NewItem, NewUser, Role, User,
+    NewInvoiceLine, NewItem, NewUser, Role, SyncBatch, User,
 };
 
 fn seeded_db() -> Db {
@@ -1142,4 +1142,137 @@ fn the_payment_mix_covers_every_invoice_once() {
 
     // Biggest share first: cash and card both took a rack, UPI took the licences.
     assert_eq!(mix[2].payment_type, "upi");
+}
+
+// ------------------------------------------------------------------ sync queue
+
+#[test]
+fn a_batch_is_taken_oldest_first_and_capped() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let rack = item(&db, "RACK-42U-PRO");
+    db.create_invoice(&NewInvoice {
+        customer_id: buyer.id,
+        date: None,
+        payment_type: "cash".into(),
+        created_by_user_id: None,
+        lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+    })
+    .unwrap();
+
+    let all = db.pending_sync_rows().unwrap();
+    assert!(all.len() > 3, "the demo data and the invoice are queued");
+
+    let batch = db.next_sync_batch(3).unwrap();
+    assert_eq!(batch.len(), 3, "the cap is honoured");
+
+    // Oldest first, and that is load-bearing: a customer is queued before the invoice
+    // that references it, and an invoice before its lines, so sending in this order means
+    // the far end never sees a row whose parent has not arrived.
+    let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(ids, sorted);
+    assert_eq!(ids[0], all[0].id);
+
+    let order: Vec<&str> = all.iter().map(|r| r.table_name.as_str()).collect();
+    let invoice_at = order.iter().position(|t| *t == "invoices").unwrap();
+    let line_at = order.iter().position(|t| *t == "invoice_lines").unwrap();
+    assert!(invoice_at < line_at, "an invoice is queued before its lines");
+}
+
+#[test]
+fn marking_a_batch_sent_removes_it_from_the_queue_and_nothing_else() {
+    let mut db = seeded_db();
+    let before = db.pending_sync_count().unwrap();
+    assert_eq!(before as usize, db.pending_sync_rows().unwrap().len());
+
+    let batch = db.next_sync_batch(5).unwrap();
+    let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
+
+    assert_eq!(db.mark_synced(&ids).unwrap(), 5);
+    assert_eq!(db.pending_sync_count().unwrap(), before - 5);
+
+    // The next batch carries on from where that one stopped, never repeating it.
+    let next = db.next_sync_batch(5).unwrap();
+    assert!(next.iter().all(|r| !ids.contains(&r.id)));
+
+    // Marking the same rows again is harmless — a duplicate acknowledgement must not
+    // rewrite when they were sent, or mark anything else.
+    assert_eq!(db.mark_synced(&ids).unwrap(), 0, "already-sent rows are not re-marked");
+    assert_eq!(db.pending_sync_count().unwrap(), before - 5);
+    assert_eq!(db.mark_synced(&[]).unwrap(), 0);
+}
+
+#[test]
+fn a_failed_push_loses_nothing() {
+    // What the worker does on a non-2xx or a network error: mark nothing. The same batch
+    // has to come back, in the same order, or a rejected batch would cost records.
+    let mut db = seeded_db();
+    let first = db.next_sync_batch(4).unwrap();
+
+    // ... no mark_synced call ...
+
+    let retry = db.next_sync_batch(4).unwrap();
+    assert_eq!(
+        first.iter().map(|r| r.id).collect::<Vec<_>>(),
+        retry.iter().map(|r| r.id).collect::<Vec<_>>(),
+        "a failed batch is retried as the same batch"
+    );
+
+    // And billing during the outage simply lengthens the queue.
+    let buyer = customer(&db, "9840012345");
+    let rack = item(&db, "RACK-42U-PRO");
+    let before = db.pending_sync_count().unwrap();
+    db.create_invoice(&NewInvoice {
+        customer_id: buyer.id,
+        date: None,
+        payment_type: "cash".into(),
+        created_by_user_id: None,
+        lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+    })
+    .unwrap();
+    assert!(db.pending_sync_count().unwrap() > before, "an offline till keeps billing");
+}
+
+#[test]
+fn the_wire_format_carries_each_record_as_an_object() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let rack = item(&db, "RACK-42U-PRO");
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "upi".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+        })
+        .unwrap();
+
+    let queued = db.pending_sync_rows().unwrap();
+    let batch = SyncBatch::build("POS-01", &queued).unwrap();
+
+    assert_eq!(batch.node_id, "POS-01");
+    assert_eq!(batch.rows.len(), queued.len());
+    assert_eq!(batch.ids(), queued.iter().map(|r| r.id).collect::<Vec<_>>());
+
+    let row = batch.rows.iter().find(|r| r.table_name == "invoices").unwrap();
+    assert_eq!(row.row_id, invoice.id);
+    assert_eq!(row.op, "insert");
+
+    // The payload is a JSON object, not the stored string re-quoted: the far end should
+    // receive a record it can decode, not a blob it has to parse a second time.
+    let payload = row.payload.as_object().expect("an object, not a string");
+    assert_eq!(payload["invoice_no"], invoice.invoice_no.as_str());
+    assert_eq!(payload["grand_total"], invoice.grand_total);
+    assert_eq!(payload["payment_type"], "upi");
+    // snake_case keys, matching the column names, so an Ecto schema can map them directly.
+    assert!(payload.contains_key("customer_id"));
+    assert!(payload.contains_key("created_at"));
+
+    // The whole envelope round-trips, which is what the endpoint will actually receive.
+    let json = serde_json::to_string(&batch).unwrap();
+    let parsed: SyncBatch = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, batch);
 }

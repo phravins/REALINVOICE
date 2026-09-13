@@ -7,6 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# The push worker needs an async runtime and an HTTP client. On by default so the desktop
+# app and the tests get it without ceremony, and behind a feature so the Logistics Desk
+# TUI — which has no business linking a TLS stack — can turn it off.
+default = ["sync"]
+sync = ["dep:tokio", "dep:reqwest"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -16,6 +23,8 @@ thiserror = { workspace = true }
 bcrypt = { workspace = true }
 uuid = { workspace = true }
 rand = { workspace = true }
+tokio = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

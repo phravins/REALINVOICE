@@ -1,9 +1,9 @@
 //! Process-wide state: one `Db`, and the session of whoever is signed in.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use realinvoice_core::{seed, Db, User};
+use realinvoice_core::{seed, sync, Db, SyncHandle, User};
 use serde::{Deserialize, Serialize};
 
 /// Name of this billing node. Hardcoded until the Settings pane exists.
@@ -26,11 +26,15 @@ pub struct Session {
     pub user: User,
 }
 
-/// The shared connection and the current session.
+/// The shared connection, the current session, and the push worker's status.
 pub struct AppState {
-    db: Mutex<Db>,
+    /// Behind an `Arc` because the sync worker shares it. The worker takes the lock only
+    /// to read a batch or mark one sent, never across a network call, so a back office
+    /// that is down or slow cannot hold the lock the billing screen needs.
+    db: Arc<Mutex<Db>>,
     db_path: PathBuf,
     session: Mutex<Option<Session>>,
+    sync: Mutex<Option<SyncHandle>>,
 }
 
 impl AppState {
@@ -45,7 +49,32 @@ impl AppState {
         let mut db = Db::open(&path).map_err(|e| e.to_string())?;
         seed::seed_if_empty(&mut db).map_err(|e| e.to_string())?;
 
-        Ok(Self { db: Mutex::new(db), db_path: path, session: Mutex::new(None) })
+        Ok(Self {
+            db: Arc::new(Mutex::new(db)),
+            db_path: path,
+            session: Mutex::new(None),
+            sync: Mutex::new(None),
+        })
+    }
+
+    /// The shared connection, for the sync worker.
+    pub fn db_arc(&self) -> Arc<Mutex<Db>> {
+        Arc::clone(&self.db)
+    }
+
+    /// How the worker is configured for this node, read from the settings table.
+    pub fn sync_config(&self) -> Result<sync::SyncConfig, String> {
+        sync::SyncConfig::load(&self.db(), NODE_NAME).map_err(|e| e.to_string())
+    }
+
+    /// Remembers the worker's handle so the commands can read its status and nudge it.
+    pub fn set_sync(&self, handle: SyncHandle) {
+        *self.sync.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+    }
+
+    /// The worker's handle, or `None` if it never started.
+    pub fn sync(&self) -> Option<SyncHandle> {
+        self.sync.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Locks the shared connection. The lock is poisoned only if a command panicked

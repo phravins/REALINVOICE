@@ -192,6 +192,9 @@
       status("The catalogue the billing screen prices from.");
     } else if (name === "analytics") {
       loadAnalytics();
+    } else if (name === "sync") {
+      refreshSync();
+      status("Copies of what this till bills are sent to the back office.");
     } else if (name === "users") {
       showUserForm(false);
       loadUsers();
@@ -209,15 +212,11 @@
 
   /* --------------------------------------------------------- title bar status */
 
+  /** The status bar's line. The badge is painted by refreshSync() from the worker. */
   function loadNodeStatus() {
     if (!invoke) return bridgeMissing("node_status");
     invoke("node_status")
       .then(function (info) {
-        var badge = $("conn-badge");
-        var label = info.connected ? "Connected" : "Offline";
-        badge.className = "status-dot " + (info.connected ? "status-dot--connected" : "status-dot--offline");
-        badge.title = label;
-        $("conn-label").textContent = label;
         status("db: " + info.db_path);
       })
       .catch(function (err) {
@@ -1027,6 +1026,7 @@
     $("menu-role").textContent = user.role + " · " + user.username;
     loadNodeStatus();
     refreshAbout();
+    startSyncPolling();
     showPane("billing");
     $("mobile-input").focus();
   }
@@ -1065,6 +1065,7 @@
 
   function signOut() {
     if (!invoke) return bridgeMissing("logout");
+    stopSyncPolling();
     invoke("logout").then(function () {
       // Clear the screen before showing the gate, so a half-billed transaction is not
       // sitting there for whoever signs in next.
@@ -1722,6 +1723,201 @@
   }
 
   $("an-range").addEventListener("change", loadAnalytics);
+
+
+  /* ----------------------------------------------------------------------- sync */
+
+  /** The last status the worker reported, so the badge and the Sync page agree. */
+  var syncState = null;
+
+  /** Stops the badge polling once signed out. */
+  var syncTimer = null;
+
+  /**
+   * The badge's three readings. Colour alone does not tell a cashier whether anything is
+   * waiting, so each one carries its words too.
+   */
+  function paintBadge(view) {
+    var icon = $("conn-icon");
+    var label = $("conn-label");
+    var badge = $("conn-badge");
+
+    // Written out rather than assembled, so Tailwind can see every class this can produce.
+    var TONES = {
+      ok: "text-success",
+      warn: "text-warning",
+      idle: "text-base-content/45",
+    };
+
+    var tone;
+    var text;
+    var title;
+
+    if (!view) {
+      tone = "idle";
+      text = "Checking…";
+      title = "Reading sync status";
+    } else if (!view.configured) {
+      // Not an error. A till nobody has pointed at a back office yet is waiting to be
+      // set up, and a red badge on a fresh install would be a lie.
+      tone = "idle";
+      text = "Not linked";
+      title = "No back office address set — Settings › Sync";
+    } else if (view.healthy) {
+      tone = "ok";
+      text = "Connected";
+      title = "Last sent " + (view.last_success || "just now");
+    } else {
+      tone = "warn";
+      text = view.pending > 0 ? "Offline — " + view.pending + " pending" : "Offline";
+      title = view.last_error || "Waiting to reach the back office";
+    }
+
+    icon.className = "hero-cloud size-4 shrink-0 " + TONES[tone];
+    label.className = TONES[tone];
+    label.textContent = text;
+    badge.title = title;
+  }
+
+  /** Reads the worker's state and repaints the badge. Cheap, and never blocks billing. */
+  function refreshSync() {
+    if (!invoke || !user) return Promise.resolve(null);
+
+    return invoke("sync_status")
+      .then(function (view) {
+        syncState = view;
+        paintBadge(view);
+        // Repaint the Sync page too, if that is what is open.
+        if (document.getElementById("pane-sync").classList.contains("is-active")) {
+          renderSyncPage(view);
+        }
+        return view;
+      })
+      .catch(function (err) {
+        syncState = null;
+        paintBadge(null);
+        $("conn-badge").title = errText(err);
+        return null;
+      });
+  }
+
+  /** Polls the badge on the worker's own cadence, so the two never drift far apart. */
+  function startSyncPolling() {
+    stopSyncPolling();
+    refreshSync().then(function (view) {
+      var seconds = view && view.poll_seconds ? view.poll_seconds : 10;
+      syncTimer = setInterval(refreshSync, seconds * 1000);
+    });
+  }
+
+  function stopSyncPolling() {
+    if (syncTimer) clearInterval(syncTimer);
+    syncTimer = null;
+  }
+
+  /** `2026-09-13 11:32:04` → `11:32:04 today`, or the date when it is older. */
+  function whenSynced(stamp) {
+    if (!stamp) return "never";
+    var parts = String(stamp).split(" ");
+    if (parts.length !== 2) return stamp;
+    var today = new Date();
+    var iso =
+      today.getFullYear() +
+      "-" +
+      String(today.getMonth() + 1).padStart(2, "0") +
+      "-" +
+      String(today.getDate()).padStart(2, "0");
+    return parts[0] === iso ? parts[1] + " today" : parts[1] + " on " + dateOnly(parts[0]);
+  }
+
+  function renderSyncPage(view) {
+    if (!view) {
+      rowList($("sync-rows"), [["Status", "Could not read the sync worker"]]);
+      return;
+    }
+
+    var state;
+    if (!view.configured) {
+      state = "Not linked — no address set";
+    } else if (view.healthy) {
+      state = "Connected";
+    } else {
+      state = "Offline — retrying";
+    }
+
+    var rows = [
+      ["Status", state],
+      ["This till", view.node_id],
+      ["Waiting to send", view.pending === 0 ? "Nothing — everything is up to date"
+                                             : view.pending + " record(s)"],
+      ["Last sent", whenSynced(view.last_success)],
+    ];
+
+    if (view.last_batch > 0 && view.last_success) {
+      rows.push(["Last batch", view.last_batch + " record(s)"]);
+    }
+    if (view.last_error) {
+      rows.push(["Last problem", view.last_error]);
+    }
+    if (view.consecutive_failures > 0) {
+      rows.push([
+        "Retrying",
+        "attempt " + (view.consecutive_failures + 1) + ", in about " +
+          view.retry_in_seconds + "s",
+      ]);
+    }
+
+    rowList($("sync-rows"), rows);
+
+    // Do not fight somebody who is mid-edit in the address box.
+    var box = $("sync-endpoint");
+    if (document.activeElement !== box) box.value = view.endpoint || "";
+  }
+
+  function syncNow() {
+    if (!invoke) return bridgeMissing("sync_now");
+    status("Sending…");
+    invoke("sync_now")
+      .then(function () {
+        // The command returns as soon as the worker is nudged, deliberately: the button
+        // must not hang the screen on a network round trip. Look again once it has had a
+        // moment to try.
+        setTimeout(refreshSync, 1200);
+        setTimeout(refreshSync, 3000);
+      })
+      .catch(function (err) {
+        status(errText(err));
+      });
+  }
+
+  function saveEndpoint(event) {
+    if (event) event.preventDefault();
+    if (!invoke) return bridgeMissing("set_sync_endpoint");
+
+    var button = $("endpoint-save");
+    button.disabled = true;
+    setMsg("endpoint-msg", "Saving…", false);
+
+    invoke("set_sync_endpoint", { endpoint: $("sync-endpoint").value })
+      .then(function (saved) {
+        button.disabled = false;
+        setMsg("endpoint-msg", saved ? "Saved." : "Cleared.", false);
+        status(saved ? "Back office address saved." : "Back office address cleared.");
+        setTimeout(refreshSync, 1200);
+        setTimeout(refreshSync, 3000);
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        setMsg("endpoint-msg", errText(err), true);
+      });
+  }
+
+  $("sync-now").addEventListener("click", syncNow);
+  $("endpoint-form").addEventListener("submit", saveEndpoint);
+  // The badge is a shortcut to the page that explains it.
+  $("conn-badge").addEventListener("click", function () {
+    showPane("sync");
+  });
 
   /* ----------------------------------------------------------------- wiring */
 

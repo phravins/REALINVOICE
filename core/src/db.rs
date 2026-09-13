@@ -488,10 +488,6 @@ impl Db {
         )?;
         let invoice_id = tx.last_insert_rowid();
 
-        for (item_id, taxable) in &priced {
-            insert_line(&tx, invoice_id, *item_id, taxable)?;
-        }
-
         let invoice = Invoice {
             id: invoice_id,
             invoice_no,
@@ -507,7 +503,17 @@ impl Db {
             created_at,
             created_by_user_id: new.created_by_user_id,
         };
+
+        // Queued before its lines, not after. The sync worker sends in queue order, so a
+        // line that travels ahead of the invoice it belongs to would arrive at the back
+        // office referencing an invoice that is not there yet. Both still land in this one
+        // transaction, so nothing about the local write changes.
         enqueue(&tx, "invoices", invoice.id, SyncOp::Insert, &invoice)?;
+
+        for (item_id, taxable) in &priced {
+            insert_line(&tx, invoice_id, *item_id, taxable)?;
+        }
+
         tx.commit()?;
         Ok(invoice)
     }
@@ -708,8 +714,8 @@ impl Db {
 
     // --------------------------------------------------------------- sync queue
 
-    /// Queued rows nothing has sent yet, oldest first. No consumer exists yet; this is
-    /// here so tests — and, later, the sync worker — can see what is waiting.
+    /// Queued rows nothing has sent yet, oldest first. Unbounded: used by tests and by
+    /// anything that wants the whole backlog. The worker takes [`Db::next_sync_batch`].
     pub fn pending_sync_rows(&self) -> Result<Vec<SyncQueueRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, table_name, row_id, op, payload_json, created_at, synced_at
@@ -719,6 +725,59 @@ impl Db {
         )?;
         let rows = stmt.query_map([], sync_row_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The next batch to push, oldest first, capped at `limit`.
+    ///
+    /// Oldest first is load-bearing rather than tidy: an invoice's lines are queued after
+    /// the invoice, and a customer before the invoice that references it, so sending in
+    /// insertion order means the far end never sees a row whose parent has not arrived.
+    /// A batch that fails is retried as the same batch, so that order survives retries.
+    pub fn next_sync_batch(&self, limit: usize) -> Result<Vec<SyncQueueRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, table_name, row_id, op, payload_json, created_at, synced_at
+               FROM sync_queue
+              WHERE synced_at IS NULL
+              ORDER BY id
+              LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], sync_row_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// How many rows are still waiting to be sent.
+    pub fn pending_sync_count(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM sync_queue WHERE synced_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Marks rows as sent, in one transaction.
+    ///
+    /// Called only after the far end has answered 2xx. All or nothing: a partial mark
+    /// would leave rows that were accepted looking unsent, and the next batch would send
+    /// them again. Already-marked rows keep their original timestamp, so a duplicate call
+    /// cannot rewrite history.
+    pub fn mark_synced(&mut self, ids: &[i64]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let stamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let tx = self.conn.transaction()?;
+        let mut marked = 0;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE sync_queue SET synced_at = ?1 WHERE id = ?2 AND synced_at IS NULL",
+            )?;
+            for id in ids {
+                marked += stmt.execute(params![stamp, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(marked)
     }
 
     /// Queued rows for one table, oldest first.

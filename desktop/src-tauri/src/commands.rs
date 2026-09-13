@@ -5,10 +5,11 @@
 //! numbering and the `sync_queue` writes all belong to `realinvoice-core`, so the Phoenix
 //! and Ratatui runtimes get identical behaviour for free.
 
+use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use realinvoice_core::{
-    auth, gst, Customer, DailyTotal, DateRange, Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine,
-    InvoiceSummary, Item, ItemFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser,
-    PaymentMix, Role, SalesSummary, TopItem, User,
+    auth, gst, sync, Customer, DailyTotal, DateRange, Invoice, InvoiceDetail, InvoiceFilter,
+    InvoiceLine, InvoiceSummary, Item, ItemFilter, NewCustomer, NewInvoice, NewInvoiceLine,
+    NewItem, NewUser, PaymentMix, Role, SalesSummary, SyncStatus, TopItem, User,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -341,11 +342,109 @@ pub fn node_status(state: State<'_, AppState>) -> Result<NodeStatus, String> {
     let session = require_session(&state)?;
     Ok(NodeStatus {
         node: NODE_NAME.to_string(),
-        // Stub: real connectivity arrives with the sync stage.
-        connected: true,
+        // Real, now: connected means the push worker is getting through. The badge reads
+        // `sync_status` for the detail; this stays for the rest of the title bar.
+        connected: state.sync().map(|s| healthy(&s.status())).unwrap_or(false),
         db_path: state.db_path().display().to_string(),
         user: Some(session.user),
     })
+}
+
+// -------------------------------------------------------------------- sync
+
+/// Whether the badge should read connected.
+///
+/// True when the last batch the back office accepted landed within twice the poll
+/// interval — one missed poll is a slow network, two is a problem worth showing. An
+/// unconfigured node is not connected and not failing; it is waiting to be pointed at a
+/// back office, which the screen says in those words rather than in red.
+pub fn healthy(status: &SyncStatus) -> bool {
+    if !status.configured || status.consecutive_failures > 0 {
+        return false;
+    }
+
+    match status.last_success.as_deref().and_then(parse_stamp) {
+        Some(at) => {
+            let age = Local::now().signed_duration_since(at).num_seconds();
+            age >= 0 && age <= (status.poll_seconds as i64) * 2
+        }
+        None => false,
+    }
+}
+
+/// `YYYY-MM-DD HH:MM:SS` in local time, as core writes it.
+fn parse_stamp(stamp: &str) -> Option<DateTime<Local>> {
+    NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .and_then(|naive| Local.from_local_datetime(&naive).single())
+}
+
+/// What the badge and the Sync screen show.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncView {
+    #[serde(flatten)]
+    pub status: SyncStatus,
+    /// The badge's verdict, decided here rather than in JavaScript so every runtime that
+    /// shows this agrees on what "connected" means.
+    pub healthy: bool,
+}
+
+/// The push worker's current state. Reachable by any signed-in user: a cashier who can
+/// see the badge should be able to see why it is amber.
+#[tauri::command]
+pub fn sync_status(state: State<'_, AppState>) -> Result<SyncView, String> {
+    require_session(&state)?;
+
+    match state.sync() {
+        Some(handle) => {
+            let mut status = handle.status();
+            // The worker refreshes this on each poll; reading it here keeps the count
+            // honest between polls, which is what a cashier watching it expects.
+            status.pending = state.db().pending_sync_count().map_err(|e| e.to_string())?;
+            Ok(SyncView { healthy: healthy(&status), status })
+        }
+        None => Err("The sync worker is not running.".to_string()),
+    }
+}
+
+/// Asks the worker to poll now instead of waiting out its timer.
+///
+/// Returns as soon as the nudge is delivered. It deliberately does not wait for the push
+/// to finish: the button must not hang the screen on a network round trip, and the status
+/// the UI polls will show the result a moment later.
+#[tauri::command]
+pub fn sync_now(state: State<'_, AppState>) -> Result<(), String> {
+    require_session(&state)?;
+    state.sync().ok_or_else(|| "The sync worker is not running.".to_string())?.sync_now();
+    Ok(())
+}
+
+/// Points this node at a back office. Owner-only: where a shop's invoices are sent is not
+/// a cashier's decision.
+///
+/// An empty value clears it, which stops the worker attempting anything rather than
+/// leaving it retrying against a URL nobody meant.
+#[tauri::command]
+pub fn set_sync_endpoint(endpoint: String, state: State<'_, AppState>) -> Result<String, String> {
+    require_owner(&state)?;
+    let endpoint = endpoint.trim().to_string();
+
+    // Empty is legitimate — it clears the address and stops the worker attempting
+    // anything. Anything else has to be a URL the HTTP client can actually post to.
+    let usable =
+        endpoint.is_empty() || endpoint.starts_with("http://") || endpoint.starts_with("https://");
+    if !usable {
+        return Err("The address must start with http:// or https://".to_string());
+    }
+
+    state.db().set_setting(sync::ENDPOINT_KEY, &endpoint).map_err(|e| e.to_string())?;
+    if let Some(handle) = state.sync() {
+        handle.set_endpoint(&endpoint);
+        // Try it straight away, so somebody who has just pasted an address finds out now
+        // whether it works rather than in ten seconds.
+        handle.sync_now();
+    }
+    Ok(endpoint)
 }
 
 /// Finds a customer by exact mobile number. `None` when nobody matches.

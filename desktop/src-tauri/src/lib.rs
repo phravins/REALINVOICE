@@ -19,6 +19,16 @@ pub fn run() {
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
             let state = AppState::new(dir.join(DB_FILE_NAME))?;
+
+            // The push worker runs on Tauri's own runtime, which is where the commands
+            // run too. It never blocks startup: with no endpoint configured — or with one
+            // that is unreachable — it simply idles or retries, and billing is unaffected
+            // either way.
+            let config = state.sync_config().map_err(std::io::Error::other)?;
+            let (handle, worker) = realinvoice_core::sync::start(state.db_arc(), config);
+            state.set_sync(handle);
+            tauri::async_runtime::spawn(worker);
+
             app.manage(state);
             Ok(())
         })
@@ -41,6 +51,9 @@ pub fn run() {
             commands::count_items,
             commands::save_item,
             commands::analytics,
+            commands::sync_status,
+            commands::sync_now,
+            commands::set_sync_endpoint,
             commands::create_invoice,
             commands::add_line_item,
             commands::list_todays_invoices,

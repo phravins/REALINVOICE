@@ -29,9 +29,11 @@ pub mod models;
 pub mod numbering;
 pub mod schema;
 pub mod seed;
+pub mod sync;
 
 pub use db::Db;
 pub use error::{CoreError, Result};
 pub use gst::{compute_totals, InvoiceTotals, TaxSplit, TaxableLine, DEFAULT_HOME_STATE};
 pub use models::*;
 pub use numbering::{financial_year, format_invoice_no, next_invoice_no};
+pub use sync::{SyncBatch, SyncConfig, SyncEnvelopeRow, SyncHandle, SyncStatus};
