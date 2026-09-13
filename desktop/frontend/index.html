@@ -4,6 +4,15 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>REALINVOICE DESKTOP</title>
+    <!--
+      tailwind.css is compiled from ../assets/css/app.css by tools/build-css.sh and holds
+      the design system: the type scale, both daisyUI themes and the icon classes.
+
+      theme.css and styles.css are the previous hand-written system. They load after it,
+      so they still win for the panes that have not been converted yet, and they come out
+      pane by pane. Nothing new should be added to them.
+    -->
+    <link rel="stylesheet" href="tailwind.css" />
     <link rel="stylesheet" href="theme.css" />
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -25,149 +34,178 @@
           currentColor inherit into it, so the logo still themes itself.
         -->
         <rect x="1.25" y="1.25" width="29.5" height="29.5" rx="8.5"
-              style="fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5" />
+              style="fill: color-mix(in oklch, currentColor 12%, transparent);
+                     stroke: currentColor; stroke-width: 1.5; opacity: 0.9" />
         <path d="M11.4 23.2V8.8h6.9a4.3 4.3 0 0 1 1.2 8.43l3.1 5.97h-3.3l-2.85-5.6H14.3v5.6zm2.9-8.1h3.9a1.75 1.75 0 0 0 0-3.5h-3.9z"
-              style="fill: var(--accent)" />
+              style="fill: currentColor" />
         <text x="42" y="22"
-              style="fill: currentColor; font-family: var(--font-ui); font-size: 19px; font-weight: 650; letter-spacing: -0.015em">RealInvoice</text>
+              style="fill: currentColor; font-family: inherit; font-size: 19px; font-weight: 650; letter-spacing: -0.015em">RealInvoice</text>
       </symbol>
     </svg>
     <!-- The gate. Nothing behind it is rendered, and every command behind it refuses
          to answer without a session, so hiding the shell is not the only protection. -->
-    <div class="login" id="login-screen">
-      <!-- Deliberately unboxed: no panel, no border, no shadow. Just the wordmark, two
-           fields and a button, centred with room to breathe. -->
-      <form class="login-form" id="login-form" autocomplete="off">
-        <svg class="logo logo--login" role="img" aria-label="RealInvoice"><use href="#ri-logo" /></svg>
-        <p class="login-node" id="login-node">Office Console</p>
+    <!-- The gate. Nothing behind it is rendered, and every command behind it refuses
+         to answer without a session, so hiding the shell is not the only protection.
 
-        <label class="login-field">Username
+         Deliberately unboxed: no panel, no border, no shadow. Just the wordmark, two
+         fields and a button, centred with room to breathe. -->
+    <div class="flex min-h-screen items-center justify-center overflow-y-auto bg-base-200 px-5 py-12"
+         id="login-screen">
+      <form class="flex w-full max-w-80 flex-col gap-4" id="login-form" autocomplete="off">
+        <svg class="mx-auto h-8 w-[168px] text-base-content" role="img"
+             aria-label="RealInvoice"><use href="#ri-logo" /></svg>
+        <p class="mb-1 text-center text-xs text-base-content/45" id="login-node">Office Console</p>
+
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Username
           <input id="login-user" type="text" autocomplete="username" autocapitalize="off"
-                 spellcheck="false" required />
+                 spellcheck="false" required
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10" />
         </label>
-        <label class="login-field">Password
-          <input id="login-pass" type="password" autocomplete="current-password" required />
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Password
+          <input id="login-pass" type="password" autocomplete="current-password" required
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10" />
         </label>
 
-        <button type="submit" class="btn btn--lock login-submit" id="login-submit">Sign In</button>
-        <p class="login-msg" id="login-msg" aria-live="polite"></p>
+        <button type="submit" id="login-submit"
+                class="mt-2 inline-flex h-9 w-full items-center justify-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Sign In</button>
+        <p class="min-h-[18px] text-center text-xs text-base-content/60" id="login-msg"
+           aria-live="polite"></p>
       </form>
     </div>
 
     <!-- Shown instead of the gate when this installation has no accounts at all. Same
          unboxed treatment: whoever sees this screen is setting the shop up, and it should
          feel like the same product, not a technical detour. -->
-    <div class="login" id="setup-screen" hidden>
-      <form class="login-form" id="setup-form" autocomplete="off">
-        <svg class="logo logo--login" role="img" aria-label="RealInvoice"><use href="#ri-logo" /></svg>
-        <p class="login-node">Create your account</p>
-        <p class="login-lede">This is the first time RealInvoice has run on this computer.
-          The account you create now is the owner — it can bill, and it can add logins for
-          your staff later.</p>
+    <div class="flex min-h-screen items-center justify-center overflow-y-auto bg-base-200 px-5 py-12"
+         id="setup-screen" hidden>
+      <form class="flex w-full max-w-80 flex-col gap-4" id="setup-form" autocomplete="off">
+        <svg class="mx-auto h-8 w-[168px] text-base-content" role="img"
+             aria-label="RealInvoice"><use href="#ri-logo" /></svg>
+        <p class="text-center text-xs text-base-content/45">Create your account</p>
+        <p class="mb-1 text-center text-xs leading-normal text-base-content/60">This is the
+          first time RealInvoice has run on this computer. The account you create now is
+          the owner — it can bill, and it can add logins for your staff later.</p>
 
-        <label class="login-field">Display Name
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Display Name
           <input id="setup-name" type="text" autocomplete="name" required
-                 placeholder="e.g. Priya Raman" />
+                 placeholder="e.g. Priya Raman"
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10" />
         </label>
-        <label class="login-field">Username
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Username
           <input id="setup-user" type="text" autocomplete="off" autocapitalize="off"
-                 spellcheck="false" required placeholder="what you will type to sign in" />
+                 spellcheck="false" required placeholder="what you will type to sign in"
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10" />
         </label>
-        <label class="login-field">Password
-          <input id="setup-pass" type="password" autocomplete="new-password" required />
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Password
+          <input id="setup-pass" type="password" autocomplete="new-password" required
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10" />
         </label>
-        <label class="login-field">Confirm Password
-          <input id="setup-pass2" type="password" autocomplete="new-password" required />
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Confirm Password
+          <input id="setup-pass2" type="password" autocomplete="new-password" required
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10" />
         </label>
 
-        <button type="submit" class="btn btn--lock login-submit" id="setup-submit">Create Account</button>
-        <p class="login-msg" id="setup-msg" aria-live="polite"></p>
+        <button type="submit" id="setup-submit"
+                class="mt-2 inline-flex h-9 w-full items-center justify-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Create Account</button>
+        <p class="min-h-[18px] text-center text-xs text-base-content/60" id="setup-msg"
+           aria-live="polite"></p>
       </form>
     </div>
 
-    <div class="shell" id="shell" hidden>
-    <header class="topbar">
-      <svg class="logo logo--bar" role="img" aria-label="RealInvoice"><use href="#ri-logo" /></svg>
+    <div class="flex min-h-screen bg-base-200" id="shell" hidden>
+    <!-- The brand sits at the top of the sidebar and the account at its foot, matching
+         the Back-Office Web. There is no separate dark title bar: the chrome is the
+         sidebar plus the thin bar over the page. -->
+    <aside class="sticky top-0 flex h-screen w-48 shrink-0 flex-col border-r border-base-300 bg-base-100">
+      <div class="flex items-center gap-2 px-4 py-4 text-base-content">
+        <svg class="h-6 w-[126px] shrink-0" role="img" aria-label="RealInvoice">
+          <use href="#ri-logo" />
+        </svg>
+      </div>
 
-      <!-- Deliberately empty. A global search belongs here once there is something
-           worth searching across every pane; wiring one now would be a new feature. -->
-      <div class="topbar-center"></div>
+      <nav class="flex-1 overflow-y-auto px-2.5 pt-1" id="tabs" role="tablist">
+        <p class="px-3 pb-2 text-2xs font-medium uppercase tracking-wider text-base-content/45">Menu</p>
+        <div class="flex flex-col gap-0.5">
+        <button class="nav-item is-active flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="billing" aria-selected="true">
+          <span class="hero-document-text size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Billing</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="history" aria-selected="false">
+          <span class="hero-clock size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">History</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="inventory" aria-selected="false">
+          <span class="hero-cube size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Inventory</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="analytics" aria-selected="false">
+          <span class="hero-chart-bar size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Analytics</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="sync" aria-selected="false">
+          <span class="hero-arrow-path size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Sync</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="settings" aria-selected="false">
+          <span class="hero-cog-6-tooth size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Settings</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="users" aria-selected="false" id="nav-users" hidden>
+          <span class="hero-user-group size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Users</span>
+        </button>
+        </div>
+      </nav>
 
-      <div class="topbar-actions">
-        <span class="status-dot status-dot--connected" id="conn-badge"
-              role="status" title="Connected">
-          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M6.5 19.5a4.5 4.5 0 0 1-.6-8.96 6 6 0 0 1 11.66-1.6A4.25 4.25 0 0 1 18 19.5z" />
-          </svg>
+      <div class="relative border-t border-base-300 p-2.5">
+        <button class="flex w-full items-center gap-2 rounded-field px-2 py-2 text-left transition-colors hover:bg-base-200"
+                id="avatar-btn" type="button" aria-haspopup="menu" aria-expanded="false">
+          <span class="flex size-7 shrink-0 items-center justify-center rounded-full bg-base-300 text-2xs font-semibold text-base-content"
+                id="avatar-initial">?</span>
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-sm font-medium leading-tight" id="menu-name"></span>
+            <span class="block truncate text-xs text-base-content/45" id="menu-role"></span>
+          </span>
+          <span class="hero-ellipsis-horizontal size-4 shrink-0 text-base-content/45" aria-hidden="true"></span>
+        </button>
+
+        <!-- Positioned above the trigger: the sidebar's foot is the bottom of the
+             window, so a menu opening downwards would be off-screen. -->
+        <div class="absolute bottom-full left-2.5 right-2.5 z-20 mb-1 flex flex-col rounded-box border border-base-300 bg-base-100 p-1.5 shadow-lg"
+             id="user-menu" role="menu" hidden>
+          <button class="rounded-field px-2.5 py-1.5 text-left text-sm text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
+                  id="menu-about" role="menuitem" type="button">Account &amp; About</button>
+          <button class="rounded-field px-2.5 py-1.5 text-left text-sm text-error transition-colors hover:bg-error/10"
+                  id="menu-signout" role="menuitem" type="button">Sign Out</button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="flex min-w-0 flex-1 flex-col">
+      <!-- justify-end: the sidebar carries the brand and the navigation, so anything
+           left-aligned here would drift away from both. -->
+      <header class="sticky top-0 z-10 flex h-12 shrink-0 items-center justify-end gap-1 border-b border-base-300 bg-base-100 px-6">
+        <span class="flex items-center gap-1.5 rounded-field px-2 py-1 text-xs text-base-content/60"
+              id="conn-badge" role="status" title="Connected">
+          <span class="hero-cloud size-4 shrink-0" aria-hidden="true"></span>
           <span class="sr-only" id="conn-label">Connected</span>
         </span>
 
-        <button class="icon-btn icon-btn--bar" id="theme-toggle" type="button"
-                aria-label="Switch theme" title="Switch theme">
-          <svg class="icon icon--sun" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="4.2" />
-            <path d="M12 2.6v2.6M12 18.8v2.6M4.3 12H1.7M22.3 12h-2.6M6.6 6.6 4.8 4.8M19.2 19.2l-1.8-1.8M6.6 17.4l-1.8 1.8M19.2 4.8l-1.8 1.8" />
-          </svg>
-          <svg class="icon icon--moon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M20.5 14.5A8.6 8.6 0 0 1 9.5 3.5a8.6 8.6 0 1 0 11 11z" />
-          </svg>
+        <button class="flex size-7 items-center justify-center rounded-field text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
+                id="theme-toggle" type="button" aria-label="Switch theme" title="Switch theme">
+          <span class="hero-sun size-4.5 dark:hidden" aria-hidden="true"></span>
+          <span class="hero-moon hidden size-4.5 dark:inline-block" aria-hidden="true"></span>
         </button>
+      </header>
 
-        <div class="avatar-wrap">
-          <button class="avatar" id="avatar-btn" type="button" aria-haspopup="menu"
-                  aria-expanded="false" aria-label="Account menu"><span id="avatar-initial">?</span></button>
-          <div class="menu" id="user-menu" role="menu" hidden>
-            <div class="menu-head">
-              <span class="menu-name" id="menu-name"></span>
-              <span class="menu-role" id="menu-role"></span>
-            </div>
-            <button class="menu-item" id="menu-about" role="menuitem" type="button">Account &amp; About</button>
-            <button class="menu-item menu-item--danger" id="menu-signout" role="menuitem" type="button">Sign Out</button>
-          </div>
-        </div>
-      </div>
-    </header>
-
-    <nav class="sidebar" id="tabs" role="tablist">
-      <button class="nav-item is-active" role="tab" data-pane="billing" aria-selected="true">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14v17l-2.3-1.6-2.35 1.6-2.35-1.6-2.35 1.6L7.3 18.9 5 20.5z"/><path d="M8.6 8.4h6.8M8.6 12.2h6.8"/></svg>
-        <span>Billing</span>
-      </button>
-      <button class="nav-item" role="tab" data-pane="history" aria-selected="false">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.2V12l3.2 2"/></svg>
-        <span>History</span>
-      </button>
-      <button class="nav-item" role="tab" data-pane="inventory" aria-selected="false">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.6 7.6 12 3.4l8.4 4.2v8.8L12 20.6l-8.4-4.2z"/><path d="m3.6 7.6 8.4 4.3 8.4-4.3M12 11.9v8.7"/></svg>
-        <span>Inventory</span>
-      </button>
-      <button class="nav-item" role="tab" data-pane="analytics" aria-selected="false">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16"/><path d="M7 20v-6.4M12 20V6.6M17 20v-9.2"/></svg>
-        <span>Analytics</span>
-      </button>
-      <button class="nav-item" role="tab" data-pane="sync" aria-selected="false">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 0 1-13.7 5.6M4 12a8 8 0 0 1 13.7-5.6"/><path d="M17.7 3.2v3.2h-3.2M6.3 20.8v-3.2h3.2"/></svg>
-        <span>Sync</span>
-      </button>
-      <button class="nav-item" role="tab" data-pane="settings" aria-selected="false">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.3 14.3a1.6 1.6 0 0 0 .32 1.77l.06.06a1.94 1.94 0 1 1-2.74 2.74l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-.97 1.46v.17a1.94 1.94 0 1 1-3.88 0v-.09a1.6 1.6 0 0 0-1.05-1.46 1.6 1.6 0 0 0-1.77.32l-.06.06a1.94 1.94 0 1 1-2.74-2.74l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.46-.97h-.17a1.94 1.94 0 1 1 0-3.88h.09a1.6 1.6 0 0 0 1.46-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a1.94 1.94 0 1 1 2.74-2.74l.06.06a1.6 1.6 0 0 0 1.77.32h.08a1.6 1.6 0 0 0 .97-1.46v-.17a1.94 1.94 0 1 1 3.88 0v.09a1.6 1.6 0 0 0 .97 1.46 1.6 1.6 0 0 0 1.77-.32l.06-.06a1.94 1.94 0 1 1 2.74 2.74l-.06.06a1.6 1.6 0 0 0-.32 1.77v.08a1.6 1.6 0 0 0 1.46.97h.17a1.94 1.94 0 1 1 0 3.88h-.09a1.6 1.6 0 0 0-1.46.97z"/></svg>
-        <span>Settings</span>
-      </button>
-      <!-- Hidden for cashiers by the shell, and refused for cashiers by the commands
-           behind it. Removing it from the sidebar is the courtesy, not the control. -->
-      <button class="nav-item" role="tab" data-pane="users" aria-selected="false" id="nav-users" hidden>
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9.5" cy="8.2" r="3.4"/><path d="M3.4 19.6c0-3 2.7-5.4 6.1-5.4s6.1 2.4 6.1 5.4"/><path d="M16.2 5.2a3.2 3.2 0 0 1 0 6.1M17.5 14.5c2.1.5 3.6 2.3 3.6 4.4"/></svg>
-        <span>Users</span>
-      </button>
-
-      <div class="sidebar-foot">
-        <span class="sidebar-app" id="side-app">RealInvoice</span>
-        <span class="sidebar-status">Local &mdash; not yet synced</span>
-      </div>
-    </nav>
-
-    <div class="content">
-    <main>
+      <main class="flex flex-1 flex-col overflow-y-auto px-3 pb-3 pt-2 sm:px-4 sm:pb-4 sm:pt-3">
       <section class="pane is-active" id="pane-billing" role="tabpanel">
         <div class="card">
           <!-- Shown only once an invoice is saved. It replaces the editing header, so a
@@ -470,16 +508,22 @@
       <div class="sheet" id="print-sheet"></div>
     </div>
 
-    <footer class="shortcuts" id="shortcuts">
-      <span><kbd>F2</kbd> Search Item</span><i>│</i>
-      <span><kbd>F5</kbd> Save &amp; Print</span><i>│</i>
-      <span id="sc-f9"><kbd>F9</kbd> Replicator Settings</span><i>│</i>
-      <span><kbd>Esc</kbd> Clear Transaction</span>
-    </footer>
-    <footer class="statusbar"><span id="status-line">Ready.</span></footer>
+      <!-- The counter runs on the keyboard. These stay visible rather than living in a
+           help screen nobody opens mid-sale. -->
+      <footer class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-base-300 bg-base-100 px-4 py-1.5 text-2xs text-base-content/60"
+              id="shortcuts">
+        <span class="inline-flex items-center gap-1.5"><kbd class="rounded-field border border-base-300 bg-base-200 px-1.5 py-0.5 font-mono text-2xs text-base-content/70">F2</kbd> Search Item</span>
+        <span class="inline-flex items-center gap-1.5"><kbd class="rounded-field border border-base-300 bg-base-200 px-1.5 py-0.5 font-mono text-2xs text-base-content/70">F5</kbd> Save &amp; Print</span>
+        <span class="inline-flex items-center gap-1.5" id="sc-f9"><kbd class="rounded-field border border-base-300 bg-base-200 px-1.5 py-0.5 font-mono text-2xs text-base-content/70">F9</kbd> Replicator Settings</span>
+        <span class="inline-flex items-center gap-1.5"><kbd class="rounded-field border border-base-300 bg-base-200 px-1.5 py-0.5 font-mono text-2xs text-base-content/70">Esc</kbd> Clear Transaction</span>
+      </footer>
+      <footer class="shrink-0 border-t border-base-300 bg-base-200 px-4 py-1.5 font-mono text-2xs text-base-content/45">
+        <span id="status-line">Ready.</span>
+      </footer>
     </div>
     </div>
 
+    <script src="ui.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

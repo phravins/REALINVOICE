@@ -6,11 +6,18 @@
 #   ./build-release.sh nsis         # only the Windows installer (must run on Windows)
 #   ./build-release.sh appimage     # only the Linux AppImage (must run on Linux)
 #
-# There is no npm step: the frontend is three static files with no build, so the Tauri
-# CLI is driven through cargo and Node is not a dependency of this project at all.
+# There is no npm step and no Node. The stylesheet is compiled by the Tailwind standalone
+# binary — one file, fetched on demand by tools/fetch-tailwind.sh — and everything else
+# the frontend needs is vendored in the repo.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Recompile the stylesheet first, so a release can never ship the CSS that happened to be
+# committed when someone last edited a template. It is committed so that a plain
+# `cargo build` still produces a styled app; this is what keeps the two in step.
+echo "==> Compiling stylesheet"
+"$here/tools/build-css.sh" --minify
+
 cd "$here/desktop/src-tauri"
 
 if ! cargo tauri --version >/dev/null 2>&1; then
