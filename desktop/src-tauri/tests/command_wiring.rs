@@ -6,12 +6,13 @@
 //! payload survives the trip into core unchanged.
 
 use realinvoice_core::{
-    seed, InvoiceFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewUser, Role, User,
+    seed, DateRange, InvoiceFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewUser, Role, User,
 };
 use realinvoice_desktop_lib::commands::{
-    check_expected_totals_for_test as check_expected_totals, quote,
-    require_owner_for_test as require_owner, require_session_for_test as require_session,
-    ExpectedTotals, NewCustomerPayload, NewInvoicePayload, NewLinePayload, QuoteLinePayload,
+    check_expected_totals_for_test as check_expected_totals, check_item_for_test as check_item,
+    quote, require_owner_for_test as require_owner, require_session_for_test as require_session,
+    ExpectedTotals, NewCustomerPayload, NewInvoicePayload, NewItemPayload, NewLinePayload,
+    QuoteLinePayload,
 };
 use realinvoice_desktop_lib::state::{AppState, Session, DB_FILE_NAME};
 
@@ -826,4 +827,87 @@ fn each_payment_type_is_saved_as_selected() {
         assert_eq!(stored.payment_type, chosen);
         assert_eq!(stored.created_by_user_id, Some(owner.id));
     }
+}
+
+// ------------------------------------------------------------------ inventory
+
+fn item_payload(rate: f64, tax_rate: f64, uom: &str) -> NewItemPayload {
+    NewItemPayload {
+        item_code: "  patch-cat6  ".into(),
+        description: "  Cat6 patch cable 2m  ".into(),
+        rate,
+        tax_rate,
+        uom: uom.into(),
+    }
+}
+
+#[test]
+fn an_item_from_the_form_is_trimmed_and_rounded() {
+    let checked = check_item(&item_payload(180.005, 18.0, " NOS ")).unwrap();
+
+    assert_eq!(checked.item_code, "patch-cat6", "the surrounding spaces go");
+    assert_eq!(checked.description, "Cat6 patch cable 2m");
+    assert_eq!(checked.uom, "NOS");
+    // Rounded to paise by the same function every other amount goes through, so a price
+    // cannot enter the catalogue carrying a fraction that resurfaces inside a total.
+    assert_eq!(checked.rate, 180.01);
+    assert_eq!(checked.tax_rate, 18.0);
+}
+
+#[test]
+fn an_item_with_no_unit_gets_one() {
+    // A unit is never blank on a printed bill; NOS is what a counter means by "each".
+    assert_eq!(check_item(&item_payload(180.0, 18.0, "")).unwrap().uom, "NOS");
+    assert_eq!(check_item(&item_payload(180.0, 18.0, "   ")).unwrap().uom, "NOS");
+    assert_eq!(check_item(&item_payload(180.0, 18.0, "BAG")).unwrap().uom, "BAG");
+}
+
+#[test]
+fn a_nonsense_price_or_tax_rate_is_refused() {
+    // A negative price is a typo, and the person who made it is standing at the till.
+    assert!(check_item(&item_payload(-1.0, 18.0, "NOS")).is_err());
+    assert!(check_item(&item_payload(f64::NAN, 18.0, "NOS")).is_err());
+    assert!(check_item(&item_payload(f64::INFINITY, 18.0, "NOS")).is_err());
+
+    // GST has no rate above 100%, and a stray digit here would misprice every future bill.
+    assert!(check_item(&item_payload(180.0, 900.0, "NOS")).is_err());
+    assert!(check_item(&item_payload(180.0, -5.0, "NOS")).is_err());
+    assert!(check_item(&item_payload(180.0, f64::NAN, "NOS")).is_err());
+
+    // The boundaries themselves are legitimate: zero-rated goods, and free samples.
+    assert!(check_item(&item_payload(0.0, 0.0, "NOS")).is_ok());
+    assert!(check_item(&item_payload(180.0, 100.0, "NOS")).is_ok());
+}
+
+#[test]
+fn analytics_figures_come_from_core_and_reconcile() {
+    let (_dir, state) = console_state();
+    let biller = set_up_owner(&state);
+
+    // Two invoices, so every aggregate folds more than one row.
+    for pay in ["cash", "upi"] {
+        let mut invoice = worked_example(&state);
+        invoice.payment_type = pay.into();
+        invoice.created_by_user_id = Some(biller.id);
+        state.db().create_invoice(&invoice).unwrap();
+    }
+
+    let db = state.db();
+    let all = db.sales_summary(&DateRange::default()).unwrap();
+    assert_eq!(all.invoice_count, 2);
+    // The worked example is the ₹1,05,000 bill that totals ₹1,23,900, twice over.
+    assert_eq!(all.subtotal, 210_000.0);
+    assert_eq!(all.grand_total, 247_800.0);
+    assert_eq!(all.tax_total, 37_800.0);
+    assert_eq!(all.subtotal + all.tax_total, all.grand_total, "the parts make the whole");
+
+    // Each breakdown covers the same invoices exactly once.
+    let mix = db.payment_mix(&DateRange::default()).unwrap();
+    assert_eq!(mix.iter().map(|m| m.invoice_count).sum::<i64>(), all.invoice_count);
+    assert_eq!(mix.iter().map(|m| m.grand_total).sum::<f64>(), all.grand_total);
+
+    let days = db.daily_totals(&DateRange::default()).unwrap();
+    assert_eq!(days.iter().map(|d| d.grand_total).sum::<f64>(), all.grand_total);
+
+    assert!(!db.top_items(&DateRange::default(), 8).unwrap().is_empty());
 }

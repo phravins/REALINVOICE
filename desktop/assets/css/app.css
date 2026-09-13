@@ -14,11 +14,17 @@
 
 @import "tailwindcss" source(none);
 
-/* Only these are scanned for class names. Deliberately the two authored files rather than
-   the whole folder: pointing this at ../../frontend would also scan the CSS this file
-   compiles into, which feeds generated output back in as input. */
+/* Only these are scanned for class names. Deliberately the authored files rather than the
+   whole folder: pointing this at ../../frontend would also scan the CSS this file compiles
+   into, which feeds generated output back in as input.
+
+   Every file that writes a class name has to be listed. ui.js was missed when the charts
+   were added and the result was the documented failure — `h-64` and the donut's stroke
+   classes were never emitted, so the bars had no height and the ring did not draw, with
+   no error anywhere. */
 @source "../../frontend/index.html";
 @source "../../frontend/app.js";
+@source "../../frontend/ui.js";
 
 /* Heroicons v2 as `hero-*` mask classes — a CSS class, not an inline SVG and not a JS
    import. The vendored set is curated; see the plugin's own note to add one. */

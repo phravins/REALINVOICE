@@ -6,8 +6,9 @@
 //! and Ratatui runtimes get identical behaviour for free.
 
 use realinvoice_core::{
-    auth, gst, Customer, Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine, InvoiceSummary, Item,
-    NewCustomer, NewInvoice, NewInvoiceLine, NewUser, Role, User,
+    auth, gst, Customer, DailyTotal, DateRange, Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine,
+    InvoiceSummary, Item, ItemFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser,
+    PaymentMix, Role, SalesSummary, TopItem, User,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -362,6 +363,103 @@ pub fn search_customer(
 pub fn search_item(query: String, state: State<'_, AppState>) -> Result<Vec<Item>, String> {
     require_session(&state)?;
     state.db().search_item(&query).map_err(|e| e.to_string())
+}
+
+/// The catalogue, for the Inventory pane. Wider than [`search_item`], which exists to
+/// feed the billing picker and stops at 50.
+#[tauri::command]
+pub fn list_items(filter: ItemFilter, state: State<'_, AppState>) -> Result<Vec<Item>, String> {
+    require_session(&state)?;
+    state.db().list_items(&filter).map_err(|e| e.to_string())
+}
+
+/// How many items exist, whatever the list is filtered to.
+#[tauri::command]
+pub fn count_items(state: State<'_, AppState>) -> Result<i64, String> {
+    require_session(&state)?;
+    state.db().count_items().map_err(|e| e.to_string())
+}
+
+/// What the Inventory form sends. A separate type from `NewItem` so the numbers can
+/// arrive as whatever the input produced and be validated here, rather than failing to
+/// deserialize and reaching the screen as a parser error.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewItemPayload {
+    pub item_code: String,
+    pub description: String,
+    pub rate: f64,
+    pub tax_rate: f64,
+    pub uom: String,
+}
+
+/// Adds an item, or updates the one that already has that code.
+///
+/// Editing is the same call as adding because core keys items on `item_code`: a shop
+/// changing a price is doing the same thing as a shop adding the line for the first time.
+/// Unlike accounts, the catalogue is shared business data, so this is queued for sync.
+#[tauri::command]
+pub fn save_item(item: NewItemPayload, state: State<'_, AppState>) -> Result<Item, String> {
+    require_session(&state)?;
+    let new = check_item(&item)?;
+    state.db().upsert_item(&new).map_err(|e| e.to_string())
+}
+
+/// Validates and normalises an item from the Inventory form.
+///
+/// Caught here rather than left to SQLite: a negative price or a tax rate of 900% is a
+/// typo, and the person who made it is standing at the till. `rate` is rounded to paise
+/// by the same function that rounds every other amount in this product, so a price cannot
+/// enter the catalogue carrying a fraction of a paisa that later shows up in a total.
+fn check_item(item: &NewItemPayload) -> Result<NewItem, String> {
+    if !item.rate.is_finite() || item.rate < 0.0 {
+        return Err("Rate must be a number, and cannot be negative.".to_string());
+    }
+    if !item.tax_rate.is_finite() || !(0.0..=100.0).contains(&item.tax_rate) {
+        return Err("Tax % must be between 0 and 100.".to_string());
+    }
+
+    let uom = item.uom.trim();
+    Ok(NewItem {
+        item_code: item.item_code.trim().to_string(),
+        description: item.description.trim().to_string(),
+        rate: gst::round_money(item.rate),
+        tax_rate: item.tax_rate,
+        // A unit is never blank on a bill; NOS is what a counter means by "each".
+        uom: if uom.is_empty() { "NOS".to_string() } else { uom.to_string() },
+    })
+}
+
+/// Test hook for [`check_item`], which the command itself needs a running app to reach.
+#[doc(hidden)]
+pub fn check_item_for_test(item: &NewItemPayload) -> Result<NewItem, String> {
+    check_item(item)
+}
+
+/// Everything the Analytics pane draws, in one round trip.
+///
+/// Bundled deliberately: four separate commands would be four locks of the same
+/// connection and four chances for the screen to show figures from four different
+/// instants. These all come from one read of one database.
+#[derive(Debug, Clone, Serialize)]
+pub struct AnalyticsReport {
+    pub summary: SalesSummary,
+    pub daily: Vec<DailyTotal>,
+    pub top_items: Vec<TopItem>,
+    pub payments: Vec<PaymentMix>,
+}
+
+/// The figures behind the Analytics pane. Every one of them is added up by core; nothing
+/// here computes money, and neither does the JavaScript that displays it.
+#[tauri::command]
+pub fn analytics(range: DateRange, state: State<'_, AppState>) -> Result<AnalyticsReport, String> {
+    require_session(&state)?;
+    let db = state.db();
+    Ok(AnalyticsReport {
+        summary: db.sales_summary(&range).map_err(|e| e.to_string())?,
+        daily: db.daily_totals(&range).map_err(|e| e.to_string())?,
+        top_items: db.top_items(&range, 8).map_err(|e| e.to_string())?,
+        payments: db.payment_mix(&range).map_err(|e| e.to_string())?,
+    })
 }
 
 /// Saves the transaction. Core does the work in one transaction: allocate the next

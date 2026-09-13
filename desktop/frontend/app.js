@@ -187,6 +187,11 @@
     } else if (name === "settings") {
       refreshAbout();
       status("About RealInvoice.");
+    } else if (name === "inventory") {
+      loadCatalogue();
+      status("The catalogue the billing screen prices from.");
+    } else if (name === "analytics") {
+      loadAnalytics();
     } else if (name === "users") {
       showUserForm(false);
       loadUsers();
@@ -1477,6 +1482,246 @@
       })
       .join("");
   }
+
+
+  /* ------------------------------------------------------------------ inventory */
+
+  /** The catalogue, as last loaded. Kept so the edit button can prefill from it. */
+  var catalogue = [];
+
+  function loadCatalogue() {
+    if (!invoke || !user) return;
+
+    var text = $("it-filter").value.trim();
+    invoke("list_items", { filter: { text: text || null } })
+      .then(function (items) {
+        catalogue = items;
+        $("catalogue-body").innerHTML = items
+          .map(function (item, index) {
+            return (
+              '<tr class="border-b border-base-300 text-sm last:border-0 hover:bg-base-200/60">' +
+              '<td class="py-2 font-mono">' + escapeHtml(item.item_code) + "</td>" +
+              '<td class="py-2">' + escapeHtml(item.description) + "</td>" +
+              '<td class="py-2 text-right font-mono tabular-nums">' + money(item.rate) + "</td>" +
+              '<td class="py-2 pr-4 text-right font-mono tabular-nums">' +
+              money(item.tax_rate) + "</td>" +
+              '<td class="py-2 text-base-content/60">' + escapeHtml(item.uom) + "</td>" +
+              '<td class="py-2 text-right"><button type="button" data-edit="' + index +
+              '" title="Edit ' + escapeHtml(item.item_code) + '" aria-label="Edit ' +
+              escapeHtml(item.item_code) +
+              '" class="flex size-7 items-center justify-center rounded-field ' +
+              'text-base-content/45 transition-colors hover:bg-base-200 ' +
+              'hover:text-base-content"><span class="hero-pencil-square size-4" ' +
+              'aria-hidden="true"></span></button></td>' +
+              "</tr>"
+            );
+          })
+          .join("");
+
+        $("catalogue-empty").hidden = items.length > 0;
+        return invoke("count_items");
+      })
+      .then(function (total) {
+        var shown = catalogue.length;
+        $("catalogue-count").textContent =
+          shown === total
+            ? total + " item(s)"
+            : shown + " of " + total + " item(s) match";
+      })
+      .catch(function (err) {
+        $("catalogue-body").innerHTML = "";
+        $("catalogue-empty").hidden = false;
+        status("list_items failed: " + errText(err));
+      });
+  }
+
+  function showItemForm(on, existing) {
+    $("item-form").hidden = !on;
+    $("item-add-toggle").hidden = on;
+    if (!on) return;
+
+    $("item-form-head").textContent = existing ? "Edit item" : "Add item";
+    $("it-code").value = existing ? existing.item_code : "";
+    $("it-desc").value = existing ? existing.description : "";
+    $("it-rate").value = existing ? existing.rate : "";
+    $("it-tax").value = existing ? String(existing.tax_rate) : "18";
+    $("it-uom").value = existing ? existing.uom : "";
+    // The code is the key core matches on, so changing it while editing would quietly
+    // create a second item rather than rename this one.
+    $("it-code").readOnly = !!existing;
+    $("it-code").classList.toggle("bg-base-200", !!existing);
+    setMsg("it-msg", "", false);
+    (existing ? $("it-desc") : $("it-code")).focus();
+  }
+
+  function saveItem(event) {
+    if (event) event.preventDefault();
+    if (!invoke) return bridgeMissing("save_item");
+
+    var code = $("it-code").value.trim();
+    var description = $("it-desc").value.trim();
+    var rate = parseFloat($("it-rate").value);
+
+    if (!code) return setMsg("it-msg", "Enter an item code.", true);
+    if (!description) return setMsg("it-msg", "Enter a description.", true);
+    if (!isFinite(rate) || rate < 0) return setMsg("it-msg", "Enter a rate of 0 or more.", true);
+
+    var button = $("it-save");
+    button.disabled = true;
+    setMsg("it-msg", "Saving…", false);
+
+    invoke("save_item", {
+      item: {
+        item_code: code,
+        description: description,
+        rate: rate,
+        tax_rate: parseFloat($("it-tax").value),
+        uom: $("it-uom").value.trim(),
+      },
+    })
+      .then(function (saved) {
+        button.disabled = false;
+        showItemForm(false);
+        loadCatalogue();
+        status("Saved " + saved.item_code + ".");
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        setMsg("it-msg", errText(err), true);
+      });
+  }
+
+  $("item-add-toggle").addEventListener("click", function () {
+    showItemForm(true, null);
+  });
+  $("it-cancel").addEventListener("click", function () {
+    showItemForm(false);
+  });
+  $("item-form").addEventListener("submit", saveItem);
+  $("it-filter").addEventListener("input", loadCatalogue);
+  $("catalogue-body").addEventListener("click", function (event) {
+    var button = event.target.closest("[data-edit]");
+    if (button) showItemForm(true, catalogue[Number(button.dataset.edit)]);
+  });
+
+  /* ------------------------------------------------------------------ analytics */
+
+  /** Turns the Analytics range control into the bounds core filters on. */
+  function analyticsRange() {
+    var choice = $("an-range").value;
+    var now = new Date();
+
+    if (choice === "all") return { from: null, to: null };
+
+    if (choice === "week") {
+      var monday = new Date(now);
+      monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+      return { from: iso(monday), to: iso(now) };
+    }
+
+    if (choice === "month") {
+      return { from: iso(new Date(now.getFullYear(), now.getMonth(), 1)), to: iso(now) };
+    }
+
+    // The Indian financial year: April to March. The same rule the invoice numbers use,
+    // so "this financial year" here means the same span as the RI-YYYY- prefix.
+    var startYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+    return { from: iso(new Date(startYear, 3, 1)), to: iso(now) };
+  }
+
+  /** `2026-04-01` -> `01 Apr`, for the chart's axis. */
+  function dayLabel(date) {
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    var parts = String(date || "").split("-");
+    if (parts.length !== 3) return date || "";
+    return parts[2] + " " + (months[Number(parts[1]) - 1] || parts[1]);
+  }
+
+  /** A round number at or above `value`, so the chart's gridlines read sensibly. */
+  function niceCeiling(value) {
+    if (!(value > 0)) return 100;
+    var magnitude = Math.pow(10, Math.floor(Math.log10(value)));
+    return Math.ceil(value / magnitude) * magnitude;
+  }
+
+  function loadAnalytics() {
+    if (!invoke || !user) return;
+
+    invoke("analytics", { range: analyticsRange() })
+      .then(function (report) {
+        var s = report.summary;
+        var empty = s.invoice_count === 0;
+
+        $("an-empty").hidden = !empty;
+        ["an-stats", "an-chart", "an-payments", "an-top"].forEach(function (id) {
+          var host = $(id).closest(".rounded-box") || $(id);
+          host.hidden = empty;
+        });
+        if (empty) {
+          status("Nothing billed in this range.");
+          return;
+        }
+
+        $("an-stats").innerHTML =
+          UI.statCard("hero-document-text", "Invoices", String(s.invoice_count)) +
+          UI.statCard("hero-banknotes", "Billed", rupees(s.grand_total),
+                      "including tax") +
+          UI.statCard("hero-credit-card", "Taxable value", rupees(s.subtotal)) +
+          UI.statCard("hero-check-circle", "Tax collected", rupees(s.tax_total),
+                      "CGST + SGST + IGST");
+
+        // Last 14 billed days: beyond that the bars are too narrow to read, and a till
+        // looking at a year wants the table below, not 300 slivers.
+        var days = report.daily.slice(-14);
+        var peak = days.reduce(function (acc, d) {
+          return Math.max(acc, d.cgst_sgst, d.igst);
+        }, 0);
+
+        $("an-chart").innerHTML = UI.barChart(
+          days.map(function (d) {
+            return { label: dayLabel(d.date), a: d.cgst_sgst, b: d.igst };
+          }),
+          niceCeiling(peak),
+          function (tick) {
+            return "₹" + Math.round(tick).toLocaleString("en-IN");
+          }
+        );
+
+        $("an-payments").innerHTML = UI.donutChart(
+          report.payments.map(function (p) {
+            return {
+              label: p.payment_type.toUpperCase(),
+              value: p.grand_total,
+              display: rupees(p.grand_total),
+            };
+          }),
+          String(s.invoice_count),
+          s.invoice_count === 1 ? "invoice" : "invoices"
+        );
+
+        $("an-top").innerHTML = report.top_items
+          .map(function (row) {
+            return (
+              '<tr class="border-b border-base-300 text-sm last:border-0 hover:bg-base-200/60">' +
+              '<td class="py-2 font-mono">' + escapeHtml(row.item_code) + "</td>" +
+              '<td class="py-2">' + escapeHtml(row.description) + "</td>" +
+              '<td class="py-2 text-right font-mono tabular-nums">' + money(row.qty) + "</td>" +
+              '<td class="py-2 text-right font-mono tabular-nums">' + money(row.revenue) +
+              "</td>" +
+              "</tr>"
+            );
+          })
+          .join("");
+
+        status(s.invoice_count + " invoice(s) · " + rupees(s.grand_total) + " billed.");
+      })
+      .catch(function (err) {
+        status("analytics failed: " + errText(err));
+      });
+  }
+
+  $("an-range").addEventListener("change", loadAnalytics);
 
   /* ----------------------------------------------------------------- wiring */
 

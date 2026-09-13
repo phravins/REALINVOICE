@@ -173,6 +173,167 @@ var UI = (function () {
     );
   }
 
+
+  /* ---------------------------------------------------------------------- charts
+
+     Ported from the Back-Office Web's dashboard_components.ex. Hand-written SVG and
+     divs, no charting library: these inherit the app's own tokens, which is why they do
+     not look bolted on, and it is one fewer dependency on a machine that must keep
+     billing with no network.
+
+     Every tone below is written out in full for the same reason the Elixir version does
+     it: Tailwind scans source text, so a class built as "stroke-" + tone is never
+     emitted and the ring renders blank. */
+
+  var STROKE = {
+    strong: "stroke-base-content",
+    medium: "stroke-base-content/60",
+    soft: "stroke-base-content/35",
+    faint: "stroke-base-content/15",
+  };
+
+  var DOT = {
+    strong: "bg-base-content",
+    medium: "bg-base-content/60",
+    soft: "bg-base-content/35",
+    faint: "bg-base-content/15",
+  };
+
+  var TONES = ["strong", "medium", "soft", "faint"];
+
+  /**
+   * A grouped vertical bar chart from `[{label, a, b}]`, where `a` and `b` stack side by
+   * side in each slot — here, CGST+SGST beside IGST.
+   *
+   * `max` is supplied by the caller rather than derived, so the gridline labels are round
+   * numbers instead of whatever the tallest bar happened to be.
+   */
+  function barChart(bars, max, formatTick) {
+    if (!bars.length) return "";
+    var ticks = [4, 3, 2, 1, 0].map(function (n) {
+      return (max / 4) * n;
+    });
+
+    var gridLabels = ticks
+      .map(function (t) {
+        return "<span>" + esc(formatTick ? formatTick(t) : Math.round(t)) + "</span>";
+      })
+      .join("");
+
+    var gridLines = ticks
+      .map(function () {
+        return '<div class="h-0 border-t border-base-200"></div>';
+      })
+      .join("");
+
+    var columns = bars
+      .map(function (bar) {
+        // A zero-height bar is invisible, which reads as missing data rather than as a
+        // quiet day; a hairline keeps the slot occupied.
+        function h(value) {
+          var pct = max > 0 ? (value / max) * 100 : 0;
+          return value > 0 ? Math.max(pct, 0.5) : 0;
+        }
+        return (
+          '<div class="flex h-full flex-1 items-end justify-center gap-1.5">' +
+          '<div class="w-3 rounded-sm bg-base-content" style="height: ' + h(bar.a) + '%"></div>' +
+          '<div class="w-3 rounded-sm bg-base-content/25" style="height: ' + h(bar.b) +
+          '%"></div>' +
+          "</div>"
+        );
+      })
+      .join("");
+
+    var labels = bars
+      .map(function (bar) {
+        return (
+          '<span class="flex-1 text-center text-xs text-base-content/60">' +
+          esc(bar.label) +
+          "</span>"
+        );
+      })
+      .join("");
+
+    return (
+      '<div class="flex gap-3">' +
+      '<div class="flex h-64 flex-col justify-between text-xs text-base-content/45">' +
+      gridLabels +
+      "</div>" +
+      '<div class="relative flex-1">' +
+      '<div class="absolute inset-0 flex flex-col justify-between">' + gridLines + "</div>" +
+      '<div class="relative flex h-64 items-end justify-between gap-6 px-2">' +
+      columns +
+      "</div>" +
+      '<div class="mt-2 flex justify-between gap-6 px-2">' + labels + "</div>" +
+      "</div></div>"
+    );
+  }
+
+  /**
+   * An SVG donut with the total in the middle and a legend beside it, from
+   * `[{label, value}]`. Tones are assigned by rank, so the segments read as one series
+   * rather than four unrelated colours.
+   */
+  function donutChart(segments, centreValue, centreLabel) {
+    var total = segments.reduce(function (acc, seg) {
+      return acc + seg.value;
+    }, 0);
+    if (total <= 0) return "";
+
+    var offset = 0;
+    var rings = "";
+    var legend = "";
+
+    segments.forEach(function (seg, index) {
+      var tone = TONES[Math.min(index, TONES.length - 1)];
+      var pct = (seg.value / total) * 100;
+      rings +=
+        '<circle cx="21" cy="21" r="15.9155" fill="none" stroke-width="5" class="' +
+        STROKE[tone] +
+        '" stroke-dasharray="' + pct + " " + (100 - pct) +
+        '" stroke-dashoffset="' + -offset + '"></circle>';
+      legend +=
+        '<li class="flex items-center justify-between gap-4 text-sm">' +
+        '<span class="flex items-center gap-2 text-base-content/60">' +
+        '<span class="size-2.5 shrink-0 rounded-full ' + DOT[tone] + '"></span>' +
+        esc(seg.label) +
+        "</span>" +
+        '<span class="whitespace-nowrap font-medium">' + esc(seg.display) +
+        ' <span class="font-normal text-base-content/45">(' + pct.toFixed(1) + "%)</span>" +
+        "</span></li>";
+      offset += pct;
+    });
+
+    return (
+      '<div class="flex flex-wrap items-center gap-6">' +
+      '<div class="relative size-40 shrink-0">' +
+      '<svg viewBox="0 0 42 42" class="size-40 -rotate-90">' + rings + "</svg>" +
+      '<div class="absolute inset-0 flex flex-col items-center justify-center">' +
+      '<span class="text-2xl font-semibold tracking-tight">' + esc(centreValue) + "</span>" +
+      '<span class="text-xs text-base-content/60">' + esc(centreLabel) + "</span>" +
+      "</div></div>" +
+      '<ul class="min-w-48 flex-1 space-y-3">' + legend + "</ul>" +
+      "</div>"
+    );
+  }
+
+  /** A single figure with its label and an icon badge. */
+  function statCard(icon, label, value, note) {
+    return (
+      '<div class="rounded-box border border-base-300 bg-base-100 p-4 shadow-sm">' +
+      '<div class="mb-2.5 flex size-7 items-center justify-center rounded-field ' +
+      'bg-base-200 text-base-content/60">' +
+      '<span class="' + esc(icon) + ' size-3.5" aria-hidden="true"></span>' +
+      "</div>" +
+      '<p class="text-xs text-base-content/60">' + esc(label) + "</p>" +
+      '<p class="mt-0.5 text-2xl font-semibold tracking-tight tabular-nums">' +
+      esc(value) +
+      "</p>" +
+      (note ? '<p class="mt-1 text-xs text-base-content/45">' + esc(note) + "</p>" : "") +
+      "</div>"
+    );
+  }
+
   /** A keyboard key, as shown in the shortcut bar and the empty states. */
   function kbd(key) {
     return (
@@ -191,5 +352,8 @@ var UI = (function () {
     rows: rows,
     emptyState: emptyState,
     kbd: kbd,
+    barChart: barChart,
+    donutChart: donutChart,
+    statCard: statCard,
   };
 })();
