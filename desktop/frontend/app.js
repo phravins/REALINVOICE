@@ -81,10 +81,19 @@
    * CGST + SGST, inter-state shows IGST — never both.
    */
   function renderTotals(el, t) {
-    function row(label, value, cls) {
+    function row(label, value, grand) {
       return (
-        '<div class="tot-row' + (cls || "") + '"><dt>' + label + "</dt><dd>" +
-        rupees(value) + "</dd></div>"
+        '<div class="flex items-baseline justify-between gap-4 ' +
+        (grand
+          ? 'mt-2 border-t border-base-300 pt-3"><dt class="text-base font-semibold">'
+          : 'py-1"><dt class="text-sm text-base-content/60">') +
+        label +
+        "</dt><dd class=" +
+        (grand
+          ? '"font-mono text-2xl font-semibold tabular-nums">'
+          : '"font-mono text-sm tabular-nums">') +
+        rupees(value) +
+        "</dd></div>"
       );
     }
 
@@ -94,7 +103,7 @@
     } else {
       html += row("IGST", t.igst);
     }
-    el.innerHTML = html + row("Grand Total", t.grand_total, " tot-row--grand");
+    el.innerHTML = html + row("Grand Total", t.grand_total, true);
   }
 
   /** A saved invoice's totals, in the shape renderTotals expects. */
@@ -119,25 +128,33 @@
     return lines
       .map(function (line, index) {
         var qty = editable
-          ? '<input class="qty-input" type="number" min="0" step="any" value="' +
+          ? '<input class="h-7 w-full max-w-20 rounded-field border border-base-300 ' +
+            'bg-base-100 px-2 text-right font-mono text-sm tabular-nums ' +
+            'focus:border-base-content/30 focus:outline-none focus:ring-2 ' +
+            'focus:ring-base-content/10" type="number" min="0" step="any" value="' +
             line.qty + '" data-index="' + index + '" aria-label="Quantity for ' +
             escapeHtml(line.item_code) + '" />'
-          : '<span class="mono">' + line.qty + "</span>";
+          : '<span class="font-mono tabular-nums">' + line.qty + "</span>";
 
         var remove = editable
-          ? '<td class="num"><button class="row-del" data-remove="' + index +
+          ? '<td class="text-right"><button class="flex size-7 items-center ' +
+            'justify-center rounded-field text-base-content/45 transition-colors ' +
+            'hover:bg-base-200 hover:text-error" data-remove="' + index +
             '" title="Remove row" aria-label="Remove ' + escapeHtml(line.item_code) +
-            '">×</button></td>'
+            '"><span class="hero-x-mark size-4" aria-hidden="true"></span></button></td>'
           : "";
 
+        var num = ' class="py-2 text-right font-mono tabular-nums"';
+
         return (
-          "<tr>" +
-          '<td class="mono">' + escapeHtml(line.item_code) + "</td>" +
-          "<td>" + escapeHtml(line.description) + "</td>" +
-          '<td class="num">' + qty + "</td>" +
-          '<td class="num mono">' + money(line.rate) + "</td>" +
-          '<td class="num mono">' + money(line.tax_rate) + "</td>" +
-          '<td class="num mono" data-total="' + index + '">' + money(line.total) + "</td>" +
+          '<tr class="border-b border-base-300 text-sm last:border-0 hover:bg-base-200/60">' +
+          '<td class="py-2 font-mono">' + escapeHtml(line.item_code) + "</td>" +
+          '<td class="py-2">' + escapeHtml(line.description) + "</td>" +
+          '<td class="py-2 text-right">' + qty + "</td>" +
+          "<td" + num + ">" + money(line.rate) + "</td>" +
+          "<td" + num + ">" + money(line.tax_rate) + "</td>" +
+          '<td class="py-2 text-right font-mono tabular-nums" data-total="' + index +
+          '">' + money(line.total) + "</td>" +
           remove +
           "</tr>"
         );
@@ -170,6 +187,15 @@
     } else if (name === "settings") {
       refreshAbout();
       status("About RealInvoice.");
+    } else if (name === "inventory") {
+      loadCatalogue();
+      status("The catalogue the billing screen prices from.");
+    } else if (name === "analytics") {
+      loadAnalytics();
+    } else if (name === "users") {
+      showUserForm(false);
+      loadUsers();
+      status("Accounts that can sign in on this machine.");
     } else if (name !== "billing") {
       status(name + ": coming soon.");
     }
@@ -204,15 +230,15 @@
   function renderCustomer() {
     var line = $("customer-line");
     if (!customer) {
-      line.innerHTML = '<span class="muted">Search a mobile number to attach a customer.</span>';
+      line.innerHTML = "<span>Search a mobile number to attach a customer.</span>";
       return;
     }
     line.innerHTML =
-      '<span class="cust-name">' + escapeHtml(customer.name) + "</span>" +
-      ' <span class="cust-gstin">— GSTIN: ' +
+      '<span class="font-medium text-base-content">' + escapeHtml(customer.name) + "</span>" +
+      ' <span class="text-base-content/60">— GSTIN: ' +
       escapeHtml(customer.gstin || "unregistered") +
       "</span>" +
-      ' <span class="cust-pos">· ' + escapeHtml(customer.mobile) +
+      ' <span class="text-base-content/45">· ' + escapeHtml(customer.mobile) +
       " · place of supply " + escapeHtml(customer.place_of_supply) + "</span>";
   }
 
@@ -333,12 +359,14 @@
   });
 
   $("items-body").addEventListener("input", function (event) {
-    var input = event.target.closest(".qty-input");
+    // Hooked on the data attribute, not on a styling class: what makes this input the
+    // quantity is that it carries a row index, and that survives a restyle.
+    var input = event.target.closest("input[data-index]");
     if (!input) return;
 
     var qty = parseFloat(input.value);
     var valid = isFinite(qty) && qty > 0;
-    input.classList.toggle("is-bad", !valid && input.value !== "");
+    input.classList.toggle("border-error", !valid && input.value !== "");
     // A half-typed quantity prices as zero rather than throwing the totals away.
     rows[Number(input.dataset.index)].qty = valid ? qty : 0;
     requote();
@@ -360,24 +388,31 @@
   function runItemSearch(query) {
     var list = $("picker-results");
     if (!invoke) {
-      list.innerHTML = '<li class="picker-empty error">Tauri bridge unavailable.</li>';
+      list.innerHTML =
+        '<li class="px-3 py-2 text-sm text-error">Tauri bridge unavailable.</li>';
       return;
     }
 
     invoke("search_item", { query: query })
       .then(function (items) {
         if (!items.length) {
-          list.innerHTML = '<li class="picker-empty">No items match.</li>';
+          list.innerHTML =
+            '<li class="px-3 py-2 text-sm text-base-content/60">No items match.</li>';
           return;
         }
         list.innerHTML = items
           .map(function (item, index) {
             return (
-              '<li><button class="picker-pick" data-pick="' + index + '">' +
-              '<span class="pk-code">' + escapeHtml(item.item_code) + "</span>" +
-              "<span>" + escapeHtml(item.description) + "</span>" +
-              '<span class="pk-meta">₹' + money(item.rate) + " · " +
-              money(item.tax_rate) + "% · " + escapeHtml(item.uom) + "</span>" +
+              '<li><button type="button" data-pick="' + index + '" ' +
+              'class="flex w-full items-baseline gap-3 rounded-field px-3 py-2 ' +
+              'text-left text-sm transition-colors hover:bg-base-200">' +
+              '<span class="w-32 shrink-0 font-mono">' + escapeHtml(item.item_code) +
+              "</span>" +
+              '<span class="min-w-0 flex-1 truncate">' + escapeHtml(item.description) +
+              "</span>" +
+              '<span class="shrink-0 font-mono text-xs text-base-content/45">₹' +
+              money(item.rate) + " · " + money(item.tax_rate) + "% · " +
+              escapeHtml(item.uom) + "</span>" +
               "</button></li>"
             );
           })
@@ -385,7 +420,8 @@
         list.dataset.items = JSON.stringify(items);
       })
       .catch(function (err) {
-        list.innerHTML = '<li class="picker-empty error">' + escapeHtml(errText(err)) + "</li>";
+        list.innerHTML =
+          '<li class="px-3 py-2 text-sm text-error">' + escapeHtml(errText(err)) + "</li>";
       });
   }
 
@@ -436,12 +472,10 @@
 
   /**
    * Clears a stale message. Anything that changes the transaction makes a previous
-   * confirmation or error wrong, and a stale line next to fresh totals is how a counter
-   * mis-bills. A save confirmation is exempt: the screen is locked, so nothing beneath it
-   * can change.
+   * error wrong, and a stale line next to fresh totals is how a counter mis-bills.
+   * The saved confirmation is not kept here — the banner carries it.
    */
   function clearMessage() {
-    if (locked) return;
     var msg = $("action-msg");
     msg.className = "action-msg";
     msg.textContent = "";
@@ -481,24 +515,26 @@
    */
   function setLocked(on) {
     locked = on;
-    document.querySelector(".card--txn").classList.toggle("is-locked", on);
 
-    $("mobile-input").disabled = on;
-    $("search-btn").disabled = on;
-    $("add-item-btn").disabled = on;
-    Array.prototype.forEach.call(document.querySelectorAll('input[name="payment"]'), function (radio) {
-      radio.disabled = on;
-    });
-    $("print-lock").hidden = on;
-    $("print-preview").hidden = !on;
-    $("new-txn").hidden = !on;
+    // The editing header (customer search) and the editing controls are removed, not
+    // disabled. A row of greyed-out buttons reads as broken; their absence reads as
+    // finished.
+    $("txn-head").hidden = on;
+    $("saved-banner").hidden = !on;
+    $("add-item").hidden = on;
+    $("txn-actions").hidden = on;
 
-    Array.prototype.forEach.call(document.querySelectorAll(".qty-input"), function (input) {
-      input.disabled = on;
-    });
-    Array.prototype.forEach.call(document.querySelectorAll(".row-del"), function (button) {
-      button.disabled = on;
-    });
+    // "Saving…" was the last thing this row said; the banner has superseded it.
+    clearMessage();
+
+    // Payment becomes a stated fact rather than a choice still on offer.
+    $("pay-group").hidden = on;
+    $("pay-static").hidden = !on;
+    $("upi-box").hidden = on || selectedPayment() !== "upi";
+
+    // Re-rendering swaps the Qty boxes and remove buttons for plain text, because
+    // lineRowsHtml only draws them when the table is editable.
+    renderRows();
 
     if (on) {
       hideNewCustomer();
@@ -590,13 +626,16 @@
     });
     renderTotals($("billing-totals"), totalsOf(invoice));
 
+    $("saved-title").textContent = "Invoice " + invoice.invoice_no + " saved";
+    $("saved-sub").textContent =
+      rupees(invoice.grand_total) + " · " + saved.lines.length + " item" +
+      (saved.lines.length === 1 ? "" : "s") + " · queued for sync";
+    $("pay-static").textContent = invoice.payment_type.toUpperCase();
+
     // Keep the saved invoice for the print preview the locked card now offers.
     lastSaved = saved;
     setLocked(true);
 
-    var msg = $("action-msg");
-    msg.className = "action-msg ok";
-    msg.textContent = "Saved — Invoice #" + invoice.invoice_no;
     status(
       "Saved " + invoice.invoice_no + " · " + rupees(invoice.grand_total) + " · " +
         saved.lines.length + " line(s) · " + saved.queued_sync_rows + " row(s) queued for sync."
@@ -683,12 +722,18 @@
         body.innerHTML = list
           .map(function (row, index) {
             return (
-              '<tr class="hist-row" data-open="' + index + '" tabindex="0" role="button">' +
-              '<td class="mono hist-no">' + escapeHtml(row.invoice.invoice_no) + "</td>" +
-              '<td class="mono">' + escapeHtml(stamp(row.invoice)) + "</td>" +
-              "<td>" + escapeHtml(row.customer_name) + "</td>" +
-              '<td class="mono">' + escapeHtml(row.invoice.payment_type) + "</td>" +
-              '<td class="num mono">' + money(row.invoice.grand_total) + "</td>" +
+              '<tr class="cursor-pointer border-b border-base-300 text-sm last:border-0 ' +
+              'hover:bg-base-200/60 focus:bg-base-200/60 focus:outline-none" data-open="' +
+              index + '" tabindex="0" role="button">' +
+              '<td class="py-2 font-mono font-medium text-base-content">' +
+              escapeHtml(row.invoice.invoice_no) + "</td>" +
+              '<td class="py-2 font-mono text-base-content/60">' +
+              escapeHtml(stamp(row.invoice)) + "</td>" +
+              '<td class="py-2">' + escapeHtml(row.customer_name) + "</td>" +
+              '<td class="py-2 font-mono text-base-content/60">' +
+              escapeHtml(row.invoice.payment_type) + "</td>" +
+              '<td class="py-2 text-right font-mono tabular-nums">' +
+              money(row.invoice.grand_total) + "</td>" +
               "</tr>"
             );
           })
@@ -715,8 +760,11 @@
       .catch(function (err) {
         body.innerHTML = "";
         $("history-empty").hidden = false;
-        $("history-empty").querySelector(".empty-title").textContent = "Could not load invoices";
-        $("history-empty").querySelector(".empty-hint").textContent = errText(err);
+        // Addressed by position, not by a styling class: the two <p>s are the title and
+        // the hint, and that stays true however they are styled.
+        var lines = $("history-empty").querySelectorAll("p");
+        lines[0].textContent = "Could not load invoices";
+        lines[1].textContent = errText(err);
         status("list_invoices failed: " + errText(err));
       });
   }
@@ -738,18 +786,23 @@
 
         $("d-inv-no").textContent = invoice.invoice_no;
         $("d-customer").innerHTML =
-          '<span class="cust-name">' + escapeHtml(buyer.name) + "</span>" +
-          ' <span class="cust-gstin">— GSTIN: ' +
+          '<span class="font-medium text-base-content">' + escapeHtml(buyer.name) + "</span>" +
+          ' <span class="text-base-content/60">— GSTIN: ' +
           escapeHtml(buyer.gstin || "unregistered") + "</span>" +
-          ' <span class="cust-pos">· ' + escapeHtml(buyer.mobile) +
+          ' <span class="text-base-content/45">· ' + escapeHtml(buyer.mobile) +
           " · place of supply " + escapeHtml(buyer.place_of_supply) + "</span>";
 
+        function meta(label, value) {
+          return (
+            "<span>" + label + ' <strong class="font-medium text-base-content">' +
+            escapeHtml(value) + "</strong></span>"
+          );
+        }
+
         $("d-meta").innerHTML =
-          '<span>Raised <strong class="mono">' + escapeHtml(stamp(invoice)) + "</strong></span>" +
-          '<span>Payment <strong class="mono">' + escapeHtml(invoice.payment_type) +
-          "</strong></span>" +
-          '<span>Sync <strong class="mono">' + escapeHtml(invoice.sync_status) +
-          "</strong></span>";
+          meta("Raised", stamp(invoice)) +
+          meta("Payment", invoice.payment_type) +
+          meta("Sync", invoice.sync_status);
 
         // Same row renderer as the billing table, without the editable controls.
         $("d-lines").innerHTML = lineRowsHtml(detailLines(detail), false);
@@ -947,17 +1000,28 @@
   function showLogin(message, isError) {
     user = null;
     $("shell").hidden = true;
+    $("setup-screen").hidden = true;
     $("login-screen").hidden = false;
     $("login-pass").value = "";
-    var msg = $("login-msg");
-    msg.className = "login-msg" + (isError ? " error" : " muted");
-    msg.textContent = message || "";
+    setMsg("login-msg", message, isError);
     $("login-user").focus();
+  }
+
+  /** The first-run screen, shown in place of the gate when there are no accounts yet. */
+  function showSetup() {
+    user = null;
+    $("shell").hidden = true;
+    $("login-screen").hidden = true;
+    $("setup-screen").hidden = false;
+    $("setup-name").focus();
   }
 
   function showShell() {
     $("login-screen").hidden = true;
+    $("setup-screen").hidden = true;
     $("shell").hidden = false;
+    // Cashiers never see the Users item. The commands behind it refuse them anyway.
+    $("nav-users").hidden = user.role !== "owner";
     $("avatar-initial").textContent = (user.display_name || user.username || "?").trim().charAt(0);
     $("menu-name").textContent = user.display_name;
     $("menu-role").textContent = user.role + " · " + user.username;
@@ -974,22 +1038,19 @@
     var username = $("login-user").value.trim();
     var password = $("login-pass").value;
     if (!username || !password) {
-      $("login-msg").className = "login-msg error";
-      $("login-msg").textContent = "Enter a username and password.";
+      setMsg("login-msg", "Enter a username and password.", true);
       return;
     }
 
     var button = $("login-submit");
     button.disabled = true;
-    $("login-msg").className = "login-msg muted";
-    $("login-msg").textContent = "Signing in…";
+    setMsg("login-msg", "Signing in…", false);
 
     invoke("login", { username: username, password: password })
       .then(function (session) {
         button.disabled = false;
         user = session.user;
-        $("login-firstrun").hidden = true;
-        $("login-msg").textContent = "";
+        setMsg("login-msg", "", false);
         newTransaction();
         showShell();
         status("Signed in as " + user.display_name + ".");
@@ -997,8 +1058,7 @@
       .catch(function (err) {
         button.disabled = false;
         $("login-pass").value = "";
-        $("login-msg").className = "login-msg error";
-        $("login-msg").textContent = errText(err);
+        setMsg("login-msg", errText(err), true);
         $("login-pass").focus();
       });
   }
@@ -1027,20 +1087,11 @@
       .then(function (info) {
         $("login-node").textContent = "Office Console · Node " + info.node;
 
-        if (info.first_run_password) {
-          var box = $("login-firstrun");
-          box.hidden = false;
-          box.innerHTML =
-            "<strong>First run on this machine</strong>" +
-            "<p>An owner account was created. Write this down — it is shown once.</p>" +
-            "<dl><dt>Username</dt><dd>" + escapeHtml(info.first_run_username) + "</dd>" +
-            "<dt>Password</dt><dd>" + escapeHtml(info.first_run_password) + "</dd></dl>";
-          $("login-user").value = info.first_run_username;
-        }
-
         if (info.session) {
           user = info.session.user;
           showShell();
+        } else if (info.needs_setup) {
+          showSetup();
         } else {
           showLogin("");
         }
@@ -1051,6 +1102,185 @@
   }
 
   $("login-form").addEventListener("submit", signIn);
+
+  /* ------------------------------------------------------------- first-run setup */
+
+  /**
+   * Shared by both places an account is created. Returns an error string, or "" when the
+   * details are usable. The same rules are enforced in core — this is here so somebody
+   * mistyping a password finds out before a round trip, not instead of one.
+   */
+  function accountProblem(displayName, username, password, confirm) {
+    if (!displayName) return "Enter a display name.";
+    if (!username) return "Enter a username.";
+    if (/\s/.test(username)) return "A username cannot contain spaces.";
+    if (password.length < 8) return "The password must be at least 8 characters.";
+    if (password !== confirm) return "The two passwords do not match.";
+    return "";
+  }
+
+  function setMsg(id, text, isError) {
+    var el = $(id);
+    var base =
+      id === "setup-msg" || id === "login-msg"
+        ? "min-h-[18px] text-center text-xs "
+        : "text-xs ";
+    el.className = base + (isError ? "text-error" : "text-base-content/60");
+    el.textContent = text || "";
+  }
+
+  function createFirstUser(event) {
+    if (event) event.preventDefault();
+    if (!invoke) return bridgeMissing("create_first_user");
+
+    var displayName = $("setup-name").value.trim();
+    var username = $("setup-user").value.trim();
+    var password = $("setup-pass").value;
+    var problem = accountProblem(displayName, username, password, $("setup-pass2").value);
+    if (problem) return setMsg("setup-msg", problem, true);
+
+    var button = $("setup-submit");
+    button.disabled = true;
+    setMsg("setup-msg", "Creating your account…", false);
+
+    invoke("create_first_user", {
+      displayName: displayName,
+      username: username,
+      password: password,
+    })
+      .then(function (session) {
+        button.disabled = false;
+        // Straight into the shell: they just chose these credentials, so asking them to
+        // type them again would be ceremony, not security.
+        user = session.user;
+        $("setup-pass").value = "";
+        $("setup-pass2").value = "";
+        setMsg("setup-msg", "", false);
+        newTransaction();
+        showShell();
+        status("Welcome, " + user.display_name + ". This account owns this machine.");
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        setMsg("setup-msg", errText(err), true);
+      });
+  }
+
+  $("setup-form").addEventListener("submit", createFirstUser);
+
+  /* -------------------------------------------------------------------- users */
+
+  /** The account list, in the same label/value rows the About page uses. */
+  function loadUsers() {
+    if (!invoke || !user || user.role !== "owner") return;
+
+    invoke("list_users")
+      .then(function (users) {
+        // One block of rows per account, separated by space rather than by a card. The
+        // signed-in account is marked in place; there is no heading repeating the name
+        // that the first row already gives.
+        $("user-list").innerHTML = users
+          .map(function (u, index) {
+            function pair(label, valueHtml, first) {
+              var edge = first ? "" : " border-t border-base-300";
+              return (
+                '<dt class="py-3 text-sm text-base-content/60' + edge + '">' + label +
+                '</dt><dd class="py-3 text-sm text-base-content' + edge + '">' +
+                valueHtml + "</dd>"
+              );
+            }
+
+            var you = u.id === user.id
+              ? ' <span class="ml-2 rounded-field border border-base-300 px-2 py-0.5 ' +
+                'align-middle text-2xs font-normal text-base-content/60">you</span>'
+              : "";
+
+            // Accounts are separated by space and a rule, not by a panel.
+            return (
+              '<dl class="grid grid-cols-[minmax(140px,220px)_1fr]' +
+              (index === 0 ? "" : " mt-6 border-t border-base-300 pt-6") + '">' +
+              pair("Display Name", escapeHtml(u.display_name) + you, true) +
+              pair("Username", escapeHtml(u.username)) +
+              pair("Role", escapeHtml(u.role === "owner" ? "Owner" : "Cashier")) +
+              pair("Created", escapeHtml(dateOnly(u.created_at))) +
+              "</dl>"
+            );
+          })
+          .join("");
+      })
+      .catch(function (err) {
+        $("user-list").innerHTML =
+          '<p class="py-6 text-center text-sm text-error">' + escapeHtml(errText(err)) +
+          "</p>";
+      });
+  }
+
+  /** "2025-04-07T18:22:10" → "07 Apr 2025". Timestamps are stored local, so no parsing. */
+  function dateOnly(stamp) {
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    var parts = String(stamp || "").slice(0, 10).split("-");
+    if (parts.length !== 3) return stamp || "—";
+    return parts[2] + " " + (months[Number(parts[1]) - 1] || parts[1]) + " " + parts[0];
+  }
+
+  function showUserForm(on) {
+    $("user-form").hidden = !on;
+    $("user-add-toggle").hidden = on;
+    if (on) $("user-name").focus();
+  }
+
+  function resetUserForm() {
+    $("user-name").value = "";
+    $("user-user").value = "";
+    $("user-pass").value = "";
+    $("user-pass2").value = "";
+    $("user-role").value = "cashier";
+    setMsg("user-msg", "", false);
+  }
+
+  function createUser(event) {
+    if (event) event.preventDefault();
+    if (!invoke) return bridgeMissing("create_user");
+
+    var displayName = $("user-name").value.trim();
+    var username = $("user-user").value.trim();
+    var password = $("user-pass").value;
+    var problem = accountProblem(displayName, username, password, $("user-pass2").value);
+    if (problem) return setMsg("user-msg", problem, true);
+
+    var button = $("user-save");
+    button.disabled = true;
+    setMsg("user-msg", "Creating…", false);
+
+    invoke("create_user", {
+      displayName: displayName,
+      username: username,
+      password: password,
+      role: $("user-role").value,
+    })
+      .then(function (created) {
+        button.disabled = false;
+        resetUserForm();
+        showUserForm(false);
+        loadUsers();
+        status(created.display_name + " can now sign in as a " + created.role + ".");
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        setMsg("user-msg", errText(err), true);
+      });
+  }
+
+  $("user-add-toggle").addEventListener("click", function () {
+    resetUserForm();
+    showUserForm(true);
+  });
+  $("user-cancel").addEventListener("click", function () {
+    resetUserForm();
+    showUserForm(false);
+  });
+  $("user-form").addEventListener("submit", createUser);
   /* ------------------------------------------------------------------ user menu */
 
   function closeUserMenu() {
@@ -1209,8 +1439,10 @@
 
     invoke("app_info")
       .then(function (info) {
-        // The sidebar's version line, in place of the reference's "OpenCloud 7.2.4".
-        $("side-app").textContent = info.name + " " + info.version;
+        // The sidebar's version line. Guarded: this pane must still render its rows if
+        // the shell ever stops carrying that element.
+        var sideApp = $("side-app");
+        if (sideApp) sideApp.textContent = info.name + " " + info.version;
 
         rowList($("about-rows"), [
           ["Username", user.username],
@@ -1237,11 +1469,259 @@
   function rowList(el, rows) {
     if (!el) return;
     el.innerHTML = rows
-      .map(function (row) {
-        return "<dt>" + escapeHtml(row[0]) + "</dt><dd>" + escapeHtml(row[1]) + "</dd>";
+      .map(function (row, index) {
+        // The first row's divider would double up with the heading's spacing.
+        var edge = index === 0 ? "" : " border-t border-base-300";
+        return (
+          '<dt class="py-3 text-sm text-base-content/60' + edge + '">' +
+          escapeHtml(row[0]) +
+          '</dt><dd class="py-3 text-sm text-base-content break-words' + edge + '">' +
+          escapeHtml(row[1]) +
+          "</dd>"
+        );
       })
       .join("");
   }
+
+
+  /* ------------------------------------------------------------------ inventory */
+
+  /** The catalogue, as last loaded. Kept so the edit button can prefill from it. */
+  var catalogue = [];
+
+  function loadCatalogue() {
+    if (!invoke || !user) return;
+
+    var text = $("it-filter").value.trim();
+    invoke("list_items", { filter: { text: text || null } })
+      .then(function (items) {
+        catalogue = items;
+        $("catalogue-body").innerHTML = items
+          .map(function (item, index) {
+            return (
+              '<tr class="border-b border-base-300 text-sm last:border-0 hover:bg-base-200/60">' +
+              '<td class="py-2 font-mono">' + escapeHtml(item.item_code) + "</td>" +
+              '<td class="py-2">' + escapeHtml(item.description) + "</td>" +
+              '<td class="py-2 text-right font-mono tabular-nums">' + money(item.rate) + "</td>" +
+              '<td class="py-2 pr-4 text-right font-mono tabular-nums">' +
+              money(item.tax_rate) + "</td>" +
+              '<td class="py-2 text-base-content/60">' + escapeHtml(item.uom) + "</td>" +
+              '<td class="py-2 text-right"><button type="button" data-edit="' + index +
+              '" title="Edit ' + escapeHtml(item.item_code) + '" aria-label="Edit ' +
+              escapeHtml(item.item_code) +
+              '" class="flex size-7 items-center justify-center rounded-field ' +
+              'text-base-content/45 transition-colors hover:bg-base-200 ' +
+              'hover:text-base-content"><span class="hero-pencil-square size-4" ' +
+              'aria-hidden="true"></span></button></td>' +
+              "</tr>"
+            );
+          })
+          .join("");
+
+        $("catalogue-empty").hidden = items.length > 0;
+        return invoke("count_items");
+      })
+      .then(function (total) {
+        var shown = catalogue.length;
+        $("catalogue-count").textContent =
+          shown === total
+            ? total + " item(s)"
+            : shown + " of " + total + " item(s) match";
+      })
+      .catch(function (err) {
+        $("catalogue-body").innerHTML = "";
+        $("catalogue-empty").hidden = false;
+        status("list_items failed: " + errText(err));
+      });
+  }
+
+  function showItemForm(on, existing) {
+    $("item-form").hidden = !on;
+    $("item-add-toggle").hidden = on;
+    if (!on) return;
+
+    $("item-form-head").textContent = existing ? "Edit item" : "Add item";
+    $("it-code").value = existing ? existing.item_code : "";
+    $("it-desc").value = existing ? existing.description : "";
+    $("it-rate").value = existing ? existing.rate : "";
+    $("it-tax").value = existing ? String(existing.tax_rate) : "18";
+    $("it-uom").value = existing ? existing.uom : "";
+    // The code is the key core matches on, so changing it while editing would quietly
+    // create a second item rather than rename this one.
+    $("it-code").readOnly = !!existing;
+    $("it-code").classList.toggle("bg-base-200", !!existing);
+    setMsg("it-msg", "", false);
+    (existing ? $("it-desc") : $("it-code")).focus();
+  }
+
+  function saveItem(event) {
+    if (event) event.preventDefault();
+    if (!invoke) return bridgeMissing("save_item");
+
+    var code = $("it-code").value.trim();
+    var description = $("it-desc").value.trim();
+    var rate = parseFloat($("it-rate").value);
+
+    if (!code) return setMsg("it-msg", "Enter an item code.", true);
+    if (!description) return setMsg("it-msg", "Enter a description.", true);
+    if (!isFinite(rate) || rate < 0) return setMsg("it-msg", "Enter a rate of 0 or more.", true);
+
+    var button = $("it-save");
+    button.disabled = true;
+    setMsg("it-msg", "Saving…", false);
+
+    invoke("save_item", {
+      item: {
+        item_code: code,
+        description: description,
+        rate: rate,
+        tax_rate: parseFloat($("it-tax").value),
+        uom: $("it-uom").value.trim(),
+      },
+    })
+      .then(function (saved) {
+        button.disabled = false;
+        showItemForm(false);
+        loadCatalogue();
+        status("Saved " + saved.item_code + ".");
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        setMsg("it-msg", errText(err), true);
+      });
+  }
+
+  $("item-add-toggle").addEventListener("click", function () {
+    showItemForm(true, null);
+  });
+  $("it-cancel").addEventListener("click", function () {
+    showItemForm(false);
+  });
+  $("item-form").addEventListener("submit", saveItem);
+  $("it-filter").addEventListener("input", loadCatalogue);
+  $("catalogue-body").addEventListener("click", function (event) {
+    var button = event.target.closest("[data-edit]");
+    if (button) showItemForm(true, catalogue[Number(button.dataset.edit)]);
+  });
+
+  /* ------------------------------------------------------------------ analytics */
+
+  /** Turns the Analytics range control into the bounds core filters on. */
+  function analyticsRange() {
+    var choice = $("an-range").value;
+    var now = new Date();
+
+    if (choice === "all") return { from: null, to: null };
+
+    if (choice === "week") {
+      var monday = new Date(now);
+      monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
+      return { from: iso(monday), to: iso(now) };
+    }
+
+    if (choice === "month") {
+      return { from: iso(new Date(now.getFullYear(), now.getMonth(), 1)), to: iso(now) };
+    }
+
+    // The Indian financial year: April to March. The same rule the invoice numbers use,
+    // so "this financial year" here means the same span as the RI-YYYY- prefix.
+    var startYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+    return { from: iso(new Date(startYear, 3, 1)), to: iso(now) };
+  }
+
+  /** `2026-04-01` -> `01 Apr`, for the chart's axis. */
+  function dayLabel(date) {
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    var parts = String(date || "").split("-");
+    if (parts.length !== 3) return date || "";
+    return parts[2] + " " + (months[Number(parts[1]) - 1] || parts[1]);
+  }
+
+  /** A round number at or above `value`, so the chart's gridlines read sensibly. */
+  function niceCeiling(value) {
+    if (!(value > 0)) return 100;
+    var magnitude = Math.pow(10, Math.floor(Math.log10(value)));
+    return Math.ceil(value / magnitude) * magnitude;
+  }
+
+  function loadAnalytics() {
+    if (!invoke || !user) return;
+
+    invoke("analytics", { range: analyticsRange() })
+      .then(function (report) {
+        var s = report.summary;
+        var empty = s.invoice_count === 0;
+
+        $("an-empty").hidden = !empty;
+        ["an-stats", "an-chart", "an-payments", "an-top"].forEach(function (id) {
+          var host = $(id).closest(".rounded-box") || $(id);
+          host.hidden = empty;
+        });
+        if (empty) {
+          status("Nothing billed in this range.");
+          return;
+        }
+
+        $("an-stats").innerHTML =
+          UI.statCard("hero-document-text", "Invoices", String(s.invoice_count)) +
+          UI.statCard("hero-banknotes", "Billed", rupees(s.grand_total),
+                      "including tax") +
+          UI.statCard("hero-credit-card", "Taxable value", rupees(s.subtotal)) +
+          UI.statCard("hero-check-circle", "Tax collected", rupees(s.tax_total),
+                      "CGST + SGST + IGST");
+
+        // Last 14 billed days: beyond that the bars are too narrow to read, and a till
+        // looking at a year wants the table below, not 300 slivers.
+        var days = report.daily.slice(-14);
+        var peak = days.reduce(function (acc, d) {
+          return Math.max(acc, d.cgst_sgst, d.igst);
+        }, 0);
+
+        $("an-chart").innerHTML = UI.barChart(
+          days.map(function (d) {
+            return { label: dayLabel(d.date), a: d.cgst_sgst, b: d.igst };
+          }),
+          niceCeiling(peak),
+          function (tick) {
+            return "₹" + Math.round(tick).toLocaleString("en-IN");
+          }
+        );
+
+        $("an-payments").innerHTML = UI.donutChart(
+          report.payments.map(function (p) {
+            return {
+              label: p.payment_type.toUpperCase(),
+              value: p.grand_total,
+              display: rupees(p.grand_total),
+            };
+          }),
+          String(s.invoice_count),
+          s.invoice_count === 1 ? "invoice" : "invoices"
+        );
+
+        $("an-top").innerHTML = report.top_items
+          .map(function (row) {
+            return (
+              '<tr class="border-b border-base-300 text-sm last:border-0 hover:bg-base-200/60">' +
+              '<td class="py-2 font-mono">' + escapeHtml(row.item_code) + "</td>" +
+              '<td class="py-2">' + escapeHtml(row.description) + "</td>" +
+              '<td class="py-2 text-right font-mono tabular-nums">' + money(row.qty) + "</td>" +
+              '<td class="py-2 text-right font-mono tabular-nums">' + money(row.revenue) +
+              "</td>" +
+              "</tr>"
+            );
+          })
+          .join("");
+
+        status(s.invoice_count + " invoice(s) · " + rupees(s.grand_total) + " billed.");
+      })
+      .catch(function (err) {
+        status("analytics failed: " + errText(err));
+      });
+  }
+
+  $("an-range").addEventListener("change", loadAnalytics);
 
   /* ----------------------------------------------------------------- wiring */
 

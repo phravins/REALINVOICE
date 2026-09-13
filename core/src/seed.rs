@@ -3,13 +3,9 @@
 //! Called by the Office Console the first time it creates its database, and by tests
 //! that need a customer and a couple of items to exist.
 
-use crate::auth;
 use crate::db::Db;
 use crate::error::Result;
-use crate::models::{NewCustomer, NewItem, NewUser, Role, User};
-
-/// Username of the account created on first run.
-pub const DEFAULT_OWNER_USERNAME: &str = "admin";
+use crate::models::{NewCustomer, NewItem};
 
 /// Customers a fresh database starts with.
 pub fn demo_customers() -> Vec<NewCustomer> {
@@ -125,28 +121,4 @@ pub fn seed_if_empty(db: &mut Db) -> Result<bool> {
     }
     seed_demo_data(db)?;
     Ok(true)
-}
-
-/// Creates the default owner account if no users exist yet, returning the account and
-/// its generated one-time password.
-///
-/// The password is generated per installation rather than hardcoded, so no two machines
-/// ship with the same credentials and nothing secret lives in this repository. It is
-/// returned exactly once — the caller prints it, and after that only its hash exists.
-/// `Ok(None)` means accounts already exist and nothing was touched.
-pub fn seed_owner_if_empty(db: &mut Db) -> Result<Option<(User, String)>> {
-    if db.count_users()? > 0 {
-        return Ok(None);
-    }
-
-    let password = auth::generate_initial_password();
-    let owner = db.create_user(
-        &NewUser {
-            username: DEFAULT_OWNER_USERNAME.to_string(),
-            display_name: "Store Owner".to_string(),
-            role: Role::Owner,
-        },
-        &password,
-    )?;
-    Ok(Some((owner, password)))
 }

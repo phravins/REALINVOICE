@@ -233,3 +233,66 @@ impl SyncOp {
         }
     }
 }
+
+/// What the Inventory pane filters the catalogue by.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ItemFilter {
+    /// Substring matched against item code or description.
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// A date range for the Analytics pane. Both bounds are inclusive `YYYY-MM-DD`, and
+/// either may be open.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DateRange {
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+}
+
+/// Everything billed in a range, added up.
+///
+/// Computed in SQL, like every other figure in this product. No total in this app is ever
+/// reached by adding numbers up in JavaScript.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SalesSummary {
+    pub invoice_count: i64,
+    pub subtotal: f64,
+    pub cgst: f64,
+    pub sgst: f64,
+    pub igst: f64,
+    /// `cgst + sgst + igst` — what has to be remitted, whichever way it split.
+    pub tax_total: f64,
+    pub grand_total: f64,
+}
+
+/// One day's billing, for the chart across the top of Analytics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DailyTotal {
+    pub date: String,
+    pub invoice_count: i64,
+    pub cgst_sgst: f64,
+    pub igst: f64,
+    pub grand_total: f64,
+}
+
+/// What sold, by revenue.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TopItem {
+    pub item_code: String,
+    pub description: String,
+    pub qty: f64,
+    pub revenue: f64,
+}
+
+/// How customers paid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaymentMix {
+    pub payment_type: String,
+    pub invoice_count: i64,
+    pub grand_total: f64,
+}

@@ -47,23 +47,38 @@ the Start menu — press the Windows key and type `RealInvoice`.
 
 ---
 
-## Signing in the first time
+## Creating your account
 
-The very first time RealInvoice opens on a computer, it creates one account for you and
-shows you the password **once**, on the sign-in screen, in a box headed *"First run on
-this machine"*.
+The first time you open RealInvoice, it will ask you to create your account — this
+becomes the owner login. You can add more staff logins later from Settings > Users.
+
+Fill in the four boxes:
 
 | | |
 | --- | --- |
-| **Username** | `admin` |
-| **Password** | shown on screen — **write it down before signing in** |
+| **Display Name** | Your name, as it should appear on the screen and on invoices |
+| **Username** | Short, no spaces — this is what you type to sign in |
+| **Password** | At least 8 characters |
+| **Confirm Password** | The same password again |
 
-The password is different on every computer, and it is **not shown again** after
-somebody signs in. Keep it somewhere safe.
+Click **Create Account**. You go straight to the billing screen — there is no second
+sign-in step.
 
-Type the username and password, click **Sign In**, and you are at the billing screen.
+From then on, opening RealInvoice asks for that username and password.
 
-> **If you lose this password**, there is no way to reset it yet. Contact your supplier.
+> **Write your password down and keep it somewhere safe.** It is stored scrambled, so
+> nobody — including your supplier — can read it back to you, and there is no reset yet.
+
+### Adding your staff
+
+Once you are signed in as the owner, click **Users** in the list down the left-hand side.
+Click **Add User**, fill in their name, a username and a password, and choose a role:
+
+- **Cashier** — can bill and look at invoice history. This is the right choice for
+  counter staff.
+- **Owner** — can do everything a cashier can, and can also add more accounts.
+
+Cashiers do not see the **Users** item at all.
 
 ---
 
@@ -84,7 +99,7 @@ RealInvoice is also available as a single file that needs no installation.
    tick **Allow executing file as program**. Close the window.
 3. Double-click the file. RealInvoice opens.
 
-Then follow **Signing in the first time** above.
+Then follow **Creating your account** above.
 
 ---
 
@@ -98,5 +113,6 @@ On this computer only. The exact location is shown under **Settings → About �
 Database** inside the app.
 
 **Can I install it on more than one computer?**
-Yes. Each computer keeps its own invoices and its own sign-in password. Joining them
-together is a later feature.
+Yes. Each computer keeps its own invoices and its own accounts, so you create an account
+the first time you open RealInvoice on each one. Joining them together is a later
+feature.

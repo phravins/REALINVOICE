@@ -4,6 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>REALINVOICE DESKTOP</title>
+    <!--
+      tailwind.css is compiled from ../assets/css/app.css by tools/build-css.sh and is the
+      whole of the app's own look: the type scale, both daisyUI themes and the icons.
+
+      theme.css and styles.css are now only the printed document. A bill on paper is not
+      themed — black ink on white, the same in either theme — so it keeps its own palette
+      and its own rules rather than inheriting the screen's. Nothing on screen should use
+      them.
+    -->
+    <link rel="stylesheet" href="tailwind.css" />
     <link rel="stylesheet" href="theme.css" />
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -25,235 +35,329 @@
           currentColor inherit into it, so the logo still themes itself.
         -->
         <rect x="1.25" y="1.25" width="29.5" height="29.5" rx="8.5"
-              style="fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5" />
+              style="fill: color-mix(in oklch, currentColor 12%, transparent);
+                     stroke: currentColor; stroke-width: 1.5; opacity: 0.9" />
         <path d="M11.4 23.2V8.8h6.9a4.3 4.3 0 0 1 1.2 8.43l3.1 5.97h-3.3l-2.85-5.6H14.3v5.6zm2.9-8.1h3.9a1.75 1.75 0 0 0 0-3.5h-3.9z"
-              style="fill: var(--accent)" />
+              style="fill: currentColor" />
         <text x="42" y="22"
-              style="fill: currentColor; font-family: var(--font-ui); font-size: 19px; font-weight: 650; letter-spacing: -0.015em">RealInvoice</text>
+              style="fill: currentColor; font-family: inherit; font-size: 19px; font-weight: 650; letter-spacing: -0.015em">RealInvoice</text>
       </symbol>
     </svg>
     <!-- The gate. Nothing behind it is rendered, and every command behind it refuses
          to answer without a session, so hiding the shell is not the only protection. -->
-    <div class="login" id="login-screen">
-      <!-- Deliberately unboxed: no panel, no border, no shadow. Just the wordmark, two
-           fields and a button, centred with room to breathe. -->
-      <form class="login-form" id="login-form" autocomplete="off">
-        <svg class="logo logo--login" role="img" aria-label="RealInvoice"><use href="#ri-logo" /></svg>
-        <p class="login-node" id="login-node">Office Console</p>
+    <!-- The gate. Nothing behind it is rendered, and every command behind it refuses
+         to answer without a session, so hiding the shell is not the only protection.
 
-        <label class="login-field">Username
+         Deliberately unboxed: no panel, no border, no shadow. Just the wordmark, two
+         fields and a button, centred with room to breathe. -->
+    <div class="flex min-h-screen items-center justify-center overflow-y-auto bg-base-200 px-5 py-12"
+         id="login-screen">
+      <form class="flex w-full max-w-80 flex-col gap-4" id="login-form" autocomplete="off">
+        <svg class="mx-auto h-8 w-[168px] text-base-content" role="img"
+             aria-label="RealInvoice"><use href="#ri-logo" /></svg>
+        <p class="mb-1 text-center text-xs text-base-content/45" id="login-node">Office Console</p>
+
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Username
           <input id="login-user" type="text" autocomplete="username" autocapitalize="off"
-                 spellcheck="false" required />
+                 spellcheck="false" required
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10" />
         </label>
-        <label class="login-field">Password
-          <input id="login-pass" type="password" autocomplete="current-password" required />
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Password
+          <input id="login-pass" type="password" autocomplete="current-password" required
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10" />
         </label>
 
-        <button type="submit" class="btn btn--lock login-submit" id="login-submit">Sign In</button>
-        <p class="login-msg" id="login-msg" aria-live="polite"></p>
-
-        <!-- Shown once, on a first run, for an app launched without a terminal to read. -->
-        <div class="login-firstrun" id="login-firstrun" hidden></div>
+        <button type="submit" id="login-submit"
+                class="mt-2 inline-flex h-9 w-full items-center justify-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Sign In</button>
+        <p class="min-h-[18px] text-center text-xs text-base-content/60" id="login-msg"
+           aria-live="polite"></p>
       </form>
     </div>
 
-    <div class="shell" id="shell" hidden>
-    <header class="topbar">
-      <svg class="logo logo--bar" role="img" aria-label="RealInvoice"><use href="#ri-logo" /></svg>
+    <!-- Shown instead of the gate when this installation has no accounts at all. Same
+         unboxed treatment: whoever sees this screen is setting the shop up, and it should
+         feel like the same product, not a technical detour. -->
+    <div class="flex min-h-screen items-center justify-center overflow-y-auto bg-base-200 px-5 py-12"
+         id="setup-screen" hidden>
+      <form class="flex w-full max-w-80 flex-col gap-4" id="setup-form" autocomplete="off">
+        <svg class="mx-auto h-8 w-[168px] text-base-content" role="img"
+             aria-label="RealInvoice"><use href="#ri-logo" /></svg>
+        <p class="text-center text-xs text-base-content/45">Create your account</p>
+        <p class="mb-1 text-center text-xs leading-normal text-base-content/60">This is the
+          first time RealInvoice has run on this computer. The account you create now is
+          the owner — it can bill, and it can add logins for your staff later.</p>
 
-      <!-- Deliberately empty. A global search belongs here once there is something
-           worth searching across every pane; wiring one now would be a new feature. -->
-      <div class="topbar-center"></div>
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Display Name
+          <input id="setup-name" type="text" autocomplete="name" required
+                 placeholder="e.g. Priya Raman"
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10" />
+        </label>
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Username
+          <input id="setup-user" type="text" autocomplete="off" autocapitalize="off"
+                 spellcheck="false" required placeholder="what you will type to sign in"
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10" />
+        </label>
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Password
+          <input id="setup-pass" type="password" autocomplete="new-password" required
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10" />
+        </label>
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Confirm Password
+          <input id="setup-pass2" type="password" autocomplete="new-password" required
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10" />
+        </label>
 
-      <div class="topbar-actions">
-        <span class="status-dot status-dot--connected" id="conn-badge"
-              role="status" title="Connected">
-          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M6.5 19.5a4.5 4.5 0 0 1-.6-8.96 6 6 0 0 1 11.66-1.6A4.25 4.25 0 0 1 18 19.5z" />
-          </svg>
+        <button type="submit" id="setup-submit"
+                class="mt-2 inline-flex h-9 w-full items-center justify-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Create Account</button>
+        <p class="min-h-[18px] text-center text-xs text-base-content/60" id="setup-msg"
+           aria-live="polite"></p>
+      </form>
+    </div>
+
+    <div class="flex min-h-screen bg-base-200" id="shell" hidden>
+    <!-- The brand sits at the top of the sidebar and the account at its foot, matching
+         the Back-Office Web. There is no separate dark title bar: the chrome is the
+         sidebar plus the thin bar over the page. -->
+    <aside class="sticky top-0 flex h-screen w-48 shrink-0 flex-col border-r border-base-300 bg-base-100">
+      <div class="flex flex-col gap-0.5 px-4 py-4 text-base-content">
+        <svg class="h-6 w-[126px] shrink-0" role="img" aria-label="RealInvoice">
+          <use href="#ri-logo" />
+        </svg>
+        <!-- Version and sync state, where the reference puts its own version line.
+             Filled by refreshAbout() from the running build. -->
+        <span class="pl-9 text-2xs text-base-content/45" id="side-app">RealInvoice</span>
+      </div>
+
+      <nav class="flex-1 overflow-y-auto px-2.5 pt-1" id="tabs" role="tablist">
+        <p class="px-3 pb-2 text-2xs font-medium uppercase tracking-wider text-base-content/45">Menu</p>
+        <div class="flex flex-col gap-0.5">
+        <button class="nav-item is-active flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="billing" aria-selected="true">
+          <span class="hero-document-text size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Billing</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="history" aria-selected="false">
+          <span class="hero-clock size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">History</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="inventory" aria-selected="false">
+          <span class="hero-cube size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Inventory</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="analytics" aria-selected="false">
+          <span class="hero-chart-bar size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Analytics</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="sync" aria-selected="false">
+          <span class="hero-arrow-path size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Sync</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="settings" aria-selected="false">
+          <span class="hero-cog-6-tooth size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Settings</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="users" aria-selected="false" id="nav-users" hidden>
+          <span class="hero-user-group size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Users</span>
+        </button>
+        </div>
+      </nav>
+
+      <div class="relative border-t border-base-300 p-2.5">
+        <button class="flex w-full items-center gap-2 rounded-field px-2 py-2 text-left transition-colors hover:bg-base-200"
+                id="avatar-btn" type="button" aria-haspopup="menu" aria-expanded="false">
+          <span class="flex size-7 shrink-0 items-center justify-center rounded-full bg-base-300 text-2xs font-semibold text-base-content"
+                id="avatar-initial">?</span>
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-sm font-medium leading-tight" id="menu-name"></span>
+            <span class="block truncate text-xs text-base-content/45" id="menu-role"></span>
+          </span>
+          <span class="hero-ellipsis-horizontal size-4 shrink-0 text-base-content/45" aria-hidden="true"></span>
+        </button>
+
+        <!-- Positioned above the trigger: the sidebar's foot is the bottom of the
+             window, so a menu opening downwards would be off-screen. -->
+        <div class="absolute bottom-full left-2.5 right-2.5 z-20 mb-1 flex flex-col rounded-box border border-base-300 bg-base-100 p-1.5 shadow-lg"
+             id="user-menu" role="menu" hidden>
+          <button class="rounded-field px-2.5 py-1.5 text-left text-sm text-base-content/70 transition-colors hover:bg-base-200 hover:text-base-content"
+                  id="menu-about" role="menuitem" type="button">Account &amp; About</button>
+          <button class="rounded-field px-2.5 py-1.5 text-left text-sm text-error transition-colors hover:bg-error/10"
+                  id="menu-signout" role="menuitem" type="button">Sign Out</button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="flex min-w-0 flex-1 flex-col">
+      <!-- justify-end: the sidebar carries the brand and the navigation, so anything
+           left-aligned here would drift away from both. -->
+      <header class="sticky top-0 z-10 flex h-12 shrink-0 items-center justify-end gap-1 border-b border-base-300 bg-base-100 px-6">
+        <span class="flex items-center gap-1.5 rounded-field px-2 py-1 text-xs text-base-content/60"
+              id="conn-badge" role="status" title="Connected">
+          <span class="hero-cloud size-4 shrink-0" aria-hidden="true"></span>
           <span class="sr-only" id="conn-label">Connected</span>
         </span>
 
-        <button class="icon-btn icon-btn--bar" id="theme-toggle" type="button"
-                aria-label="Switch theme" title="Switch theme">
-          <svg class="icon icon--sun" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="4.2" />
-            <path d="M12 2.6v2.6M12 18.8v2.6M4.3 12H1.7M22.3 12h-2.6M6.6 6.6 4.8 4.8M19.2 19.2l-1.8-1.8M6.6 17.4l-1.8 1.8M19.2 4.8l-1.8 1.8" />
-          </svg>
-          <svg class="icon icon--moon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M20.5 14.5A8.6 8.6 0 0 1 9.5 3.5a8.6 8.6 0 1 0 11 11z" />
-          </svg>
+        <button class="flex size-7 items-center justify-center rounded-field text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
+                id="theme-toggle" type="button" aria-label="Switch theme" title="Switch theme">
+          <span class="hero-sun size-4.5 dark:hidden" aria-hidden="true"></span>
+          <span class="hero-moon hidden size-4.5 dark:inline-block" aria-hidden="true"></span>
         </button>
+      </header>
 
-        <div class="avatar-wrap">
-          <button class="avatar" id="avatar-btn" type="button" aria-haspopup="menu"
-                  aria-expanded="false" aria-label="Account menu"><span id="avatar-initial">?</span></button>
-          <div class="menu" id="user-menu" role="menu" hidden>
-            <div class="menu-head">
-              <span class="menu-name" id="menu-name"></span>
-              <span class="menu-role" id="menu-role"></span>
-            </div>
-            <button class="menu-item" id="menu-about" role="menuitem" type="button">Account &amp; About</button>
-            <button class="menu-item menu-item--danger" id="menu-signout" role="menuitem" type="button">Sign Out</button>
+      <main class="flex flex-1 flex-col overflow-y-auto px-3 pb-3 pt-2 sm:px-4 sm:pb-4 sm:pt-3">
+      <section class="pane is-active" id="pane-billing" role="tabpanel">
+        <!-- Shown only once an invoice is saved. It replaces the editing header, so a
+             locked card reads as a finished record rather than a form full of
+             greyed-out controls. -->
+        <div class="flex flex-wrap items-center gap-3 rounded-box border border-success/30 bg-success/10 px-4 py-3"
+             id="saved-banner" hidden>
+          <span class="hero-check-circle size-6 shrink-0 text-success" aria-hidden="true"></span>
+          <div class="min-w-0 flex-1">
+            <p class="text-sm font-medium text-base-content" id="saved-title"></p>
+            <p class="text-xs text-base-content/60" id="saved-sub"></p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button id="print-preview" type="button" class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Print preview</button>
+            <button id="new-txn" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">New Transaction</button>
           </div>
         </div>
-      </div>
-    </header>
 
-    <nav class="sidebar" id="tabs" role="tablist">
-      <button class="nav-item is-active" role="tab" data-pane="billing" aria-selected="true">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5h14v17l-2.3-1.6-2.35 1.6-2.35-1.6-2.35 1.6L7.3 18.9 5 20.5z"/><path d="M8.6 8.4h6.8M8.6 12.2h6.8"/></svg>
-        <span>Billing</span>
-      </button>
-      <button class="nav-item" role="tab" data-pane="history" aria-selected="false">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.4"/><path d="M12 7.2V12l3.2 2"/></svg>
-        <span>History</span>
-      </button>
-      <button class="nav-item" role="tab" data-pane="inventory" aria-selected="false">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.6 7.6 12 3.4l8.4 4.2v8.8L12 20.6l-8.4-4.2z"/><path d="m3.6 7.6 8.4 4.3 8.4-4.3M12 11.9v8.7"/></svg>
-        <span>Inventory</span>
-      </button>
-      <button class="nav-item" role="tab" data-pane="analytics" aria-selected="false">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16"/><path d="M7 20v-6.4M12 20V6.6M17 20v-9.2"/></svg>
-        <span>Analytics</span>
-      </button>
-      <button class="nav-item" role="tab" data-pane="sync" aria-selected="false">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 0 1-13.7 5.6M4 12a8 8 0 0 1 13.7-5.6"/><path d="M17.7 3.2v3.2h-3.2M6.3 20.8v-3.2h3.2"/></svg>
-        <span>Sync</span>
-      </button>
-      <button class="nav-item" role="tab" data-pane="settings" aria-selected="false">
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.3 14.3a1.6 1.6 0 0 0 .32 1.77l.06.06a1.94 1.94 0 1 1-2.74 2.74l-.06-.06a1.6 1.6 0 0 0-1.77-.32 1.6 1.6 0 0 0-.97 1.46v.17a1.94 1.94 0 1 1-3.88 0v-.09a1.6 1.6 0 0 0-1.05-1.46 1.6 1.6 0 0 0-1.77.32l-.06.06a1.94 1.94 0 1 1-2.74-2.74l.06-.06a1.6 1.6 0 0 0 .32-1.77 1.6 1.6 0 0 0-1.46-.97h-.17a1.94 1.94 0 1 1 0-3.88h.09a1.6 1.6 0 0 0 1.46-1.05 1.6 1.6 0 0 0-.32-1.77l-.06-.06a1.94 1.94 0 1 1 2.74-2.74l.06.06a1.6 1.6 0 0 0 1.77.32h.08a1.6 1.6 0 0 0 .97-1.46v-.17a1.94 1.94 0 1 1 3.88 0v.09a1.6 1.6 0 0 0 .97 1.46 1.6 1.6 0 0 0 1.77-.32l.06-.06a1.94 1.94 0 1 1 2.74 2.74l-.06.06a1.6 1.6 0 0 0-.32 1.77v.08a1.6 1.6 0 0 0 1.46.97h.17a1.94 1.94 0 1 1 0 3.88h-.09a1.6 1.6 0 0 0-1.46.97z"/></svg>
-        <span>Settings</span>
-      </button>
-
-      <div class="sidebar-foot">
-        <span class="sidebar-app" id="side-app">RealInvoice</span>
-        <span class="sidebar-status">Local &mdash; not yet synced</span>
-      </div>
-    </nav>
-
-    <div class="content">
-    <main>
-      <section class="pane is-active" id="pane-billing" role="tabpanel">
-        <div class="card card--txn">
-          <div class="card-head">
-            <h2>New Transaction</h2>
-            <span class="inv-no" id="inv-no" hidden></span>
-            <div class="cust-search">
-              <label class="sr-only" for="mobile-input">Customer mobile number</label>
-              <input
-                id="mobile-input"
-                type="tel"
-                inputmode="numeric"
-                autocomplete="off"
-                placeholder="Customer mobile"
-              />
-              <button id="search-btn" class="btn btn--primary">Search</button>
-            </div>
+        <header class="flex flex-wrap items-center justify-between gap-4" id="txn-head">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold tracking-tight">New Transaction</h1>
+            <span class="rounded-field bg-base-300 px-2 py-0.5 font-mono text-xs text-base-content"
+                  id="inv-no" hidden></span>
           </div>
+          <div class="flex flex-none items-center gap-2">
+            <label class="sr-only" for="mobile-input">Customer mobile number</label>
+            <input id="mobile-input" type="tel" inputmode="numeric" autocomplete="off"
+                   placeholder="Customer mobile" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 w-56" />
+            <button id="search-btn" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Search</button>
+          </div>
+        </header>
 
-          <div class="cust-line" id="customer-line" aria-live="polite">
-            <span class="muted">Search a mobile number to attach a customer.</span>
+        <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-1 flex-col gap-4 p-4">
+          <div class="text-sm text-base-content/60" id="customer-line" aria-live="polite">
+            <span>Search a mobile number to attach a customer.</span>
           </div>
 
           <!-- Shown only when a mobile number resolves to nobody. -->
-          <div class="newcust" id="new-customer" hidden>
-            <div class="newcust-head">Register new customer</div>
-            <div class="newcust-grid">
-              <label>Name<input id="nc-name" type="text" autocomplete="off" /></label>
-              <label>Mobile<input id="nc-mobile" type="tel" inputmode="numeric" autocomplete="off" /></label>
-              <label>GSTIN <span class="opt">(optional)</span><input id="nc-gstin" type="text" autocomplete="off" /></label>
-              <label>Place of supply<input id="nc-pos" type="text" maxlength="2" placeholder="TN" autocomplete="off" /></label>
+          <div class="flex flex-col gap-4 rounded-field border border-base-300 bg-base-200/60 p-4"
+               id="new-customer" hidden>
+            <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45">Register new customer</p>
+            <div class="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Name
+                <input id="nc-name" type="text" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Mobile
+                <input id="nc-mobile" type="tel" inputmode="numeric" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">GSTIN
+                <span class="text-base-content/45">(optional)</span>
+                <input id="nc-gstin" type="text" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Place of supply
+                <input id="nc-pos" type="text" maxlength="2" placeholder="TN" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
             </div>
-            <div class="newcust-actions">
-              <button id="nc-save" class="btn btn--primary">Create customer</button>
-              <button id="nc-cancel" class="btn">Cancel</button>
-              <span class="newcust-msg" id="nc-msg"></span>
+            <div class="flex flex-wrap items-center gap-3">
+              <button id="nc-save" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Create customer</button>
+              <button id="nc-cancel" type="button" class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+              <span class="text-xs text-base-content/60" id="nc-msg"></span>
             </div>
           </div>
 
-          <div class="table-wrap">
-            <table class="items" id="items-table">
+          <div class="flex flex-1 flex-col overflow-x-auto">
+            <table class="w-full text-left" id="items-table">
               <thead>
-                <tr>
-                  <th class="col-code">Item Code</th>
-                  <th class="col-desc">Description</th>
-                  <th class="num col-qty">Qty</th>
-                  <th class="num col-rate">Rate (₹)</th>
-                  <th class="num col-tax">Tax %</th>
-                  <th class="num col-total">Total (₹)</th>
-                  <th class="col-act"><span class="sr-only">Remove</span></th>
+                <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                  <th class="w-32">Item Code</th>
+                  <th>Description</th>
+                  <th class="w-20 text-right">Qty</th>
+                  <th class="w-28 text-right">Rate (₹)</th>
+                  <th class="w-20 text-right">Tax %</th>
+                  <th class="w-32 text-right">Total (₹)</th>
+                  <th class="w-10"><span class="sr-only">Remove</span></th>
                 </tr>
               </thead>
               <tbody id="items-body"></tbody>
             </table>
-            <div class="empty" id="empty-rows">
-              <svg class="empty-art" viewBox="0 0 96 72" aria-hidden="true">
-                <path class="empty-blob" d="M20 16c8-12 26-16 38-9s18 25 11 37-27 17-39 10S12 28 20 16z" />
-                <path class="empty-line" d="M30 22h26a4 4 0 0 1 4 4v28a4 4 0 0 1-4 4H30a4 4 0 0 1-4-4V26a4 4 0 0 1 4-4z" />
-                <path class="empty-line" d="M33.5 33.5h19M33.5 40h19M33.5 46.5h12" />
-              </svg>
-              <p class="empty-title">No items added yet</p>
-              <p class="empty-hint">Press <kbd>F2</kbd> or use Add Item to start a bill</p>
+            <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center"
+                 id="empty-rows">
+              <span class="hero-document-text size-8 text-base-content/25" aria-hidden="true"></span>
+              <p class="text-sm font-medium text-base-content">No items added yet</p>
+              <p class="text-xs text-base-content/60">Press
+                <kbd class="rounded-field border border-base-300 bg-base-200 px-1.5 py-0.5 font-mono text-2xs text-base-content/70">F2</kbd>
+                or use Add Item to start a bill</p>
             </div>
           </div>
 
-          <div class="add-item">
-            <button id="add-item-btn" class="btn">+ Add Item</button>
+          <div id="add-item">
+            <button id="add-item-btn" type="button" class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">
+              <span class="hero-plus size-4" aria-hidden="true"></span> Add Item
+            </button>
           </div>
 
           <!-- Item picker: opened by Add Item, closed on pick or Escape. -->
-          <div class="picker" id="item-picker" hidden>
-            <div class="picker-head">
+          <div class="flex flex-col gap-2 rounded-field border border-base-300 bg-base-200/60 p-3"
+               id="item-picker" hidden>
+            <div class="flex items-center gap-2">
               <label class="sr-only" for="item-query">Search items</label>
-              <input id="item-query" type="text" autocomplete="off" placeholder="Item code or description" />
-              <button id="picker-close" class="btn">Close</button>
+              <input id="item-query" type="text" autocomplete="off"
+                     placeholder="Item code or description" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
+              <button id="picker-close" type="button" class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Close</button>
             </div>
-            <ul class="picker-results" id="picker-results"></ul>
-          </div>
-
-          <div class="summary">
-            <div class="summary-left">
-              <div class="pay" role="radiogroup" aria-label="Payment type">
-                <span class="pay-label">Payment</span>
-                <label class="pay-opt"><input type="radio" name="payment" value="upi" /><span>UPI</span></label>
-                <label class="pay-opt"><input type="radio" name="payment" value="cash" checked /><span>Cash</span></label>
-                <label class="pay-opt"><input type="radio" name="payment" value="card" /><span>Card</span></label>
-              </div>
-
-              <!-- Placeholder until QR generation lands with the payments stage. -->
-              <div class="upi-box" id="upi-box" hidden>
-                <div class="upi-qr" aria-hidden="true">
-                  <span>QR</span>
-                </div>
-                <p>Scan screen code to pay via UPI<br /><small>Live QR codes come in a later stage.</small></p>
-              </div>
-
-              <span class="gst-mode" id="gst-mode"></span>
-            </div>
-            <!-- Filled by renderTotals(), the same function the history detail uses. -->
-            <dl class="totals" id="billing-totals"></dl>
-          </div>
-
-          <div class="actions">
-            <span class="action-msg" id="action-msg"></span>
-            <button id="print-lock" class="btn btn--lock">Print &amp; Lock (F5)</button>
-            <button id="print-preview" class="btn" hidden>Print preview</button>
-            <button id="new-txn" class="btn btn--lock" hidden>New Transaction</button>
+            <ul class="max-h-64 overflow-y-auto" id="picker-results"></ul>
           </div>
         </div>
 
+        <div class="flex flex-wrap items-start gap-4">
+          <div class="flex min-w-60 flex-1 flex-col gap-3">
+            <div class="flex flex-wrap items-center gap-2" id="pay-group" role="radiogroup"
+                 aria-label="Payment type">
+              <span class="mr-1 text-sm text-base-content/60">Payment</span>
+              <label class="inline-flex cursor-pointer items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 py-1.5 text-sm has-[:checked]:border-base-content/30 has-[:checked]:bg-base-200">
+                <input type="radio" name="payment" value="upi" class="accent-primary" /><span>UPI</span></label>
+              <label class="inline-flex cursor-pointer items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 py-1.5 text-sm has-[:checked]:border-base-content/30 has-[:checked]:bg-base-200">
+                <input type="radio" name="payment" value="cash" checked class="accent-primary" /><span>Cash</span></label>
+              <label class="inline-flex cursor-pointer items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 py-1.5 text-sm has-[:checked]:border-base-content/30 has-[:checked]:bg-base-200">
+                <input type="radio" name="payment" value="card" class="accent-primary" /><span>Card</span></label>
+            </div>
+
+            <p class="text-sm text-base-content/60" id="pay-static" hidden></p>
+
+            <!-- Placeholder until QR generation lands with the payments stage. -->
+            <div class="flex items-center gap-3 rounded-field border border-base-300 bg-base-100 p-3"
+                 id="upi-box" hidden>
+              <div class="flex size-16 shrink-0 items-center justify-center rounded-field border border-dashed border-base-300 text-2xs text-base-content/45"
+                   aria-hidden="true"><span>QR</span></div>
+              <p class="text-xs text-base-content/60">Scan screen code to pay via UPI<br />
+                <span class="text-base-content/45">Live QR codes come in a later stage.</span></p>
+            </div>
+
+            <span class="font-mono text-xs text-base-content/45" id="gst-mode"></span>
+          </div>
+
+          <!-- Filled by renderTotals(), the same function the history detail uses. -->
+          <dl class="rounded-box border border-base-300 bg-base-100 shadow-sm w-full max-w-sm p-4" id="billing-totals"></dl>
+        </div>
+
+        <div class="flex flex-wrap items-center justify-end gap-3" id="txn-actions">
+          <span class="text-sm text-base-content/60" id="action-msg"></span>
+          <button id="print-lock" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Print &amp; Lock (F5)</button>
+        </div>
       </section>
 
       <section class="pane" id="pane-history" role="tabpanel">
-        <div class="card" id="history-list-card">
-          <div class="card-head">
-            <h2>Invoice History</h2>
-          </div>
+        <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-1 flex-col gap-4 p-4" id="history-list-card">
+          <header class="flex flex-wrap items-center justify-between gap-4">
+            <h1 class="text-xl font-semibold tracking-tight">Invoice History</h1>
+          </header>
 
-          <div class="filters">
-            <label class="filt">Range
-              <select id="f-range">
+          <div class="flex flex-wrap items-end gap-3">
+            <label class="flex flex-col gap-1 text-xs text-base-content/60 w-36">Range
+              <select id="f-range" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8">
                 <option value="today" selected>Today</option>
                 <option value="week">This week</option>
                 <option value="month">This month</option>
@@ -261,103 +365,315 @@
                 <option value="custom">Custom range</option>
               </select>
             </label>
-            <label class="filt" id="f-from-wrap" hidden>From
-              <input id="f-from" type="date" />
+            <label class="flex flex-col gap-1 text-xs text-base-content/60 w-40" id="f-from-wrap" hidden>From
+              <input id="f-from" type="date" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
             </label>
-            <label class="filt" id="f-to-wrap" hidden>To
-              <input id="f-to" type="date" />
+            <label class="flex flex-col gap-1 text-xs text-base-content/60 w-40" id="f-to-wrap" hidden>To
+              <input id="f-to" type="date" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
             </label>
-            <label class="filt filt--grow">Search
+            <label class="flex flex-col gap-1 text-xs text-base-content/60 min-w-56 flex-1">Search
               <input id="f-text" type="text" autocomplete="off"
-                     placeholder="Customer name or invoice number" />
+                     placeholder="Customer name or invoice number" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
             </label>
-            <button id="f-apply" class="btn">Apply</button>
+            <button id="f-apply" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">
+              <span class="hero-funnel size-4" aria-hidden="true"></span> Apply
+            </button>
           </div>
 
-          <div class="table-wrap">
-            <table class="items history" id="history-table">
+          <div class="flex flex-1 flex-col overflow-x-auto">
+            <table class="w-full text-left" id="history-table">
               <thead>
-                <tr>
-                  <th class="col-code">Invoice #</th>
-                  <th class="col-when">Date / Time</th>
+                <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                  <th class="w-36">Invoice #</th>
+                  <th class="w-40">Date / Time</th>
                   <th>Customer</th>
-                  <th class="col-pay">Payment</th>
-                  <th class="num col-total">Grand Total (₹)</th>
+                  <th class="w-24">Payment</th>
+                  <th class="w-36 text-right">Grand Total (₹)</th>
                 </tr>
               </thead>
               <tbody id="history-body"></tbody>
             </table>
-            <div class="empty" id="history-empty">
-              <svg class="empty-art" viewBox="0 0 96 72" aria-hidden="true">
-                <path class="empty-blob" d="M20 16c8-12 26-16 38-9s18 25 11 37-27 17-39 10S12 28 20 16z" />
-                <circle class="empty-line" cx="44" cy="34" r="13" />
-                <path class="empty-line" d="m54 44 10 10" />
-              </svg>
-              <p class="empty-title">No invoices match</p>
-              <p class="empty-hint">Try a wider date range, or clear the search</p>
+            <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center"
+                 id="history-empty">
+              <span class="hero-magnifying-glass size-8 text-base-content/25" aria-hidden="true"></span>
+              <p class="text-sm font-medium text-base-content">No invoices match</p>
+              <p class="text-xs text-base-content/60">Try a wider date range, or clear the search</p>
             </div>
           </div>
-          <p class="hist-count" id="history-count"></p>
+          <p class="text-xs text-base-content/45" id="history-count"></p>
         </div>
 
         <!-- Read-only. Invoices are append-only once saved: no edit, delete or reopen. -->
-        <div class="card card--txn" id="history-detail" hidden>
-          <div class="card-head">
-            <h2>Invoice</h2>
-            <span class="inv-no" id="d-inv-no"></span>
-            <span class="ro-badge">Read-only</span>
-            <div class="detail-actions">
-              <button id="d-reprint" class="btn btn--lock">Reprint</button>
-              <button id="d-back" class="btn">Back to list</button>
+        <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-1 flex-col gap-4 p-4" id="history-detail" hidden>
+          <header class="flex flex-wrap items-center gap-3">
+            <h1 class="text-xl font-semibold tracking-tight">Invoice</h1>
+            <span class="rounded-field bg-base-300 px-2 py-0.5 font-mono text-xs text-base-content"
+                  id="d-inv-no"></span>
+            <span class="inline-flex items-center gap-1 rounded-field bg-base-200 px-2 py-0.5 text-2xs font-medium text-base-content/70">Read-only</span>
+            <div class="ml-auto flex flex-wrap items-center gap-2">
+              <button id="d-reprint" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">
+                <span class="hero-printer size-4" aria-hidden="true"></span> Reprint
+              </button>
+              <button id="d-back" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Back to list</button>
             </div>
-          </div>
+          </header>
 
-          <div class="cust-line" id="d-customer"></div>
-          <div class="detail-meta" id="d-meta"></div>
+          <div class="text-sm text-base-content/60" id="d-customer"></div>
+          <div class="flex flex-wrap gap-x-6 gap-y-1 font-mono text-xs text-base-content/45"
+               id="d-meta"></div>
 
-          <div class="table-wrap">
-            <table class="items">
+          <div class="flex flex-1 flex-col overflow-x-auto">
+            <table class="w-full text-left">
               <thead>
-                <tr>
-                  <th class="col-code">Item Code</th>
-                  <th class="col-desc">Description</th>
-                  <th class="num col-qty">Qty</th>
-                  <th class="num col-rate">Rate (₹)</th>
-                  <th class="num col-tax">Tax %</th>
-                  <th class="num col-total">Total (₹)</th>
+                <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                  <th class="w-32">Item Code</th>
+                  <th>Description</th>
+                  <th class="w-20 text-right">Qty</th>
+                  <th class="w-28 text-right">Rate (₹)</th>
+                  <th class="w-20 text-right">Tax %</th>
+                  <th class="w-32 text-right">Total (₹)</th>
                 </tr>
               </thead>
               <tbody id="d-lines"></tbody>
             </table>
           </div>
 
-          <div class="summary">
-            <div class="summary-left">
-              <span class="gst-mode" id="d-gst-mode"></span>
-            </div>
+          <div class="flex flex-wrap items-start gap-4">
+            <span class="flex-1 font-mono text-xs text-base-content/45" id="d-gst-mode"></span>
             <!-- Same renderTotals() as the billing card, fed saved data. -->
-            <dl class="totals" id="detail-totals"></dl>
+            <dl class="w-full max-w-sm rounded-field border border-base-300 p-4"
+                id="detail-totals"></dl>
           </div>
         </div>
       </section>
 
-      <section class="pane" id="pane-inventory" role="tabpanel"><div class="soon">Coming soon</div></section>
-      <section class="pane" id="pane-analytics" role="tabpanel"><div class="soon">Coming soon</div></section>
-      <section class="pane" id="pane-sync" role="tabpanel"><div class="soon">Coming soon</div></section>
-      <section class="pane" id="pane-settings" role="tabpanel">
-        <div class="page">
-          <div class="page-head">
-            <h2>Account Information</h2>
-            <!-- No Edit action here: nothing on this page is editable yet, and a button
-                 that does nothing is worse than no button. It arrives with the user
-                 management screen. -->
-          </div>
-          <dl class="rows" id="about-rows"></dl>
+      <section class="pane" id="pane-inventory" role="tabpanel">
+        <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-1 flex-col gap-4 p-4">
+          <header class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h1 class="text-xl font-semibold tracking-tight">Inventory</h1>
+              <p class="mt-1 max-w-prose text-sm text-base-content/60">The catalogue the
+                billing screen prices from. Saving an item that already has this code
+                updates it — that is how a price change is made.</p>
+            </div>
+            <button id="item-add-toggle" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">
+              <span class="hero-plus size-4" aria-hidden="true"></span> Add Item
+            </button>
+          </header>
 
-          <div class="page-head page-head--sub">
-            <h2>About</h2>
+          <form class="flex flex-col gap-4 rounded-field border border-base-300 bg-base-200/60 p-4"
+                id="item-form" autocomplete="off" hidden>
+            <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45"
+               id="item-form-head">Add item</p>
+            <div class="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Item Code
+                <input id="it-code" type="text" required autocapitalize="characters"
+                       spellcheck="false" placeholder="e.g. PATCH-CAT6"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto font-mono" />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Description
+                <input id="it-desc" type="text" required placeholder="What it is called on the bill"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Rate (₹)
+                <input id="it-rate" type="number" min="0" step="0.01" required
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto text-right font-mono tabular-nums" />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Tax %
+                <select id="it-tax" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8 mt-auto">
+                  <option value="0">0</option>
+                  <option value="5">5</option>
+                  <option value="12">12</option>
+                  <option value="18" selected>18</option>
+                  <option value="28">28</option>
+                </select>
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Unit
+                <input id="it-uom" type="text" maxlength="8" placeholder="NOS"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
+              </label>
+            </div>
+            <div class="flex flex-wrap items-center gap-3">
+              <button type="submit" id="it-save" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Save item</button>
+              <button type="button" id="it-cancel" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+              <span class="text-xs text-base-content/60" id="it-msg" aria-live="polite"></span>
+            </div>
+          </form>
+
+          <div class="flex flex-wrap items-end gap-3">
+            <label class="flex flex-col gap-1 text-xs text-base-content/60 min-w-56 flex-1">Search
+              <input id="it-filter" type="text" autocomplete="off"
+                     placeholder="Item code or description" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
+            </label>
           </div>
-          <dl class="rows" id="about-app-rows"></dl>
+
+          <div class="flex flex-1 flex-col overflow-x-auto">
+            <table class="w-full text-left" id="items-catalogue">
+              <thead>
+                <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                  <th class="w-40">Item Code</th>
+                  <th>Description</th>
+                  <th class="w-32 text-right">Rate (₹)</th>
+                  <th class="w-24 pr-4 text-right">Tax %</th>
+                  <th class="w-20">Unit</th>
+                  <th class="w-10"><span class="sr-only">Edit</span></th>
+                </tr>
+              </thead>
+              <tbody id="catalogue-body"></tbody>
+            </table>
+            <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center"
+                 id="catalogue-empty" hidden>
+              <span class="hero-cube size-8 text-base-content/25" aria-hidden="true"></span>
+              <p class="text-sm font-medium text-base-content">No items match</p>
+              <p class="text-xs text-base-content/60">Clear the search, or add the item</p>
+            </div>
+          </div>
+          <p class="text-xs text-base-content/45" id="catalogue-count"></p>
+        </div>
+      </section>
+
+      <section class="pane" id="pane-analytics" role="tabpanel">
+        <header class="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 class="text-xl font-semibold tracking-tight">Analytics</h1>
+            <p class="mt-1 max-w-prose text-sm text-base-content/60">What this till has
+              billed. Every figure is added up by the same code that priced the invoices,
+              not recomputed here.</p>
+          </div>
+          <label class="flex flex-col gap-1 text-xs text-base-content/60 w-44">Range
+            <select id="an-range" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8">
+              <option value="week">This week</option>
+              <option value="month" selected>This month</option>
+              <option value="year">This financial year</option>
+              <option value="all">All time</option>
+            </select>
+          </label>
+        </header>
+
+        <div class="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4" id="an-stats"></div>
+
+        <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-col gap-4 p-4">
+          <div class="flex flex-wrap items-baseline justify-between gap-3">
+            <h2 class="text-lg font-semibold tracking-tight">Tax collected by day</h2>
+            <p class="flex items-center gap-4 text-xs text-base-content/60">
+              <span class="flex items-center gap-1.5">
+                <span class="size-2.5 rounded-sm bg-base-content"></span> CGST + SGST</span>
+              <span class="flex items-center gap-1.5">
+                <span class="size-2.5 rounded-sm bg-base-content/25"></span> IGST</span>
+            </p>
+          </div>
+          <div id="an-chart"></div>
+        </div>
+
+        <div class="grid gap-4 lg:grid-cols-2">
+          <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-col gap-4 p-4">
+            <h2 class="text-lg font-semibold tracking-tight">How customers paid</h2>
+            <div id="an-payments"></div>
+          </div>
+
+          <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-col gap-4 p-4">
+            <h2 class="text-lg font-semibold tracking-tight">What sold</h2>
+            <div class="overflow-x-auto">
+              <table class="w-full text-left">
+                <thead>
+                  <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                    <th class="w-36">Item Code</th>
+                    <th>Description</th>
+                    <th class="w-20 text-right">Qty</th>
+                    <th class="w-32 text-right">Revenue (₹)</th>
+                  </tr>
+                </thead>
+                <tbody id="an-top"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center"
+             id="an-empty" hidden>
+          <span class="hero-chart-bar size-8 text-base-content/25" aria-hidden="true"></span>
+          <p class="text-sm font-medium text-base-content">Nothing billed in this range</p>
+          <p class="text-xs text-base-content/60">Widen the range, or raise an invoice on Billing</p>
+        </div>
+      </section>
+
+      <section class="pane" id="pane-sync" role="tabpanel">
+        <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center">
+          <span class="hero-arrow-path size-8 text-base-content/25" aria-hidden="true"></span>
+          <p class="text-sm font-medium text-base-content">Sync is coming</p>
+          <p class="text-xs text-base-content/60">This pane is not built yet. Billing and
+            History are.</p>
+        </div>
+      </section>
+      <section class="pane" id="pane-settings" role="tabpanel">
+        <div class="flex flex-col gap-2">
+          <header>
+            <h1 class="text-xl font-semibold tracking-tight">Account Information</h1>
+            <!-- No Edit action here: nothing on this page is editable yet, and a button
+                 that does nothing is worse than no button. Accounts are managed under
+                 Users. -->
+          </header>
+          <dl class="grid grid-cols-[minmax(140px,220px)_1fr]" id="about-rows"></dl>
+
+          <header class="mt-6">
+            <h2 class="text-lg font-semibold tracking-tight">About</h2>
+          </header>
+          <dl class="grid grid-cols-[minmax(140px,220px)_1fr]" id="about-app-rows"></dl>
+        </div>
+      </section>
+
+      <!-- Owner-only. Lists who can sign in on this machine and adds more. There is no
+           edit or delete: changing somebody's password or removing their access is a
+           thing to get right, not to bolt on. -->
+      <section class="pane" id="pane-users" role="tabpanel">
+        <div class="flex flex-col gap-4">
+          <header class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h1 class="text-xl font-semibold tracking-tight">Users</h1>
+              <p class="mt-1 max-w-prose text-sm text-base-content/60">Everyone who can
+                sign in on this computer. Owners can bill and manage these accounts;
+                cashiers can only bill.</p>
+            </div>
+            <button id="user-add-toggle" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">
+              <span class="hero-plus size-4" aria-hidden="true"></span> Add User
+            </button>
+          </header>
+
+          <form class="flex flex-col gap-4 border-b border-base-300 pb-6" id="user-form"
+                autocomplete="off" hidden>
+            <div class="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-4">
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Display Name
+                <input id="user-name" type="text" required placeholder="e.g. Anand Kumar"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Username
+                <input id="user-user" type="text" autocapitalize="off" spellcheck="false"
+                       required placeholder="what they will type to sign in"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Role
+                <select id="user-role" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8 mt-auto">
+                  <option value="cashier" selected>Cashier</option>
+                  <option value="owner">Owner</option>
+                </select>
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Password
+                <input id="user-pass" type="password" autocomplete="new-password" required
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
+              </label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Confirm Password
+                <input id="user-pass2" type="password" autocomplete="new-password" required
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
+              </label>
+            </div>
+            <div class="flex flex-wrap items-center gap-3">
+              <button type="submit" id="user-save" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Create User</button>
+              <button type="button" id="user-cancel" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+              <span class="text-xs text-base-content/60" id="user-msg" aria-live="polite"></span>
+            </div>
+          </form>
+
+          <div id="user-list"></div>
         </div>
       </section>
     </main>
@@ -366,23 +682,31 @@
          whether that comes from Print & Lock or from Reprint. -->
     <div class="print-overlay" id="print-overlay" hidden>
       <div class="print-bar">
-        <span id="print-label"></span>
-        <button id="print-now" class="btn btn--lock">Print</button>
-        <button id="print-close" class="btn">Close</button>
+        <span class="font-mono text-sm" id="print-label"></span>
+        <button id="print-now" type="button"
+                class="inline-flex h-9 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Print</button>
+        <button id="print-close" type="button"
+                class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Close</button>
       </div>
       <div class="sheet" id="print-sheet"></div>
     </div>
 
-    <footer class="shortcuts" id="shortcuts">
-      <span><kbd>F2</kbd> Search Item</span><i>│</i>
-      <span><kbd>F5</kbd> Save &amp; Print</span><i>│</i>
-      <span id="sc-f9"><kbd>F9</kbd> Replicator Settings</span><i>│</i>
-      <span><kbd>Esc</kbd> Clear Transaction</span>
-    </footer>
-    <footer class="statusbar"><span id="status-line">Ready.</span></footer>
+      <!-- The counter runs on the keyboard. These stay visible rather than living in a
+           help screen nobody opens mid-sale. -->
+      <footer class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-base-300 bg-base-100 px-4 py-1.5 text-2xs text-base-content/60"
+              id="shortcuts">
+        <span class="inline-flex items-center gap-1.5"><kbd class="rounded-field border border-base-300 bg-base-200 px-1.5 py-0.5 font-mono text-2xs text-base-content/70">F2</kbd> Search Item</span>
+        <span class="inline-flex items-center gap-1.5"><kbd class="rounded-field border border-base-300 bg-base-200 px-1.5 py-0.5 font-mono text-2xs text-base-content/70">F5</kbd> Save &amp; Print</span>
+        <span class="inline-flex items-center gap-1.5" id="sc-f9"><kbd class="rounded-field border border-base-300 bg-base-200 px-1.5 py-0.5 font-mono text-2xs text-base-content/70">F9</kbd> Replicator Settings</span>
+        <span class="inline-flex items-center gap-1.5"><kbd class="rounded-field border border-base-300 bg-base-200 px-1.5 py-0.5 font-mono text-2xs text-base-content/70">Esc</kbd> Clear Transaction</span>
+      </footer>
+      <footer class="shrink-0 border-t border-base-300 bg-base-200 px-4 py-1.5 font-mono text-2xs text-base-content/45">
+        <span id="status-line">Ready.</span>
+      </footer>
     </div>
     </div>
 
+    <script src="ui.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

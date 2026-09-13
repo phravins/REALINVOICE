@@ -6,11 +6,13 @@
 //! payload survives the trip into core unchanged.
 
 use realinvoice_core::{
-    seed, InvoiceFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewUser, Role,
+    seed, DateRange, InvoiceFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewUser, Role, User,
 };
 use realinvoice_desktop_lib::commands::{
-    check_expected_totals_for_test as check_expected_totals, quote, ExpectedTotals,
-    NewCustomerPayload, NewInvoicePayload, NewLinePayload, QuoteLinePayload,
+    check_expected_totals_for_test as check_expected_totals, check_item_for_test as check_item,
+    quote, require_owner_for_test as require_owner, require_session_for_test as require_session,
+    ExpectedTotals, NewCustomerPayload, NewInvoicePayload, NewItemPayload, NewLinePayload,
+    QuoteLinePayload,
 };
 use realinvoice_desktop_lib::state::{AppState, Session, DB_FILE_NAME};
 
@@ -665,34 +667,73 @@ fn searching_history_by_customer_or_number_narrows_the_list() {
 
 // ------------------------------------------------------------------ sign-in
 
-#[test]
-fn a_first_run_seeds_an_owner_and_hands_back_its_password_once() {
-    let (_dir, state) = console_state();
-
-    let password = state.first_run_password().expect("first run seeds an account");
-    assert!(password.len() >= 8);
-
-    let owner = state.db().verify_login("admin", &password).unwrap().expect("sign-in works");
-    assert_eq!(owner.role, Role::Owner);
-
-    // Signing in consumes the bootstrap credential: it is never shown again.
-    state.begin_session(Session { token: "t".into(), user: owner });
-    assert!(state.first_run_password().is_none());
+/// Creates the owner exactly as `create_first_user` does when somebody fills in the
+/// setup screen. Nothing else can put the first row in the users table.
+fn set_up_owner(state: &AppState) -> User {
+    let mut db = state.db();
+    db.create_user(
+        &NewUser {
+            username: "priya".into(),
+            display_name: "Priya Raman".into(),
+            role: Role::Owner,
+        },
+        "counter-top-2026",
+    )
+    .unwrap()
 }
 
 #[test]
-fn a_restart_does_not_reseed_or_reset_the_password() {
+fn a_fresh_console_has_no_account_and_asks_to_be_set_up() {
+    let (_dir, state) = console_state();
+
+    // Demo customers and items are seeded; an account is not. `auth_status` reports this
+    // as `needs_setup`, and the shell shows "Create your account" instead of the gate.
+    assert_eq!(state.db().count_users().unwrap(), 0);
+    assert!(state.db().verify_login("admin", "admin").unwrap().is_none());
+    assert!(state.session().is_none());
+}
+
+#[test]
+fn a_restart_keeps_the_account_and_does_not_ask_to_set_up_again() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(DB_FILE_NAME);
 
     let first = AppState::new(path.clone()).unwrap();
-    let password = first.first_run_password().unwrap();
+    set_up_owner(&first);
     drop(first);
 
     let restarted = AppState::new(path).unwrap();
-    assert!(restarted.first_run_password().is_none(), "only a first run seeds");
-    assert!(restarted.db().verify_login("admin", &password).unwrap().is_some());
-    assert_eq!(restarted.db().count_users().unwrap(), 1);
+    assert_eq!(restarted.db().count_users().unwrap(), 1, "setup happens once");
+    assert!(restarted.db().verify_login("priya", "counter-top-2026").unwrap().is_some());
+    assert!(restarted.session().is_none(), "a restart signs everybody out");
+}
+
+/// Managing accounts is owner-only in Rust, not just in the sidebar. A cashier who
+/// reaches the command directly — the shell reloaded, a crafted `invoke` — is refused.
+#[test]
+fn only_an_owner_can_reach_the_account_commands() {
+    let (_dir, state) = console_state();
+    let owner = set_up_owner(&state);
+    let cashier = state
+        .db()
+        .create_user(
+            &NewUser {
+                username: "meena".into(),
+                display_name: "Meena R".into(),
+                role: Role::Cashier,
+            },
+            "counter-password",
+        )
+        .unwrap();
+
+    let as_owner = Session { token: "t".into(), user: owner };
+    let as_cashier = Session { token: "t".into(), user: cashier };
+
+    assert!(require_owner(Some(as_owner.clone())).is_ok());
+    assert!(require_session(Some(as_cashier.clone())).is_ok(), "a cashier can still bill");
+    assert!(require_owner(Some(as_cashier)).is_err(), "but cannot manage accounts");
+    assert!(require_owner(None).is_err(), "and neither can a caller with no session");
+    assert!(require_session(None).is_err());
 }
 
 #[test]
@@ -700,8 +741,7 @@ fn a_session_starts_empty_and_clears_on_sign_out() {
     let (_dir, state) = console_state();
     assert!(state.session().is_none(), "nothing is reachable before sign-in");
 
-    let password = state.first_run_password().unwrap();
-    let owner = state.db().verify_login("admin", &password).unwrap().unwrap();
+    let owner = set_up_owner(&state);
     state.begin_session(Session { token: "token-1".into(), user: owner.clone() });
 
     let live = state.session().expect("signed in");
@@ -715,8 +755,7 @@ fn a_session_starts_empty_and_clears_on_sign_out() {
 #[test]
 fn an_invoice_is_attributed_to_whoever_is_signed_in() {
     let (_dir, state) = console_state();
-    let password = state.first_run_password().unwrap();
-    let owner = state.db().verify_login("admin", &password).unwrap().unwrap();
+    let owner = set_up_owner(&state);
 
     let cashier = state
         .db()
@@ -745,7 +784,7 @@ fn an_invoice_is_attributed_to_whoever_is_signed_in() {
     // The history list names each biller.
     let listed = state.db().list_invoices(&InvoiceFilter::default()).unwrap();
     let named: Vec<Option<&str>> = listed.iter().map(|s| s.created_by.as_deref()).collect();
-    assert!(named.contains(&Some("Store Owner")));
+    assert!(named.contains(&Some("Priya Raman")));
     assert!(named.contains(&Some("Meena R")));
 }
 
@@ -768,8 +807,7 @@ fn attribution_cannot_be_supplied_by_the_caller() {
 #[test]
 fn each_payment_type_is_saved_as_selected() {
     let (_dir, state) = console_state();
-    let password = state.first_run_password().unwrap();
-    let owner = state.db().verify_login("admin", &password).unwrap().unwrap();
+    let owner = set_up_owner(&state);
 
     for chosen in ["upi", "cash", "card"] {
         let json = format!(r#"{{ "customer_id": 1, "payment_type": "{chosen}", "lines": [] }}"#);
@@ -789,4 +827,87 @@ fn each_payment_type_is_saved_as_selected() {
         assert_eq!(stored.payment_type, chosen);
         assert_eq!(stored.created_by_user_id, Some(owner.id));
     }
+}
+
+// ------------------------------------------------------------------ inventory
+
+fn item_payload(rate: f64, tax_rate: f64, uom: &str) -> NewItemPayload {
+    NewItemPayload {
+        item_code: "  patch-cat6  ".into(),
+        description: "  Cat6 patch cable 2m  ".into(),
+        rate,
+        tax_rate,
+        uom: uom.into(),
+    }
+}
+
+#[test]
+fn an_item_from_the_form_is_trimmed_and_rounded() {
+    let checked = check_item(&item_payload(180.005, 18.0, " NOS ")).unwrap();
+
+    assert_eq!(checked.item_code, "patch-cat6", "the surrounding spaces go");
+    assert_eq!(checked.description, "Cat6 patch cable 2m");
+    assert_eq!(checked.uom, "NOS");
+    // Rounded to paise by the same function every other amount goes through, so a price
+    // cannot enter the catalogue carrying a fraction that resurfaces inside a total.
+    assert_eq!(checked.rate, 180.01);
+    assert_eq!(checked.tax_rate, 18.0);
+}
+
+#[test]
+fn an_item_with_no_unit_gets_one() {
+    // A unit is never blank on a printed bill; NOS is what a counter means by "each".
+    assert_eq!(check_item(&item_payload(180.0, 18.0, "")).unwrap().uom, "NOS");
+    assert_eq!(check_item(&item_payload(180.0, 18.0, "   ")).unwrap().uom, "NOS");
+    assert_eq!(check_item(&item_payload(180.0, 18.0, "BAG")).unwrap().uom, "BAG");
+}
+
+#[test]
+fn a_nonsense_price_or_tax_rate_is_refused() {
+    // A negative price is a typo, and the person who made it is standing at the till.
+    assert!(check_item(&item_payload(-1.0, 18.0, "NOS")).is_err());
+    assert!(check_item(&item_payload(f64::NAN, 18.0, "NOS")).is_err());
+    assert!(check_item(&item_payload(f64::INFINITY, 18.0, "NOS")).is_err());
+
+    // GST has no rate above 100%, and a stray digit here would misprice every future bill.
+    assert!(check_item(&item_payload(180.0, 900.0, "NOS")).is_err());
+    assert!(check_item(&item_payload(180.0, -5.0, "NOS")).is_err());
+    assert!(check_item(&item_payload(180.0, f64::NAN, "NOS")).is_err());
+
+    // The boundaries themselves are legitimate: zero-rated goods, and free samples.
+    assert!(check_item(&item_payload(0.0, 0.0, "NOS")).is_ok());
+    assert!(check_item(&item_payload(180.0, 100.0, "NOS")).is_ok());
+}
+
+#[test]
+fn analytics_figures_come_from_core_and_reconcile() {
+    let (_dir, state) = console_state();
+    let biller = set_up_owner(&state);
+
+    // Two invoices, so every aggregate folds more than one row.
+    for pay in ["cash", "upi"] {
+        let mut invoice = worked_example(&state);
+        invoice.payment_type = pay.into();
+        invoice.created_by_user_id = Some(biller.id);
+        state.db().create_invoice(&invoice).unwrap();
+    }
+
+    let db = state.db();
+    let all = db.sales_summary(&DateRange::default()).unwrap();
+    assert_eq!(all.invoice_count, 2);
+    // The worked example is the ₹1,05,000 bill that totals ₹1,23,900, twice over.
+    assert_eq!(all.subtotal, 210_000.0);
+    assert_eq!(all.grand_total, 247_800.0);
+    assert_eq!(all.tax_total, 37_800.0);
+    assert_eq!(all.subtotal + all.tax_total, all.grand_total, "the parts make the whole");
+
+    // Each breakdown covers the same invoices exactly once.
+    let mix = db.payment_mix(&DateRange::default()).unwrap();
+    assert_eq!(mix.iter().map(|m| m.invoice_count).sum::<i64>(), all.invoice_count);
+    assert_eq!(mix.iter().map(|m| m.grand_total).sum::<f64>(), all.grand_total);
+
+    let days = db.daily_totals(&DateRange::default()).unwrap();
+    assert_eq!(days.iter().map(|d| d.grand_total).sum::<f64>(), all.grand_total);
+
+    assert!(!db.top_items(&DateRange::default(), 8).unwrap().is_empty());
 }

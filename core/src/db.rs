@@ -175,7 +175,16 @@ impl Db {
             .optional()?)
     }
 
-    /// How many accounts exist. Used to decide whether first-run seeding is needed.
+    /// Every account, oldest first. Owner-only in the UI; core does not gate it.
+    pub fn list_users(&self) -> Result<Vec<User>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, username, display_name, role, created_at FROM users ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], user_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// How many accounts exist. Zero means the app has never been set up.
     pub fn count_users(&self) -> Result<i64> {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?)
     }
@@ -378,6 +387,34 @@ impl Db {
         enqueue(&tx, "items", item.id, op, &item)?;
         tx.commit()?;
         Ok(item)
+    }
+
+    /// The whole catalogue, or the part of it matching `text`.
+    ///
+    /// Separate from [`Db::search_item`], which feeds the billing screen's picker and is
+    /// deliberately capped at 50: this one is the Inventory pane's list, where a shop with
+    /// 900 items expects to see 900 items.
+    pub fn list_items(&self, filter: &ItemFilter) -> Result<Vec<Item>> {
+        let text = filter.text.as_deref().unwrap_or("").trim().to_string();
+        let pattern = format!("%{text}%");
+        let limit = filter.limit.unwrap_or(1000) as i64;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, item_code, description, rate, tax_rate, uom
+               FROM items
+              WHERE ?1 = ''
+                 OR item_code LIKE ?2 COLLATE NOCASE
+                 OR description LIKE ?2 COLLATE NOCASE
+              ORDER BY item_code
+              LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![text, pattern, limit], item_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// How many items the catalogue holds, ignoring any filter.
+    pub fn count_items(&self) -> Result<i64> {
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))?)
     }
 
     pub fn get_item(&self, id: i64) -> Result<Option<Item>> {
@@ -707,6 +744,122 @@ impl Db {
                 tax_rate: line.tax_rate.unwrap_or(item.tax_rate),
             },
         ))
+    }
+
+    // ------------------------------------------------------------------ analytics
+
+    /// Everything billed in `range`, added up by SQLite.
+    ///
+    /// The Analytics pane displays these; it does not compute them. That is the same rule
+    /// the billing screen follows — a figure somebody might file a return against is
+    /// produced once, in one place, for every runtime.
+    pub fn sales_summary(&self, range: &DateRange) -> Result<SalesSummary> {
+        let (from, to) = (range.from.clone(), range.to.clone());
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(subtotal), 0),
+                    COALESCE(SUM(cgst), 0),
+                    COALESCE(SUM(sgst), 0),
+                    COALESCE(SUM(igst), 0),
+                    COALESCE(SUM(grand_total), 0)
+               FROM invoices
+              WHERE (?1 IS NULL OR date >= ?1)
+                AND (?2 IS NULL OR date <= ?2)",
+            params![from, to],
+            |row| {
+                let cgst: f64 = row.get(2)?;
+                let sgst: f64 = row.get(3)?;
+                let igst: f64 = row.get(4)?;
+                Ok(SalesSummary {
+                    invoice_count: row.get(0)?,
+                    subtotal: row.get(1)?,
+                    cgst,
+                    sgst,
+                    igst,
+                    tax_total: crate::gst::round_money(cgst + sgst + igst),
+                    grand_total: row.get(5)?,
+                })
+            },
+        )?)
+    }
+
+    /// One row per day that had billing, oldest first. A day with no sales is absent
+    /// rather than zero: whether a gap is a gap or a zero is the caller's question.
+    pub fn daily_totals(&self, range: &DateRange) -> Result<Vec<DailyTotal>> {
+        let (from, to) = (range.from.clone(), range.to.clone());
+        let mut stmt = self.conn.prepare(
+            "SELECT date,
+                    COUNT(*),
+                    COALESCE(SUM(cgst + sgst), 0),
+                    COALESCE(SUM(igst), 0),
+                    COALESCE(SUM(grand_total), 0)
+               FROM invoices
+              WHERE (?1 IS NULL OR date >= ?1)
+                AND (?2 IS NULL OR date <= ?2)
+              GROUP BY date
+              ORDER BY date",
+        )?;
+        let rows = stmt.query_map(params![from, to], |row| {
+            Ok(DailyTotal {
+                date: row.get(0)?,
+                invoice_count: row.get(1)?,
+                cgst_sgst: row.get(2)?,
+                igst: row.get(3)?,
+                grand_total: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// What sold, by revenue, best first.
+    pub fn top_items(&self, range: &DateRange, limit: i64) -> Result<Vec<TopItem>> {
+        let (from, to) = (range.from.clone(), range.to.clone());
+        let mut stmt = self.conn.prepare(
+            "SELECT i.item_code,
+                    i.description,
+                    COALESCE(SUM(l.qty), 0),
+                    COALESCE(SUM(l.line_total), 0) AS revenue
+               FROM invoice_lines l
+               JOIN items i ON i.id = l.item_id
+               JOIN invoices v ON v.id = l.invoice_id
+              WHERE (?1 IS NULL OR v.date >= ?1)
+                AND (?2 IS NULL OR v.date <= ?2)
+              GROUP BY l.item_id
+              ORDER BY revenue DESC
+              LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![from, to, limit], |row| {
+            Ok(TopItem {
+                item_code: row.get(0)?,
+                description: row.get(1)?,
+                qty: row.get(2)?,
+                revenue: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// How customers paid, biggest share first.
+    pub fn payment_mix(&self, range: &DateRange) -> Result<Vec<PaymentMix>> {
+        let (from, to) = (range.from.clone(), range.to.clone());
+        let mut stmt = self.conn.prepare(
+            "SELECT payment_type,
+                    COUNT(*),
+                    COALESCE(SUM(grand_total), 0) AS billed
+               FROM invoices
+              WHERE (?1 IS NULL OR date >= ?1)
+                AND (?2 IS NULL OR date <= ?2)
+              GROUP BY payment_type
+              ORDER BY billed DESC",
+        )?;
+        let rows = stmt.query_map(params![from, to], |row| {
+            Ok(PaymentMix {
+                payment_type: row.get(0)?,
+                invoice_count: row.get(1)?,
+                grand_total: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
 

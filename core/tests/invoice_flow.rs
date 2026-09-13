@@ -2,8 +2,8 @@
 //! reopened SQLite file with its lines and its `sync_queue` rows intact.
 
 use realinvoice_core::{
-    seed, CoreError, Db, InvoiceFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser,
-    Role,
+    seed, CoreError, DateRange, Db, InvoiceFilter, ItemFilter, NewCustomer, NewInvoice,
+    NewInvoiceLine, NewItem, NewUser, Role, User,
 };
 
 fn seeded_db() -> Db {
@@ -712,53 +712,52 @@ fn history_respects_a_limit() {
 
 // ------------------------------------------------------------------ sign-in
 
+/// Creates the owner the way the setup screen does: a person types these in, and this is
+/// all that happens. There is no other route into an empty users table.
+fn owner(db: &mut Db) -> User {
+    db.create_user(
+        &NewUser {
+            username: "priya".into(),
+            display_name: "Priya Raman".into(),
+            role: Role::Owner,
+        },
+        "counter-top-2026",
+    )
+    .unwrap()
+}
+
 #[test]
-fn a_seeded_owner_can_sign_in_with_its_generated_password() {
-    let mut db = Db::open_in_memory().unwrap();
+fn a_fresh_installation_has_no_accounts_at_all() {
+    // What the app keys the setup screen off. Nothing is seeded, generated or printed:
+    // until somebody creates an account, there is nothing on this machine to sign in as.
+    let db = Db::open_in_memory().unwrap();
     assert_eq!(db.count_users().unwrap(), 0);
+    assert!(db.list_users().unwrap().is_empty());
+    assert!(db.find_user("admin").unwrap().is_none(), "no default account exists");
+    assert!(db.verify_login("admin", "admin").unwrap().is_none());
+}
 
-    let (owner, password) = seed::seed_owner_if_empty(&mut db).unwrap().expect("seeded");
-    assert_eq!(owner.username, "admin");
-    assert_eq!(owner.role, Role::Owner);
-    assert_eq!(owner.display_name, "Store Owner");
+#[test]
+fn the_account_created_at_setup_can_sign_in() {
+    let mut db = Db::open_in_memory().unwrap();
+    let created = owner(&mut db);
+    assert_eq!(created.role, Role::Owner);
+    assert_eq!(db.count_users().unwrap(), 1, "the app is now set up");
 
-    let signed_in = db.verify_login("admin", &password).unwrap().expect("sign-in");
-    assert_eq!(signed_in, owner);
+    let signed_in = db.verify_login("priya", "counter-top-2026").unwrap().expect("sign-in");
+    assert_eq!(signed_in, created);
 
     // Case-insensitive username, exact password.
-    assert!(db.verify_login("ADMIN", &password).unwrap().is_some());
-    assert!(db.verify_login("admin", &password.to_uppercase()).unwrap().is_none());
-}
-
-#[test]
-fn seeding_runs_once_and_never_replaces_an_existing_account() {
-    let mut db = Db::open_in_memory().unwrap();
-    let (_, first_password) = seed::seed_owner_if_empty(&mut db).unwrap().unwrap();
-
-    // Second run finds users and does nothing — a restart must not reset the password.
-    assert!(seed::seed_owner_if_empty(&mut db).unwrap().is_none());
-    assert_eq!(db.count_users().unwrap(), 1);
-    assert!(db.verify_login("admin", &first_password).unwrap().is_some());
-}
-
-#[test]
-fn every_installation_gets_a_different_initial_password() {
-    let mut a = Db::open_in_memory().unwrap();
-    let mut b = Db::open_in_memory().unwrap();
-    let (_, password_a) = seed::seed_owner_if_empty(&mut a).unwrap().unwrap();
-    let (_, password_b) = seed::seed_owner_if_empty(&mut b).unwrap().unwrap();
-
-    assert_ne!(password_a, password_b, "nothing secret is hardcoded in the source");
-    // And one machine's password does not open the other.
-    assert!(a.verify_login("admin", &password_b).unwrap().is_none());
+    assert!(db.verify_login("PRIYA", "counter-top-2026").unwrap().is_some());
+    assert!(db.verify_login("priya", "COUNTER-TOP-2026").unwrap().is_none());
 }
 
 #[test]
 fn a_wrong_password_or_unknown_user_both_return_none() {
     let mut db = Db::open_in_memory().unwrap();
-    seed::seed_owner_if_empty(&mut db).unwrap();
+    owner(&mut db);
 
-    assert!(db.verify_login("admin", "not the password").unwrap().is_none());
+    assert!(db.verify_login("priya", "not the password").unwrap().is_none());
     assert!(db.verify_login("nobody", "whatever").unwrap().is_none());
     assert!(db.verify_login("", "").unwrap().is_none());
 }
@@ -766,23 +765,25 @@ fn a_wrong_password_or_unknown_user_both_return_none() {
 #[test]
 fn the_password_is_never_stored_or_returned_in_the_clear() {
     let mut db = Db::open_in_memory().unwrap();
-    let (owner, password) = seed::seed_owner_if_empty(&mut db).unwrap().unwrap();
+    let created = owner(&mut db);
+    let password = "counter-top-2026";
 
     // The User that crosses into the frontend carries no hash and no password.
-    let serialized = serde_json::to_string(&owner).unwrap();
-    assert!(!serialized.contains(&password));
+    let serialized = serde_json::to_string(&created).unwrap();
+    assert!(!serialized.contains(password));
     assert!(!serialized.contains("password"), "{serialized}");
 
-    // And what is on disk is a bcrypt hash, not the password.
+    // And nothing about an account is queued for sync — logins are per-machine.
     let stored: String =
         db.pending_sync_rows().unwrap().iter().map(|r| r.payload_json.clone()).collect();
-    assert!(!stored.contains(&password), "users must not be queued for sync");
+    assert!(!stored.contains(password), "users must not be queued for sync");
+    assert!(!stored.contains("priya"), "users must not be queued for sync");
 }
 
 #[test]
-fn a_second_user_can_be_created_and_duplicates_refused() {
+fn an_owner_can_add_staff_and_duplicates_are_refused() {
     let mut db = Db::open_in_memory().unwrap();
-    seed::seed_owner_if_empty(&mut db).unwrap();
+    owner(&mut db);
 
     let cashier = db
         .create_user(
@@ -817,9 +818,32 @@ fn a_second_user_can_be_created_and_duplicates_refused() {
 }
 
 #[test]
+fn the_users_screen_lists_every_account_oldest_first() {
+    let mut db = Db::open_in_memory().unwrap();
+    owner(&mut db);
+    db.create_user(
+        &NewUser { username: "meena".into(), display_name: "Meena R".into(), role: Role::Cashier },
+        "counter-password",
+    )
+    .unwrap();
+
+    let listed = db.list_users().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].username, "priya", "the account that set the machine up is first");
+    assert_eq!(listed[0].role, Role::Owner);
+    assert_eq!(listed[1].username, "meena");
+    assert_eq!(listed[1].role, Role::Cashier);
+
+    // Nothing in the list carries a credential.
+    let serialized = serde_json::to_string(&listed).unwrap();
+    assert!(!serialized.contains("counter-password"));
+    assert!(!serialized.contains("$2"), "no bcrypt hash reaches the screen");
+}
+
+#[test]
 fn an_invoice_records_who_billed_it() {
     let mut db = seeded_db();
-    let (owner, _) = seed::seed_owner_if_empty(&mut db).unwrap().unwrap();
+    let biller = owner(&mut db);
     let buyer = customer(&db, "9600011223");
     let rack = item(&db, "RACK-42U-PRO");
 
@@ -828,24 +852,24 @@ fn an_invoice_records_who_billed_it() {
             customer_id: buyer.id,
             date: None,
             payment_type: "upi".into(),
-            created_by_user_id: Some(owner.id),
+            created_by_user_id: Some(biller.id),
             lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
         })
         .unwrap();
 
-    assert_eq!(invoice.created_by_user_id, Some(owner.id));
+    assert_eq!(invoice.created_by_user_id, Some(biller.id));
 
     // The history list and the detail view both name the biller.
     let listed = db.list_invoices(&InvoiceFilter::default()).unwrap();
-    assert_eq!(listed[0].created_by.as_deref(), Some("Store Owner"));
+    assert_eq!(listed[0].created_by.as_deref(), Some("Priya Raman"));
 
     let detail = db.get_invoice_detail(invoice.id).unwrap().unwrap();
-    assert_eq!(detail.created_by.unwrap().display_name, "Store Owner");
+    assert_eq!(detail.created_by.unwrap().display_name, "Priya Raman");
 
     // It survives a reopen, and the queued payload carries it for the sync worker.
     let queued = &db.pending_sync_rows_for("invoices").unwrap()[0];
     let payload: serde_json::Value = serde_json::from_str(&queued.payload_json).unwrap();
-    assert_eq!(payload["created_by_user_id"], owner.id);
+    assert_eq!(payload["created_by_user_id"], biller.id);
 }
 
 #[test]
@@ -873,7 +897,7 @@ fn an_unattributed_invoice_is_still_valid() {
 #[test]
 fn payment_type_is_stored_as_chosen() {
     let mut db = seeded_db();
-    let (owner, _) = seed::seed_owner_if_empty(&mut db).unwrap().unwrap();
+    let biller = owner(&mut db);
     let buyer = customer(&db, "9600011223");
     let rack = item(&db, "RACK-42U-PRO");
 
@@ -883,7 +907,7 @@ fn payment_type_is_stored_as_chosen() {
                 customer_id: buyer.id,
                 date: None,
                 payment_type: chosen.into(),
-                created_by_user_id: Some(owner.id),
+                created_by_user_id: Some(biller.id),
                 lines: vec![NewInvoiceLine {
                     item_id: rack.id,
                     qty: 1.0,
@@ -940,4 +964,182 @@ fn preferences_are_not_queued_for_sync() {
 
     assert_eq!(db.pending_sync_rows().unwrap().len(), before);
     assert!(db.pending_sync_rows_for("settings").unwrap().is_empty());
+}
+
+// -------------------------------------------------------------- inventory
+
+#[test]
+fn the_catalogue_lists_and_filters() {
+    let db = seeded_db();
+
+    let all = db.list_items(&ItemFilter::default()).unwrap();
+    assert_eq!(all.len() as i64, db.count_items().unwrap());
+    assert_eq!(all.len(), 7, "the seven demo items");
+    // Sorted by code, so the list does not reshuffle between visits.
+    let mut sorted = all.iter().map(|i| i.item_code.clone()).collect::<Vec<_>>();
+    sorted.sort();
+    assert_eq!(sorted, all.iter().map(|i| i.item_code.clone()).collect::<Vec<_>>());
+
+    // Matches a code or a description, case-insensitively.
+    let by_code =
+        db.list_items(&ItemFilter { text: Some("rack".into()), ..Default::default() }).unwrap();
+    assert_eq!(by_code.len(), 1);
+    assert_eq!(by_code[0].item_code, "RACK-42U-PRO");
+
+    let by_text =
+        db.list_items(&ItemFilter { text: Some("server".into()), ..Default::default() }).unwrap();
+    assert!(by_text.iter().any(|i| i.item_code == "RACK-42U-PRO"));
+
+    assert!(db
+        .list_items(&ItemFilter { text: Some("nothing-like-this".into()), ..Default::default() })
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn adding_an_item_puts_it_in_the_catalogue_and_the_sync_queue() {
+    let mut db = seeded_db();
+    let before = db.count_items().unwrap();
+
+    let added = db
+        .upsert_item(&NewItem {
+            item_code: "PATCH-CAT6".into(),
+            description: "Cat6 patch cable 2m".into(),
+            rate: 180.0,
+            tax_rate: 18.0,
+            uom: "NOS".into(),
+        })
+        .unwrap();
+
+    assert_eq!(db.count_items().unwrap(), before + 1);
+    assert!(db
+        .list_items(&ItemFilter { text: Some("PATCH".into()), ..Default::default() })
+        .unwrap()
+        .iter()
+        .any(|i| i.id == added.id));
+
+    // Unlike users, the catalogue is shared business data and is queued for the
+    // back office.
+    let queued = db.pending_sync_rows_for("items").unwrap();
+    assert!(queued.iter().any(|r| r.row_id == added.id));
+}
+
+// -------------------------------------------------------------- analytics
+
+/// Two invoices on one day for one buyer, plus one for another, so every aggregate has
+/// more than a single row to fold.
+fn billed_days(db: &mut Db) {
+    let balaji = customer(db, "9840012345").id;
+    let kaveri = customer(db, "9600011223").id;
+    let rack = item(db, "RACK-42U-PRO").id;
+    let lic = item(db, "ABCOS-ENT-LIC").id;
+
+    let mut raise = |customer_id: i64, date: &str, pay: &str, item_id: i64, qty: f64| {
+        db.create_invoice(&NewInvoice {
+            customer_id,
+            date: Some(date.to_string()),
+            payment_type: pay.into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine { item_id, qty, rate: None, tax_rate: None }],
+        })
+        .unwrap()
+    };
+
+    raise(balaji, "2026-04-01", "cash", rack, 1.0); // 45,000 + 18%
+    raise(kaveri, "2026-04-01", "upi", lic, 2.0); // 24,000 + 18%
+    raise(balaji, "2026-04-03", "card", rack, 1.0); // 45,000 + 18%
+}
+
+#[test]
+fn the_sales_summary_adds_up_what_was_billed() {
+    let mut db = seeded_db();
+    billed_days(&mut db);
+
+    let all = db.sales_summary(&DateRange::default()).unwrap();
+    assert_eq!(all.invoice_count, 3);
+    assert_eq!(all.subtotal, 114_000.0, "45,000 + 24,000 + 45,000");
+    // Every buyer is in TN, so it is all CGST + SGST and never IGST.
+    assert_eq!(all.cgst, 10_260.0, "9% of 114,000");
+    assert_eq!(all.sgst, 10_260.0);
+    assert_eq!(all.igst, 0.0);
+    assert_eq!(all.tax_total, 20_520.0, "what has to be remitted");
+    assert_eq!(all.grand_total, 134_520.0);
+    // The parts reconcile with the whole, which is the point of showing them together.
+    assert_eq!(all.subtotal + all.tax_total, all.grand_total);
+}
+
+#[test]
+fn a_date_range_narrows_every_aggregate() {
+    let mut db = seeded_db();
+    billed_days(&mut db);
+
+    let first_day = DateRange { from: Some("2026-04-01".into()), to: Some("2026-04-01".into()) };
+    let day = db.sales_summary(&first_day).unwrap();
+    assert_eq!(day.invoice_count, 2);
+    assert_eq!(day.subtotal, 69_000.0, "45,000 + 24,000");
+    assert_eq!(day.grand_total, 81_420.0);
+
+    // A range with nothing in it is zero, not an error and not the unfiltered total.
+    let quiet = DateRange { from: Some("2026-05-01".into()), to: Some("2026-05-31".into()) };
+    let none = db.sales_summary(&quiet).unwrap();
+    assert_eq!(none.invoice_count, 0);
+    assert_eq!(none.grand_total, 0.0);
+    assert!(db.daily_totals(&quiet).unwrap().is_empty());
+    assert!(db.top_items(&quiet, 5).unwrap().is_empty());
+    assert!(db.payment_mix(&quiet).unwrap().is_empty());
+}
+
+#[test]
+fn daily_totals_have_one_row_per_billed_day_in_order() {
+    let mut db = seeded_db();
+    billed_days(&mut db);
+
+    let days = db.daily_totals(&DateRange::default()).unwrap();
+    assert_eq!(days.len(), 2, "the quiet day between is absent, not zero");
+    assert_eq!(days[0].date, "2026-04-01", "oldest first");
+    assert_eq!(days[0].invoice_count, 2);
+    assert_eq!(days[0].cgst_sgst, 12_420.0, "18% of 69,000");
+    assert_eq!(days[0].igst, 0.0);
+    assert_eq!(days[1].date, "2026-04-03");
+    assert_eq!(days[1].grand_total, 53_100.0);
+
+    // The days add back up to the summary over the same range.
+    let summed: f64 = days.iter().map(|d| d.grand_total).sum();
+    assert_eq!(summed, db.sales_summary(&DateRange::default()).unwrap().grand_total);
+}
+
+#[test]
+fn top_items_ranks_by_revenue_not_by_quantity() {
+    let mut db = seeded_db();
+    billed_days(&mut db);
+
+    let top = db.top_items(&DateRange::default(), 5).unwrap();
+    assert_eq!(top.len(), 2);
+    // The licence sold twice as many units; the rack still earned more.
+    assert_eq!(top[0].item_code, "RACK-42U-PRO");
+    assert_eq!(top[0].qty, 2.0);
+    assert_eq!(top[0].revenue, 90_000.0);
+    assert_eq!(top[1].item_code, "ABCOS-ENT-LIC");
+    assert_eq!(top[1].qty, 2.0);
+    assert_eq!(top[1].revenue, 24_000.0);
+
+    assert_eq!(db.top_items(&DateRange::default(), 1).unwrap().len(), 1, "limit is honoured");
+}
+
+#[test]
+fn the_payment_mix_covers_every_invoice_once() {
+    let mut db = seeded_db();
+    billed_days(&mut db);
+
+    let mix = db.payment_mix(&DateRange::default()).unwrap();
+    assert_eq!(mix.len(), 3, "cash, upi and card each appear once");
+
+    let counted: i64 = mix.iter().map(|m| m.invoice_count).sum();
+    let billed: f64 = mix.iter().map(|m| m.grand_total).sum();
+    let all = db.sales_summary(&DateRange::default()).unwrap();
+    assert_eq!(counted, all.invoice_count, "no invoice is missed or double counted");
+    assert_eq!(billed, all.grand_total);
+
+    // Biggest share first: cash and card both took a rack, UPI took the licences.
+    assert_eq!(mix[2].payment_type, "upi");
 }

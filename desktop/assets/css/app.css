@@ -1,0 +1,267 @@
+/*
+ * The Office Console's stylesheet source. Compiled by the Tailwind v4 standalone binary
+ * into ../../frontend/tailwind.css, which is what index.html loads and what Tauri embeds.
+ *
+ * Everything below the font faces is ported from the Back-Office Web (QuantumBilling), on
+ * purpose and close to verbatim: the type scale, both OKLCH themes and the interaction
+ * rules are the same tokens, so the two runtimes are visually the same product rather
+ * than two apps that happen to bill the same way. A colour or a step changed here should
+ * be changed there too.
+ *
+ * There is no Node and no node_modules. daisyUI and the icon set are vendored under
+ * ../vendor, and the compiler is one binary fetched by tools/fetch-tailwind.sh.
+ */
+
+@import "tailwindcss" source(none);
+
+/* Only these are scanned for class names. Deliberately the authored files rather than the
+   whole folder: pointing this at ../../frontend would also scan the CSS this file compiles
+   into, which feeds generated output back in as input.
+
+   Every file that writes a class name has to be listed. ui.js was missed when the charts
+   were added and the result was the documented failure — `h-64` and the donut's stroke
+   classes were never emitted, so the bars had no height and the ring did not draw, with
+   no error anywhere. */
+@source "../../frontend/index.html";
+@source "../../frontend/app.js";
+@source "../../frontend/ui.js";
+
+/* Heroicons v2 as `hero-*` mask classes — a CSS class, not an inline SVG and not a JS
+   import. The vendored set is curated; see the plugin's own note to add one. */
+@plugin "../vendor/heroicons.js";
+
+/* Inter, self-hosted from frontend/fonts. v20 ships as a variable font, so one file per
+   subset covers 400-600. The latin-ext subset is what carries the rupee sign, which
+   every amount in this app uses — it is not optional here. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("fonts/inter-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308,
+    U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113,
+    U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("fonts/inter-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
+    U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* The type scale, retuned rather than swapping every class in the app.
+
+   Reading steps — 13px body, 12px meta, 10.5px caps labels — are deliberately left where
+   they are. Tables and forms are read for minutes at a time. What makes a billing screen
+   feel heavy is the top of the scale, so the headings and figures come down instead. */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+
+  --text-2xs: 0.65625rem; /* 10.5px — caps labels */
+  --text-2xs--line-height: 0.875rem;
+  --text-xs: 0.75rem; /* 12px — meta, hints */
+  --text-xs--line-height: 1rem;
+  --text-sm: 0.8125rem; /* 13px — body, tables, forms */
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.84375rem; /* 13.5px */
+  --text-base--line-height: 1.25rem;
+  --text-lg: 0.9375rem; /* 15px — section headings */
+  --text-lg--line-height: 1.375rem;
+  --text-xl: 1rem; /* 16px — every page <h1> */
+  --text-xl--line-height: 1.375rem;
+  --text-2xl: 1.25rem; /* 20px — stat figures, the grand total */
+  --text-2xl--line-height: 1.625rem;
+  --text-3xl: 1.5rem; /* 24px */
+  --text-3xl--line-height: 1.875rem;
+}
+
+/* daisyUI itself. Vendored, and with the 35 stock themes off — the two below are the
+   whole palette. */
+@plugin "../vendor/daisyui/index.js" {
+  themes: false;
+}
+
+@plugin "../vendor/daisyui/theme/index.js" {
+  name: "dark";
+  default: false;
+  prefersdark: true;
+  color-scheme: "dark";
+  --color-base-100: oklch(21% 0.006 285.885);
+  --color-base-200: oklch(17.5% 0.006 285.885);
+  --color-base-300: oklch(30% 0.006 286.033);
+  --color-base-content: oklch(96.7% 0.001 286.375);
+  --color-primary: oklch(96.7% 0.001 286.375);
+  --color-primary-content: oklch(21% 0.006 285.885);
+  --color-secondary: oklch(44% 0.017 285.786);
+  --color-secondary-content: oklch(98% 0 0);
+  --color-accent: oklch(55% 0.014 285.938);
+  --color-accent-content: oklch(98% 0 0);
+  --color-neutral: oklch(37% 0.013 285.805);
+  --color-neutral-content: oklch(98% 0 0);
+  --color-info: oklch(70% 0.04 256);
+  --color-info-content: oklch(21% 0.006 285.885);
+  --color-success: oklch(69% 0.121 162.48);
+  --color-success-content: oklch(21% 0.006 285.885);
+  --color-warning: oklch(76% 0.145 70.08);
+  --color-warning-content: oklch(21% 0.006 285.885);
+  --color-error: oklch(67% 0.17 17.585);
+  --color-error-content: oklch(21% 0.006 285.885);
+  --radius-selector: 0.375rem;
+  --radius-field: 0.375rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.21875rem;
+  --size-field: 0.21875rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+@plugin "../vendor/daisyui/theme/index.js" {
+  name: "light";
+  default: true;
+  prefersdark: false;
+  color-scheme: "light";
+  --color-base-100: oklch(100% 0 0);
+  --color-base-200: oklch(98.4% 0.001 286.375);
+  --color-base-300: oklch(92% 0.004 286.32);
+  --color-base-content: oklch(21% 0.006 285.885);
+  --color-primary: oklch(21% 0.006 285.885);
+  --color-primary-content: oklch(100% 0 0);
+  --color-secondary: oklch(55% 0.014 285.938);
+  --color-secondary-content: oklch(98% 0 0);
+  --color-accent: oklch(44% 0.017 285.786);
+  --color-accent-content: oklch(98% 0 0);
+  --color-neutral: oklch(37% 0.013 285.805);
+  --color-neutral-content: oklch(98% 0 0);
+  --color-info: oklch(55% 0.03 256);
+  --color-info-content: oklch(98% 0 0);
+  --color-success: oklch(60% 0.108 162.48);
+  --color-success-content: oklch(98% 0.014 180.72);
+  --color-warning: oklch(64% 0.14 70.08);
+  --color-warning-content: oklch(98% 0.022 95.277);
+  --color-error: oklch(58% 0.19 17.585);
+  --color-error-content: oklch(98% 0.015 12.422);
+  --radius-selector: 0.375rem;
+  --radius-field: 0.375rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.21875rem;
+  --size-field: 0.21875rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+/* Dark mode is the data-attribute boot.js already sets before first paint, so a theme is
+   a token swap rather than a parallel set of classes. */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+/* The console's equivalent of LiveView's phx-*-loading: app.js puts `is-busy` on a
+   control while a command is in flight, so a slow save looks deliberate rather than
+   frozen. */
+@custom-variant busy (.is-busy&, .is-busy &);
+
+/* ------------------------------------------------------- micro-interactions
+
+   Buttons only. A radio is a state control, not an action: pressing one must not shrink,
+   dim or otherwise behave like a button, and the label that wraps it is part of the
+   control's hit area rather than a button of its own. `:has()` is what keeps those labels
+   out — they are selected by the input they contain, not by a class somebody has to
+   remember to leave off. */
+button,
+[role="button"],
+.btn,
+input[type="submit"],
+input[type="button"],
+a.btn {
+  transition: transform 0.12s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.12s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.15s ease,
+    border-color 0.15s ease, opacity 0.15s ease;
+  user-select: none;
+}
+
+button:active:not(:disabled),
+[role="button"]:active:not(:disabled),
+.btn:active:not(:disabled),
+input[type="submit"]:active:not(:disabled),
+input[type="button"]:active:not(:disabled),
+a.btn:active:not(:disabled) {
+  transform: scale(0.96) translateY(1px) !important;
+  filter: brightness(0.94);
+}
+
+/* Checkboxes, radios and their labels keep the plain colour transition and nothing else —
+   no press animation, no brightness shift, and text stays selectable so a label can be
+   read and copied like any other text. The payment-type radios are the reason. */
+input[type="checkbox"],
+input[type="radio"],
+label:has(input[type="checkbox"]),
+label:has(input[type="radio"]) {
+  transform: none !important;
+  filter: none !important;
+  user-select: auto;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  cursor: pointer;
+}
+
+button:focus-visible,
+[role="button"]:focus-visible,
+.btn:focus-visible,
+a.btn:focus-visible {
+  outline: 2px solid oklch(55% 0.15 260);
+  outline-offset: 2px;
+}
+
+/* The shell toggles panes and menus with the `hidden` attribute while the same elements
+   carry display classes like `flex`. A class beats the UA stylesheet, so without this the
+   attribute stops meaning anything — this is not a nicety, it is what keeps `hidden`
+   working at all. */
+[hidden] {
+  display: none !important;
+}
+
+/* Only the active pane is in the layout. showPane() owns the class; this is the rule that
+   makes it mean something, and it belongs with the shell rather than with any one pane. */
+.pane {
+  display: none;
+}
+
+.pane.is-active {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* The sidebar's rows. showPane() toggles `is-active`, so the state has to live in a
+   stylesheet rather than in the markup — these are the same three tokens the web app's
+   nav uses, written as plain CSS because a class is what the JS has to work with. */
+.nav-item {
+  color: color-mix(in oklch, var(--color-base-content) 60%, transparent);
+}
+
+.nav-item:hover {
+  background-color: var(--color-base-200);
+  color: var(--color-base-content);
+}
+
+.nav-item.is-active {
+  background-color: var(--color-base-200);
+  color: var(--color-base-content);
+  font-weight: 500;
+}
+
+/* A command in flight. Same treatment the web app gives a LiveView round trip. */
+.is-busy {
+  opacity: 0.7;
+  transform: scale(0.98);
+  pointer-events: none;
+  cursor: wait;
+}
