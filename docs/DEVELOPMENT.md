@@ -14,9 +14,33 @@ deliberately mentions none of this.
       libayatana-appindicator3-dev librsvg2-dev patchelf libxdo-dev libssl-dev
   ```
 
-There is **no Node/npm step**. The frontend is three static files (`index.html`,
-`styles.css`, `app.js`, plus `theme.css` and `boot.js`) served straight from
-`desktop/frontend`, so there is no bundler, no `package.json`, and nothing to install.
+There is still **no Node/npm step** — no `package.json`, no `node_modules`, nothing to
+`npm install`. The frontend is static files served straight from `desktop/frontend`.
+
+One of them is generated. `desktop/assets/css/app.css` is the stylesheet source — the type
+scale, both daisyUI themes, the icon plugin — and it compiles to
+`desktop/frontend/tailwind.css` with the Tailwind **standalone binary**: a single
+executable with a JS runtime inside it, fetched on demand into the gitignored
+`tools/bin/`. daisyUI and the icon set are vendored under `desktop/assets/vendor`, so that
+binary is the only thing ever downloaded.
+
+```sh
+./tools/build-css.sh          # compile; fetches the binary the first time
+./tools/build-css.sh --watch  # recompile as you edit
+```
+
+**Re-run it after editing `app.css`, `index.html` or `app.js`.** Tailwind only emits the
+classes it can see used, and it scans those last two — a class that only exists in a
+string built at runtime (`"badge-" + kind`) is invisible to it and renders unstyled with
+no error. Write class names out in full.
+
+The compiled file **is committed**, because `cargo build` and `cargo test` do not run
+Tauri's `beforeBuildCommand`: if it were generated-only, every plain cargo build would
+produce an unstyled app. `build-release.sh` recompiles it minified before bundling, so a
+release cannot ship a stale one.
+
+`theme.css` and `styles.css` are not part of that system. They are the printed invoice —
+its own paper palette, deliberately not themed — and nothing on screen should use them.
 
 ## Running
 
