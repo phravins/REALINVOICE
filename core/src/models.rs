@@ -296,3 +296,43 @@ pub struct PaymentMix {
     pub invoice_count: i64,
     pub grand_total: f64,
 }
+
+/// What a sign-in attempt came to.
+///
+/// A locked-out attempt is deliberately its own answer rather than an error: the screen
+/// has to say something different, and a caller that cannot tell the two apart would show
+/// "wrong password" to somebody whose password is right.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LoginOutcome {
+    /// Credentials matched.
+    Ok(User),
+    /// No such user, or the wrong password. One answer for both, so the screen cannot be
+    /// used to find out which accounts exist.
+    Invalid,
+    /// Too many recent failures for this username. The password was not checked.
+    LockedOut(Lockout),
+}
+
+/// How long a username is shut out for, and why.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Lockout {
+    /// Failed attempts inside the window.
+    pub failures: i64,
+    /// How many more are allowed before a lockout, which is zero here by definition.
+    /// Present so the screen can warn on the way to a lockout as well as after one.
+    pub remaining: i64,
+    /// Seconds until the oldest failure ages out and an attempt is allowed again.
+    pub retry_after_seconds: i64,
+}
+
+/// One recorded sign-in attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoginAttempt {
+    pub id: i64,
+    pub username: String,
+    pub attempted_at: String,
+    pub success: bool,
+    /// Turned away by the lockout without the password being checked. Logged, but not
+    /// counted towards the limit.
+    pub refused: bool,
+}

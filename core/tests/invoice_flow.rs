@@ -2,8 +2,8 @@
 //! reopened SQLite file with its lines and its `sync_queue` rows intact.
 
 use realinvoice_core::{
-    seed, CoreError, DateRange, Db, InvoiceFilter, ItemFilter, NewCustomer, NewInvoice,
-    NewInvoiceLine, NewItem, NewUser, Role, SyncBatch, User,
+    seed, CoreError, DateRange, Db, InvoiceFilter, ItemFilter, LoginOutcome, NewCustomer,
+    NewInvoice, NewInvoiceLine, NewItem, NewUser, Role, SyncBatch, User,
 };
 
 fn seeded_db() -> Db {
@@ -734,7 +734,8 @@ fn a_fresh_installation_has_no_accounts_at_all() {
     assert_eq!(db.count_users().unwrap(), 0);
     assert!(db.list_users().unwrap().is_empty());
     assert!(db.find_user("admin").unwrap().is_none(), "no default account exists");
-    assert!(db.verify_login("admin", "admin").unwrap().is_none());
+    let mut db = db;
+    assert_eq!(db.attempt_login("admin", "admin").unwrap(), LoginOutcome::Invalid);
 }
 
 #[test]
@@ -744,12 +745,14 @@ fn the_account_created_at_setup_can_sign_in() {
     assert_eq!(created.role, Role::Owner);
     assert_eq!(db.count_users().unwrap(), 1, "the app is now set up");
 
-    let signed_in = db.verify_login("priya", "counter-top-2026").unwrap().expect("sign-in");
-    assert_eq!(signed_in, created);
+    assert_eq!(
+        db.attempt_login("priya", "counter-top-2026").unwrap(),
+        LoginOutcome::Ok(created.clone())
+    );
 
     // Case-insensitive username, exact password.
-    assert!(db.verify_login("PRIYA", "counter-top-2026").unwrap().is_some());
-    assert!(db.verify_login("priya", "COUNTER-TOP-2026").unwrap().is_none());
+    assert!(matches!(db.attempt_login("PRIYA", "counter-top-2026").unwrap(), LoginOutcome::Ok(_)));
+    assert_eq!(db.attempt_login("priya", "COUNTER-TOP-2026").unwrap(), LoginOutcome::Invalid);
 }
 
 #[test]
@@ -757,9 +760,9 @@ fn a_wrong_password_or_unknown_user_both_return_none() {
     let mut db = Db::open_in_memory().unwrap();
     owner(&mut db);
 
-    assert!(db.verify_login("priya", "not the password").unwrap().is_none());
-    assert!(db.verify_login("nobody", "whatever").unwrap().is_none());
-    assert!(db.verify_login("", "").unwrap().is_none());
+    assert_eq!(db.attempt_login("priya", "not the password").unwrap(), LoginOutcome::Invalid);
+    assert_eq!(db.attempt_login("nobody", "whatever").unwrap(), LoginOutcome::Invalid);
+    assert_eq!(db.attempt_login("", "").unwrap(), LoginOutcome::Invalid);
 }
 
 #[test]
@@ -797,7 +800,7 @@ fn an_owner_can_add_staff_and_duplicates_are_refused() {
         .unwrap();
     assert_eq!(cashier.username, "meena", "usernames normalise to lowercase");
     assert_eq!(cashier.role, Role::Cashier);
-    assert!(db.verify_login("MEENA", "counter-password").unwrap().is_some());
+    assert!(matches!(db.attempt_login("MEENA", "counter-password").unwrap(), LoginOutcome::Ok(_)));
 
     let duplicate = db.create_user(
         &NewUser {
@@ -1275,4 +1278,194 @@ fn the_wire_format_carries_each_record_as_an_object() {
     let json = serde_json::to_string(&batch).unwrap();
     let parsed: SyncBatch = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed, batch);
+}
+
+// ------------------------------------------------------------ login rate limit
+
+/// An owner plus a cashier, so a lockout on one can be shown not to touch the other.
+fn two_accounts(db: &mut Db) {
+    owner(db);
+    db.create_user(
+        &NewUser { username: "meena".into(), display_name: "Meena R".into(), role: Role::Cashier },
+        "counter-password",
+    )
+    .unwrap();
+}
+
+#[test]
+fn five_failures_lock_the_account_and_the_sixth_is_refused_even_when_correct() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    for attempt in 1..=4 {
+        assert_eq!(
+            db.attempt_login("priya", "wrong").unwrap(),
+            LoginOutcome::Invalid,
+            "attempt {attempt} should still be allowed through to the password check"
+        );
+        assert!(db.lockout_for("priya").unwrap().is_none(), "not locked yet at {attempt}");
+    }
+
+    // The fifth failure is the one that trips it.
+    assert_eq!(db.attempt_login("priya", "wrong").unwrap(), LoginOutcome::Invalid);
+
+    let lockout = db.lockout_for("priya").unwrap().expect("locked out after five");
+    assert_eq!(lockout.failures, 5);
+    assert_eq!(lockout.remaining, 0);
+    assert!(lockout.retry_after_seconds > 0);
+    assert!(lockout.retry_after_seconds <= 15 * 60);
+
+    // The sixth attempt is refused **with the right password**. This is the whole point:
+    // a correct credential does not get you past the limiter.
+    match db.attempt_login("priya", "counter-top-2026").unwrap() {
+        LoginOutcome::LockedOut(l) => assert!(l.retry_after_seconds > 0),
+        other => panic!("expected a lockout, got {other:?}"),
+    }
+}
+
+#[test]
+fn one_accounts_lockout_does_not_touch_another() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    for _ in 0..5 {
+        db.attempt_login("priya", "wrong").unwrap();
+    }
+    assert!(db.lockout_for("priya").unwrap().is_some());
+
+    // The cashier is unaffected, and can still sign in normally.
+    assert!(db.lockout_for("meena").unwrap().is_none());
+    assert!(matches!(db.attempt_login("meena", "counter-password").unwrap(), LoginOutcome::Ok(_)));
+
+    // And a username that does not exist keeps its own count, so one locked account
+    // cannot shut the whole machine.
+    assert!(db.lockout_for("nobody").unwrap().is_none());
+    assert_eq!(db.attempt_login("nobody", "whatever").unwrap(), LoginOutcome::Invalid);
+}
+
+#[test]
+fn the_limit_counts_one_username_however_it_is_typed() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    // If the limiter keyed on the raw string, these would be five buckets of one rather
+    // than one bucket of five, and the limit would be trivially bypassed.
+    for spelling in ["priya", "PRIYA", "  priya  ", "Priya", "pRiYa"] {
+        assert_eq!(db.attempt_login(spelling, "wrong").unwrap(), LoginOutcome::Invalid);
+    }
+
+    assert_eq!(db.recent_failed_logins("priya").unwrap(), 5);
+    assert!(db.lockout_for("PRIYA").unwrap().is_some(), "checked under any spelling too");
+}
+
+#[test]
+fn a_username_that_does_not_exist_locks_out_on_the_same_terms() {
+    // Otherwise the lockout itself becomes an oracle: a real account would eventually
+    // start answering "locked", and an imaginary one never would.
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    for _ in 0..5 {
+        assert_eq!(db.attempt_login("ghost", "wrong").unwrap(), LoginOutcome::Invalid);
+    }
+
+    let lockout = db.lockout_for("ghost").unwrap().expect("an unknown username locks out too");
+    assert_eq!(lockout.failures, 5);
+    assert!(matches!(db.attempt_login("ghost", "wrong").unwrap(), LoginOutcome::LockedOut(_)));
+}
+
+#[test]
+fn a_success_does_not_wipe_earlier_failures() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    for _ in 0..4 {
+        db.attempt_login("priya", "wrong").unwrap();
+    }
+    assert_eq!(db.recent_failed_logins("priya").unwrap(), 4);
+
+    // A correct sign-in in the middle is allowed — four is under the limit — but it must
+    // not reset the count. If it did, anybody who knew one password could clear the
+    // limiter at will and brute-force the rest of the window indefinitely.
+    assert!(matches!(db.attempt_login("priya", "counter-top-2026").unwrap(), LoginOutcome::Ok(_)));
+    assert_eq!(db.recent_failed_logins("priya").unwrap(), 4, "failures survive a success");
+
+    // So the very next failure is the fifth, and it locks.
+    db.attempt_login("priya", "wrong").unwrap();
+    assert!(db.lockout_for("priya").unwrap().is_some());
+}
+
+#[test]
+fn attempting_while_locked_out_does_not_extend_the_lockout() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    for _ in 0..5 {
+        db.attempt_login("priya", "wrong").unwrap();
+    }
+    let first = db.lockout_for("priya").unwrap().unwrap();
+
+    // Hammering a locked account must not keep pushing the deadline out — that would turn
+    // the rate limit into a way of keeping the real owner locked out forever.
+    for _ in 0..10 {
+        assert!(matches!(db.attempt_login("priya", "wrong").unwrap(), LoginOutcome::LockedOut(_)));
+    }
+    let later = db.lockout_for("priya").unwrap().unwrap();
+
+    assert_eq!(later.failures, 5, "refused attempts are logged but do not count");
+    assert!(
+        later.retry_after_seconds <= first.retry_after_seconds,
+        "the deadline moved closer, never further away"
+    );
+}
+
+#[test]
+fn failures_age_out_of_the_window() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    for _ in 0..5 {
+        db.attempt_login("priya", "wrong").unwrap();
+    }
+    assert!(db.lockout_for("priya").unwrap().is_some());
+
+    // Rather than sleeping fifteen minutes, backdate the recorded attempts past the
+    // window — which is exactly what the passage of time does to them.
+    db.backdate_login_attempts_for_test("priya", 16).unwrap();
+
+    assert_eq!(db.recent_failed_logins("priya").unwrap(), 0, "outside the window");
+    assert!(db.lockout_for("priya").unwrap().is_none(), "the lock lifts on its own");
+    assert!(matches!(db.attempt_login("priya", "counter-top-2026").unwrap(), LoginOutcome::Ok(_)));
+
+    // The rows are still there — aged out of the window, not deleted.
+    assert!(db.login_attempts("priya").unwrap().len() > 5);
+}
+
+#[test]
+fn every_attempt_is_recorded_and_no_secret_is() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    db.attempt_login("priya", "counter-top-2026").unwrap();
+    db.attempt_login("priya", "wrong").unwrap();
+
+    let log = db.login_attempts("priya").unwrap();
+    assert_eq!(log.len(), 2, "success and failure alike");
+    assert!(log[0].success);
+    assert!(!log[1].success);
+    assert_eq!(log[0].username, "priya", "stored normalised");
+    assert!(log[0].attempted_at.len() >= 19);
+
+    // A failed-login log that recorded what was typed would be a second place passwords
+    // leak from — including the near-misses, which are the most valuable kind.
+    let serialized = serde_json::to_string(&log).unwrap();
+    assert!(!serialized.contains("counter-top-2026"), "{serialized}");
+    assert!(!serialized.contains("wrong"), "{serialized}");
+    assert!(!serialized.contains("$2"), "no hash either");
+
+    // And none of it is queued for the back office.
+    let queued: String =
+        db.pending_sync_rows().unwrap().iter().map(|r| r.payload_json.clone()).collect();
+    assert!(!queued.contains("login_attempt"));
+    assert!(!queued.contains("priya"));
 }

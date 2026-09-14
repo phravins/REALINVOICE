@@ -31,7 +31,7 @@ pub mod schema;
 pub mod seed;
 pub mod sync;
 
-pub use db::Db;
+pub use db::{normalise_username, Db, LOGIN_WINDOW_MINUTES, MAX_FAILED_LOGINS};
 pub use error::{CoreError, Result};
 pub use gst::{compute_totals, InvoiceTotals, TaxSplit, TaxableLine, DEFAULT_HOME_STATE};
 pub use models::*;

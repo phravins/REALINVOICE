@@ -13,6 +13,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("001_init", include_str!("../migrations/001_init.sql")),
     ("002_users", include_str!("../migrations/002_users.sql")),
     ("003_settings", include_str!("../migrations/003_settings.sql")),
+    ("004_login_attempts", include_str!("../migrations/004_login_attempts.sql")),
 ];
 
 /// Applies every migration that hasn't run yet against `conn`.

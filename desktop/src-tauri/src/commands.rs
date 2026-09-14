@@ -8,8 +8,9 @@
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use realinvoice_core::{
     auth, gst, sync, Customer, DailyTotal, DateRange, Invoice, InvoiceDetail, InvoiceFilter,
-    InvoiceLine, InvoiceSummary, Item, ItemFilter, NewCustomer, NewInvoice, NewInvoiceLine,
-    NewItem, NewUser, PaymentMix, Role, SalesSummary, SyncStatus, TopItem, User,
+    InvoiceLine, InvoiceSummary, Item, ItemFilter, Lockout, LoginOutcome, NewCustomer, NewInvoice,
+    NewInvoiceLine, NewItem, NewUser, PaymentMix, Role, SalesSummary, SyncStatus, TopItem, User,
+    MAX_FAILED_LOGINS,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -41,23 +42,106 @@ pub fn auth_status(state: State<'_, AppState>) -> Result<AuthStatus, String> {
     })
 }
 
-/// Signs in. One message for a bad username and a bad password alike, so the screen
-/// cannot be used to find out which accounts exist.
+/// Why a sign-in did not work, in a shape the screen can act on.
+///
+/// A plain string would be enough to print but not enough to count down with, and the
+/// locked-out case has to look different from a wrong password — telling somebody their
+/// password is wrong when it is right, because the account is shut out, is the failure
+/// this whole feature exists to avoid.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoginError {
+    /// `"invalid"`, `"locked_out"` or `"error"`.
+    pub kind: String,
+    /// What to show. Already in the words a cashier should read.
+    pub message: String,
+    /// Seconds until another attempt is allowed. Only on `locked_out`.
+    pub retry_after_seconds: Option<i64>,
+    /// Attempts left before a lockout. Only on `invalid`, and only once it is worth
+    /// warning about — being told "4 left" on a first typo is noise.
+    pub attempts_remaining: Option<i64>,
+}
+
+impl LoginError {
+    /// Wrong username or wrong password: one message for both, so the screen cannot be
+    /// used to find out which accounts exist.
+    fn invalid(failures: i64) -> Self {
+        let remaining = (MAX_FAILED_LOGINS - failures).max(0);
+        // Warn only when it is nearly spent. A warning on every typo trains people to
+        // ignore it, and the one that matters is the last.
+        let attempts_remaining = (remaining <= 2 && remaining > 0).then_some(remaining);
+
+        let message = match attempts_remaining {
+            Some(1) => "Incorrect username or password. 1 attempt left before this \
+                        account is locked for 15 minutes."
+                .to_string(),
+            Some(left) => format!(
+                "Incorrect username or password. {left} attempts left before this \
+                 account is locked for 15 minutes."
+            ),
+            None => "Incorrect username or password.".to_string(),
+        };
+
+        Self { kind: "invalid".to_string(), message, retry_after_seconds: None, attempts_remaining }
+    }
+
+    fn locked_out(lockout: &Lockout) -> Self {
+        Self {
+            kind: "locked_out".to_string(),
+            message: format!(
+                "Too many failed attempts — try again in {}.",
+                describe_wait(lockout.retry_after_seconds)
+            ),
+            retry_after_seconds: Some(lockout.retry_after_seconds),
+            attempts_remaining: Some(0),
+        }
+    }
+}
+
+impl From<realinvoice_core::CoreError> for LoginError {
+    fn from(err: realinvoice_core::CoreError) -> Self {
+        Self {
+            kind: "error".to_string(),
+            message: err.to_string(),
+            retry_after_seconds: None,
+            attempts_remaining: None,
+        }
+    }
+}
+
+/// Seconds as something a person would say. Rounded up, because being told "1 minute" and
+/// still being refused at 55 seconds reads as the app lying.
+pub fn describe_wait(seconds: i64) -> String {
+    if seconds <= 60 {
+        return "less than a minute".to_string();
+    }
+    let minutes = (seconds + 59) / 60;
+    if minutes == 1 {
+        "about a minute".to_string()
+    } else {
+        format!("{minutes} minutes")
+    }
+}
+
+/// Signs in, subject to core's rate limit. One message for a bad username and a bad
+/// password alike, so the screen cannot be used to find out which accounts exist.
 #[tauri::command]
 pub fn login(
     username: String,
     password: String,
     state: State<'_, AppState>,
-) -> Result<Session, String> {
-    let found = state.db().verify_login(&username, &password).map_err(|e| e.to_string())?;
+) -> Result<Session, LoginError> {
+    let outcome = state.db().attempt_login(&username, &password).map_err(LoginError::from)?;
 
-    match found {
-        Some(user) => {
+    match outcome {
+        LoginOutcome::Ok(user) => {
             let session = Session { token: auth::new_session_token(), user };
             state.begin_session(session.clone());
             Ok(session)
         }
-        None => Err("Incorrect username or password.".to_string()),
+        LoginOutcome::Invalid => {
+            Err(LoginError::invalid(state.db().recent_failed_logins(&username).unwrap_or(0)))
+        }
+        LoginOutcome::LockedOut(lockout) => Err(LoginError::locked_out(&lockout)),
     }
 }
 

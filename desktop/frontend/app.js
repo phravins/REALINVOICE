@@ -998,6 +998,7 @@
   /** `isError` separates a failure from a plain notice like "Signed out." */
   function showLogin(message, isError) {
     user = null;
+    clearLockout();
     $("shell").hidden = true;
     $("setup-screen").hidden = true;
     $("login-screen").hidden = false;
@@ -1031,6 +1032,65 @@
     $("mobile-input").focus();
   }
 
+  /** Ticks the lockout countdown down. Cleared whenever the screen changes state. */
+  var lockoutTimer = null;
+
+  /** Which username is shut out. A lockout is per-account, and so is this. */
+  var lockedUsername = null;
+
+  function clearLockout() {
+    if (lockoutTimer) clearInterval(lockoutTimer);
+    lockoutTimer = null;
+    lockedUsername = null;
+    $("login-pass").disabled = false;
+    $("login-submit").disabled = false;
+  }
+
+  /** `95` → `1:35`. Seconds matter here: a countdown that only moves once a minute
+   *  looks stuck, and somebody waiting out a lockout is watching it. */
+  function countdown(seconds) {
+    var mins = Math.floor(seconds / 60);
+    var secs = seconds % 60;
+    return mins + ":" + (secs < 10 ? "0" : "") + secs;
+  }
+
+  /**
+   * The locked-out state. Deliberately not the generic error line: the account is shut,
+   * the password on screen may well be right, and saying "incorrect" would send somebody
+   * hunting for a mistake they have not made.
+   */
+  function showLockout(username, seconds) {
+    clearLockout();
+    lockedUsername = username;
+    // The username box stays usable on purpose. One account being shut out must not stop
+    // a colleague signing in at the same till — the lockout is on a name, not on the
+    // machine, and disabling the whole form would turn one person's typo into everybody's
+    // problem.
+    $("login-pass").disabled = true;
+    $("login-submit").disabled = true;
+    $("login-pass").value = "";
+
+    var left = Math.max(0, Math.ceil(seconds));
+
+    function paint() {
+      if (left <= 0) {
+        clearLockout();
+        setMsg("login-msg", "You can try again now.", false);
+        $("login-user").focus();
+        return;
+      }
+      setMsg(
+        "login-msg",
+        "Too many failed attempts. Try again in " + countdown(left) + ".",
+        true
+      );
+      left -= 1;
+    }
+
+    paint();
+    lockoutTimer = setInterval(paint, 1000);
+  }
+
   function signIn(event) {
     if (event) event.preventDefault();
     if (!invoke) return bridgeMissing("login");
@@ -1048,7 +1108,7 @@
 
     invoke("login", { username: username, password: password })
       .then(function (session) {
-        button.disabled = false;
+        clearLockout();
         user = session.user;
         setMsg("login-msg", "", false);
         newTransaction();
@@ -1056,6 +1116,13 @@
         status("Signed in as " + user.display_name + ".");
       })
       .catch(function (err) {
+        // The backend answers with a shape, not just a string: a lockout has to look
+        // different from a wrong password, and it carries how long is left.
+        if (err && err.kind === "locked_out") {
+          showLockout(username.toLowerCase(), err.retry_after_seconds || 0);
+          return;
+        }
+
         button.disabled = false;
         $("login-pass").value = "";
         setMsg("login-msg", errText(err), true);
@@ -1103,6 +1170,16 @@
   }
 
   $("login-form").addEventListener("submit", signIn);
+
+  // Typing a different username lifts the display: that account is not the locked one.
+  // The limiter in core is still the thing that decides — this only stops the screen
+  // showing one account's lockout while somebody types another's name.
+  $("login-user").addEventListener("input", function () {
+    if (lockedUsername && $("login-user").value.trim().toLowerCase() !== lockedUsername) {
+      clearLockout();
+      setMsg("login-msg", "", false);
+    }
+  });
 
   /* ------------------------------------------------------------- first-run setup */
 

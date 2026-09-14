@@ -123,8 +123,14 @@ impl Db {
     ///
     /// The hash is always verified, even when no such user exists, so the call takes the
     /// same time either way and cannot be used to enumerate accounts.
-    pub fn verify_login(&self, username: &str, password: &str) -> Result<Option<User>> {
-        let username = username.trim().to_lowercase();
+    /// The raw credential check, with **no** rate limiting.
+    ///
+    /// Private on purpose. [`Db::attempt_login`] is the way in; a caller that could reach
+    /// this directly would skip the limiter, which is the whole thing being defended
+    /// against. Kept separate rather than inlined so the timing-equalising dummy verify
+    /// below stays one idea in one place.
+    fn verify_login(&self, username: &str, password: &str) -> Result<Option<User>> {
+        let username = normalise_username(username);
         let found: Option<(i64, String)> = self
             .conn
             .query_row(
@@ -149,6 +155,162 @@ impl Db {
                 Ok(None)
             }
         }
+    }
+
+    // ------------------------------------------------------------ sign-in limits
+
+    /// Signs in, subject to the rate limit. **The only way to sign in.**
+    ///
+    /// [`Db::verify_login`] is deliberately not public: a caller that reached the raw
+    /// credential check directly would silently skip the limit, and that is exactly the
+    /// bug this exists to prevent. Every runtime — desktop, web, TUI — goes through here
+    /// and gets the same behaviour without reimplementing it.
+    ///
+    /// The order matters. The lockout is checked *before* the password, so a locked-out
+    /// username costs no bcrypt verification at all. That also means a locked-out attempt
+    /// returns noticeably faster than a normal one, which reveals that *this username* is
+    /// locked out — but not whether it exists, because a username nobody has registered
+    /// locks out on exactly the same terms.
+    pub fn attempt_login(&mut self, username: &str, password: &str) -> Result<LoginOutcome> {
+        let key = normalise_username(username);
+
+        let lockout = self.lockout_for(&key)?;
+        if let Some(lockout) = lockout {
+            // Recorded as *refused*, which is logged but not counted. The row is the
+            // audit trail of somebody hammering a locked account; counting it would let an
+            // attacker keep a username locked out forever by attempting it while shut out,
+            // turning the rate limit into a denial of service against the real owner.
+            self.record_login_attempt(&key, false, true)?;
+            return Ok(LoginOutcome::LockedOut(lockout));
+        }
+
+        let found = self.verify_login(&key, password)?;
+        self.record_login_attempt(&key, found.is_some(), false)?;
+
+        Ok(match found {
+            Some(user) => LoginOutcome::Ok(user),
+            None => LoginOutcome::Invalid,
+        })
+    }
+
+    /// Whether this username is currently shut out, and for how much longer.
+    ///
+    /// Counts failures inside the window only. A success does **not** clear them: letting
+    /// one correct sign-in wipe the slate would mean an attacker who knows any one
+    /// password on the machine could reset the limiter for every other account at will.
+    /// Failures age out on their own instead.
+    pub fn lockout_for(&self, username: &str) -> Result<Option<Lockout>> {
+        let key = normalise_username(username);
+        let window = format!("-{LOGIN_WINDOW_MINUTES} minutes");
+
+        let (failures, oldest): (i64, Option<String>) = self.conn.query_row(
+            "SELECT COUNT(*), MIN(attempted_at)
+               FROM login_attempts
+              WHERE username = ?1
+                AND success = 0
+                AND refused = 0
+                AND attempted_at >= datetime('now', ?2)",
+            params![key, window],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        if failures < MAX_FAILED_LOGINS {
+            return Ok(None);
+        }
+
+        // The lock lifts when the oldest failure in the window ages out, not a fixed
+        // period from now — otherwise every fresh attempt would push the deadline back and
+        // the lockout would never end.
+        let retry_after_seconds = match oldest {
+            Some(oldest) => self
+                .conn
+                .query_row(
+                    "SELECT CAST(strftime('%s', ?1, ?2) AS INTEGER)
+                            - CAST(strftime('%s', 'now') AS INTEGER)",
+                    params![oldest, format!("+{LOGIN_WINDOW_MINUTES} minutes")],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                .max(0),
+            None => 0,
+        };
+
+        Ok(Some(Lockout { failures, remaining: 0, retry_after_seconds }))
+    }
+
+    /// Records an attempt. Every attempt is recorded, for usernames that exist and
+    /// usernames that do not.
+    ///
+    /// `refused` marks an attempt the lockout turned away before the password was
+    /// checked. Those are kept as a trail of somebody hammering a shut account, and
+    /// deliberately do not count towards the limit.
+    pub fn record_login_attempt(
+        &mut self,
+        username: &str,
+        success: bool,
+        refused: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO login_attempts (username, success, refused) VALUES (?1, ?2, ?3)",
+            params![
+                normalise_username(username),
+                if success { 1 } else { 0 },
+                if refused { 1 } else { 0 }
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Failed attempts for this username inside the window. Used by the screen to warn on
+    /// the way to a lockout, and by the tests.
+    pub fn recent_failed_logins(&self, username: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*)
+               FROM login_attempts
+              WHERE username = ?1
+                AND success = 0
+                AND refused = 0
+                AND attempted_at >= datetime('now', ?2)",
+            params![normalise_username(username), format!("-{LOGIN_WINDOW_MINUTES} minutes")],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Ages this username's recorded attempts by `minutes`, as the clock would.
+    ///
+    /// Test-only, and named so nobody reaches for it by accident. It exists because the
+    /// alternative — proving the window expires by waiting fifteen minutes — is a test
+    /// nobody will run, and a rate limit whose expiry is never tested is a rate limit that
+    /// might never expire.
+    #[doc(hidden)]
+    pub fn backdate_login_attempts_for_test(&mut self, username: &str, minutes: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE login_attempts
+                SET attempted_at = datetime(attempted_at, ?2)
+              WHERE username = ?1",
+            params![normalise_username(username), format!("-{minutes} minutes")],
+        )?;
+        Ok(())
+    }
+
+    /// Every recorded attempt, oldest first. For tests and any future audit screen.
+    pub fn login_attempts(&self, username: &str) -> Result<Vec<LoginAttempt>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, username, attempted_at, success, refused
+               FROM login_attempts
+              WHERE username = ?1
+              ORDER BY id",
+        )?;
+        let rows = stmt.query_map([normalise_username(username)], |row| {
+            Ok(LoginAttempt {
+                id: row.get(0)?,
+                username: row.get(1)?,
+                attempted_at: row.get(2)?,
+                success: row.get::<_, i64>(3)? != 0,
+                refused: row.get::<_, i64>(4)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn get_user(&self, id: i64) -> Result<Option<User>> {
@@ -979,6 +1141,21 @@ fn enqueue<T: Serialize>(
         params![table_name, row_id, op.as_str(), payload_json],
     )?;
     Ok(())
+}
+
+/// Failed attempts inside the window before a username is shut out.
+pub const MAX_FAILED_LOGINS: i64 = 5;
+
+/// How long failures are remembered for, in minutes. Attempts age out of this window on
+/// their own; nothing resets it early.
+pub const LOGIN_WINDOW_MINUTES: i64 = 15;
+
+/// One spelling of a username, used by the credential check and the limiter alike.
+///
+/// Shared deliberately. If the two disagreed, "PRIYA" and "priya" would be one account to
+/// sign in as and two buckets to count against, and five attempts each would be ten.
+pub fn normalise_username(username: &str) -> String {
+    username.trim().to_lowercase()
 }
 
 /// A real bcrypt hash of a value nobody knows, verified against when no such user

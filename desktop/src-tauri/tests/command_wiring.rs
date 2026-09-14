@@ -6,13 +6,14 @@
 //! payload survives the trip into core unchanged.
 
 use realinvoice_core::{
-    seed, DateRange, InvoiceFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewUser, Role, User,
+    seed, DateRange, InvoiceFilter, LoginOutcome, NewCustomer, NewInvoice, NewInvoiceLine, NewUser,
+    Role, User,
 };
 use realinvoice_desktop_lib::commands::{
     check_expected_totals_for_test as check_expected_totals, check_item_for_test as check_item,
-    quote, require_owner_for_test as require_owner, require_session_for_test as require_session,
-    ExpectedTotals, NewCustomerPayload, NewInvoicePayload, NewItemPayload, NewLinePayload,
-    QuoteLinePayload,
+    describe_wait, quote, require_owner_for_test as require_owner,
+    require_session_for_test as require_session, ExpectedTotals, NewCustomerPayload,
+    NewInvoicePayload, NewItemPayload, NewLinePayload, QuoteLinePayload,
 };
 use realinvoice_desktop_lib::state::{AppState, Session, DB_FILE_NAME};
 
@@ -689,7 +690,7 @@ fn a_fresh_console_has_no_account_and_asks_to_be_set_up() {
     // Demo customers and items are seeded; an account is not. `auth_status` reports this
     // as `needs_setup`, and the shell shows "Create your account" instead of the gate.
     assert_eq!(state.db().count_users().unwrap(), 0);
-    assert!(state.db().verify_login("admin", "admin").unwrap().is_none());
+    assert_eq!(state.db().attempt_login("admin", "admin").unwrap(), LoginOutcome::Invalid);
     assert!(state.session().is_none());
 }
 
@@ -704,7 +705,10 @@ fn a_restart_keeps_the_account_and_does_not_ask_to_set_up_again() {
 
     let restarted = AppState::new(path).unwrap();
     assert_eq!(restarted.db().count_users().unwrap(), 1, "setup happens once");
-    assert!(restarted.db().verify_login("priya", "counter-top-2026").unwrap().is_some());
+    assert!(matches!(
+        restarted.db().attempt_login("priya", "counter-top-2026").unwrap(),
+        LoginOutcome::Ok(_)
+    ));
     assert!(restarted.session().is_none(), "a restart signs everybody out");
 }
 
@@ -910,4 +914,81 @@ fn analytics_figures_come_from_core_and_reconcile() {
     assert_eq!(days.iter().map(|d| d.grand_total).sum::<f64>(), all.grand_total);
 
     assert!(!db.top_items(&DateRange::default(), 8).unwrap().is_empty());
+}
+
+// ------------------------------------------------------- login rate limiting
+
+#[test]
+fn the_lockout_wait_is_described_in_words_a_person_would_use() {
+    // Rounded up throughout: being told "1 minute" and still being refused at 55 seconds
+    // reads as the app lying.
+    assert_eq!(describe_wait(0), "less than a minute");
+    assert_eq!(describe_wait(45), "less than a minute");
+    assert_eq!(describe_wait(60), "less than a minute");
+    assert_eq!(describe_wait(61), "about a minute");
+    assert_eq!(describe_wait(90), "2 minutes");
+    assert_eq!(describe_wait(120), "2 minutes");
+    assert_eq!(describe_wait(121), "3 minutes");
+    assert_eq!(describe_wait(15 * 60), "15 minutes");
+}
+
+#[test]
+fn the_console_signs_in_through_the_rate_limited_path() {
+    let (_dir, state) = console_state();
+    set_up_owner(&state);
+
+    // Five failures through the same call the command makes.
+    for _ in 0..5 {
+        assert_eq!(state.db().attempt_login("priya", "wrong").unwrap(), LoginOutcome::Invalid);
+    }
+
+    // And the sixth is refused with the correct password. If the command layer had kept
+    // its own credential check, this is where that would show up.
+    assert!(matches!(
+        state.db().attempt_login("priya", "counter-top-2026").unwrap(),
+        LoginOutcome::LockedOut(_)
+    ));
+
+    // A different account on the same till is untouched.
+    state
+        .db()
+        .create_user(
+            &NewUser {
+                username: "meena".into(),
+                display_name: "Meena R".into(),
+                role: Role::Cashier,
+            },
+            "counter-password",
+        )
+        .unwrap();
+    assert!(matches!(
+        state.db().attempt_login("meena", "counter-password").unwrap(),
+        LoginOutcome::Ok(_)
+    ));
+}
+
+#[test]
+fn a_lockout_survives_restarting_the_app() {
+    // The limiter is rows in SQLite, not memory, so closing the app is not a way out of
+    // it. That is the obvious bypass to try.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(DB_FILE_NAME);
+
+    let first = AppState::new(path.clone()).unwrap();
+    set_up_owner(&first);
+    for _ in 0..5 {
+        first.db().attempt_login("priya", "wrong").unwrap();
+    }
+    assert!(first.db().lockout_for("priya").unwrap().is_some());
+    drop(first);
+
+    let restarted = AppState::new(path).unwrap();
+    assert!(
+        restarted.db().lockout_for("priya").unwrap().is_some(),
+        "a restart does not clear the lockout"
+    );
+    assert!(matches!(
+        restarted.db().attempt_login("priya", "counter-top-2026").unwrap(),
+        LoginOutcome::LockedOut(_)
+    ));
 }
