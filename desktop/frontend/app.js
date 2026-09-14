@@ -811,6 +811,12 @@
           (invoice.igst > 0 ? "Inter-state" : "Intra-state") +
           " · place of supply " + buyer.place_of_supply;
 
+        // Owner-only. The command refuses anyone else too — hiding the button is the
+        // courtesy, not the control.
+        $("credit-form").hidden = true;
+        $("d-credit").hidden = !canIssueCredits();
+        loadCreditHistory(invoice.id);
+
         $("history-list-card").hidden = true;
         $("history-detail").hidden = false;
         $("d-back").focus();
@@ -838,6 +844,9 @@
 
   function closeDetail() {
     openDetail = null;
+    creditable = [];
+    $("credit-form").hidden = true;
+    $("credit-history").hidden = true;
     $("history-detail").hidden = true;
     $("history-list-card").hidden = false;
     status("Invoice history.");
@@ -1741,13 +1750,22 @@
           return;
         }
 
+        // Net leads, because that is what was earned and what a return is filed on.
+        // Billed stays beside it: both are true, and a pane that showed only one would be
+        // answering a different question from the one asked.
         $("an-stats").innerHTML =
-          UI.statCard("hero-document-text", "Invoices", String(s.invoice_count)) +
-          UI.statCard("hero-banknotes", "Billed", rupees(s.grand_total),
-                      "including tax") +
-          UI.statCard("hero-credit-card", "Taxable value", rupees(s.subtotal)) +
-          UI.statCard("hero-check-circle", "Tax collected", rupees(s.tax_total),
-                      "CGST + SGST + IGST");
+          UI.statCard("hero-document-text", "Invoices", String(s.invoice_count),
+                      s.credit_note_count > 0
+                        ? s.credit_note_count + " credit note(s)"
+                        : null) +
+          UI.statCard("hero-banknotes", "Net earned", rupees(s.net_total),
+                      s.credited_total > 0
+                        ? rupees(s.grand_total) + " billed less " +
+                          rupees(s.credited_total) + " credited"
+                        : "including tax") +
+          UI.statCard("hero-credit-card", "Taxable value", rupees(s.net_subtotal)) +
+          UI.statCard("hero-check-circle", "Tax collected", rupees(s.net_tax),
+                      "CGST + SGST + IGST, net of credits");
 
         // Last 14 billed days: beyond that the bars are too narrow to read, and a till
         // looking at a year wants the table below, not 300 slivers.
@@ -1766,14 +1784,21 @@
           }
         );
 
+        // Slices are already net of credits. A payment type that has been fully refunded
+        // contributes nothing, and a donut cannot draw a negative slice, so anything at or
+        // below zero is left out rather than drawn wrong.
         $("an-payments").innerHTML = UI.donutChart(
-          report.payments.map(function (p) {
-            return {
-              label: p.payment_type.toUpperCase(),
-              value: p.grand_total,
-              display: rupees(p.grand_total),
-            };
-          }),
+          report.payments
+            .filter(function (p) {
+              return p.grand_total > 0;
+            })
+            .map(function (p) {
+              return {
+                label: p.payment_type.toUpperCase(),
+                value: p.grand_total,
+                display: rupees(p.grand_total),
+              };
+            }),
           String(s.invoice_count),
           s.invoice_count === 1 ? "invoice" : "invoices"
         );
@@ -1784,7 +1809,12 @@
               '<tr class="border-b border-base-300 text-sm last:border-0 hover:bg-base-200/60">' +
               '<td class="py-2 font-mono">' + escapeHtml(row.item_code) + "</td>" +
               '<td class="py-2">' + escapeHtml(row.description) + "</td>" +
-              '<td class="py-2 text-right font-mono tabular-nums">' + money(row.qty) + "</td>" +
+              '<td class="py-2 text-right font-mono tabular-nums">' + money(row.qty) +
+              (row.credited_qty > 0
+                ? '<span class="ml-1 text-2xs text-base-content/45">(−' +
+                  money(row.credited_qty) + ")</span>"
+                : "") +
+              "</td>" +
               '<td class="py-2 text-right font-mono tabular-nums">' + money(row.revenue) +
               "</td>" +
               "</tr>"
@@ -1792,7 +1822,14 @@
           })
           .join("");
 
-        status(s.invoice_count + " invoice(s) · " + rupees(s.grand_total) + " billed.");
+        status(
+          s.invoice_count + " invoice(s) · " + rupees(s.grand_total) + " billed" +
+            (s.credited_total > 0
+              ? " · " + rupees(s.credited_total) + " credited · " +
+                rupees(s.net_total) + " net"
+              : "") +
+            "."
+        );
       })
       .catch(function (err) {
         status("analytics failed: " + errText(err));
@@ -2066,6 +2103,228 @@
   $("conn-badge").addEventListener("click", function () {
     showPane("sync");
   });
+
+
+  /* ----------------------------------------------------------------- credit notes */
+
+  /** What is still creditable on the open invoice, as last loaded. */
+  var creditable = [];
+
+  /** Only an owner sees the action at all — and the command refuses anyone else. */
+  function canIssueCredits() {
+    return !!user && user.role === "owner";
+  }
+
+  /**
+   * The credit notes already against the open invoice, and what they net it to.
+   * Shown to everyone signed in: a cashier looking at a partly-returned invoice needs to
+   * know, or the figure on their screen is wrong.
+   */
+  function loadCreditHistory(invoiceId) {
+    if (!invoke) return;
+
+    invoke("credit_history", { invoiceId: invoiceId })
+      .then(function (history) {
+        var notes = history.notes || [];
+        $("credit-history").hidden = notes.length === 0;
+        if (!notes.length) return;
+
+        $("credit-list").innerHTML = notes
+          .map(function (entry) {
+            var note = entry.credit_note;
+            var lines = entry.lines
+              .map(function (line) {
+                var source = lineLabel(line.item_id);
+                return (
+                  '<tr class="border-b border-base-300 text-sm last:border-0">' +
+                  '<td class="py-2 font-mono">' + escapeHtml(source.code) + "</td>" +
+                  '<td class="py-2">' + escapeHtml(source.description) + "</td>" +
+                  '<td class="py-2 text-right font-mono tabular-nums">' + money(line.qty) +
+                  "</td>" +
+                  '<td class="py-2 text-right font-mono tabular-nums">' + money(line.rate) +
+                  "</td>" +
+                  '<td class="py-2 text-right font-mono tabular-nums">' +
+                  money(line.line_total) + "</td>" +
+                  "</tr>"
+                );
+              })
+              .join("");
+
+            return (
+              '<div class="mb-4 rounded-field border border-base-300 p-4 last:mb-0">' +
+              '<div class="flex flex-wrap items-baseline justify-between gap-3">' +
+              '<span class="font-mono text-sm font-medium">' +
+              escapeHtml(note.credit_note_no) + "</span>" +
+              '<span class="font-mono text-sm tabular-nums">−' + rupees(note.grand_total) +
+              "</span>" +
+              "</div>" +
+              '<p class="mt-1 text-sm text-base-content/60">' + escapeHtml(note.reason) +
+              "</p>" +
+              '<p class="mt-1 font-mono text-xs text-base-content/45">' +
+              escapeHtml(dateOnly(note.date)) +
+              (entry.created_by
+                ? " · issued by " + escapeHtml(entry.created_by.display_name)
+                : "") +
+              "</p>" +
+              '<table class="mt-3 w-full text-left"><tbody>' + lines + "</tbody></table>" +
+              "</div>"
+            );
+          })
+          .join("");
+
+        // The figure that actually matters once corrections exist.
+        var net = history.net;
+        $("credit-net").innerHTML =
+          netRow("Invoice total", rupees(openDetail.invoice.grand_total), false) +
+          netRow("Credited", "−" + rupees(net.credited_total), false) +
+          netRow("Net after credits", rupees(net.net_total), true);
+      })
+      .catch(function (err) {
+        status("credit_history failed: " + errText(err));
+      });
+  }
+
+  function netRow(label, value, strong) {
+    return (
+      '<div class="flex items-baseline justify-between gap-4 ' +
+      (strong
+        ? 'mt-2 border-t border-base-300 pt-3"><dt class="text-base font-semibold">'
+        : 'py-1"><dt class="text-sm text-base-content/60">') +
+      escapeHtml(label) +
+      "</dt><dd class=" +
+      (strong
+        ? '"font-mono text-2xl font-semibold tabular-nums">'
+        : '"font-mono text-sm tabular-nums">') +
+      escapeHtml(value) +
+      "</dd></div>"
+    );
+  }
+
+  /** Item code and description for a credited line, from the invoice on screen. */
+  function lineLabel(itemId) {
+    var entries = openDetail && openDetail.lines ? openDetail.lines : [];
+    for (var i = 0; i < entries.length; i += 1) {
+      if (entries[i].line && entries[i].line.item_id === itemId) {
+        return { code: entries[i].item_code, description: entries[i].description };
+      }
+    }
+    return { code: "#" + itemId, description: "" };
+  }
+
+  /** Draws the form from what is still creditable. */
+  function openCreditForm() {
+    if (!invoke || !openDetail) return;
+
+    invoke("creditable_lines", { invoiceId: openDetail.invoice.id })
+      .then(function (lines) {
+        creditable = lines;
+
+        var anyLeft = lines.some(function (l) {
+          return l.creditable_qty > 0;
+        });
+        if (!anyLeft) {
+          status("Every line on this invoice has already been credited in full.");
+          return;
+        }
+
+        $("credit-lines").innerHTML = lines
+          .map(function (line, index) {
+            var spent = line.creditable_qty <= 0;
+            return (
+              '<tr class="border-b border-base-300 text-sm last:border-0">' +
+              '<td class="py-2 font-mono">' + escapeHtml(line.item_code) + "</td>" +
+              '<td class="py-2">' + escapeHtml(line.description) + "</td>" +
+              '<td class="py-2 text-right font-mono tabular-nums">' + money(line.billed_qty) +
+              "</td>" +
+              '<td class="py-2 pr-4 text-right font-mono tabular-nums ' +
+              'text-base-content/60">' + money(line.credited_qty) + "</td>" +
+              '<td class="py-2 text-right">' +
+              '<input type="number" min="0" step="any" value="0" data-credit="' + index +
+              '" max="' + line.creditable_qty + '"' + (spent ? " disabled" : "") +
+              ' aria-label="Quantity to credit for ' + escapeHtml(line.item_code) + '"' +
+              ' class="h-7 w-full max-w-24 rounded-field border border-base-300 ' +
+              'bg-base-100 px-2 text-right font-mono text-sm tabular-nums ' +
+              'focus:border-base-content/30 focus:outline-none focus:ring-2 ' +
+              'focus:ring-base-content/10 disabled:bg-base-200 ' +
+              'disabled:text-base-content/60" />' +
+              "</td></tr>"
+            );
+          })
+          .join("");
+
+        $("credit-reason").value = "";
+        setMsg("credit-msg", "", false);
+        $("credit-form").hidden = false;
+        $("d-credit").hidden = true;
+        $("credit-reason").focus();
+      })
+      .catch(function (err) {
+        status(errText(err));
+      });
+  }
+
+  function closeCreditForm() {
+    $("credit-form").hidden = true;
+    $("d-credit").hidden = !canIssueCredits();
+  }
+
+  function submitCreditNote(event) {
+    if (event) event.preventDefault();
+    if (!invoke || !openDetail) return bridgeMissing("create_credit_note");
+
+    var reason = $("credit-reason").value.trim();
+    if (!reason) return setMsg("credit-msg", "Enter a reason for the credit.", true);
+
+    var lines = [];
+    var bad = null;
+    Array.prototype.forEach.call(
+      $("credit-lines").querySelectorAll("input[data-credit]"),
+      function (input) {
+        var source = creditable[Number(input.dataset.credit)];
+        var qty = parseFloat(input.value);
+        if (!isFinite(qty) || qty <= 0) return;
+        if (qty > source.creditable_qty) {
+          bad =
+            "Cannot credit " + money(qty) + " of " + source.item_code + " — only " +
+            money(source.creditable_qty) + " remain.";
+          return;
+        }
+        lines.push({ invoice_line_id: source.invoice_line_id, qty: qty });
+      }
+    );
+
+    if (bad) return setMsg("credit-msg", bad, true);
+    if (!lines.length) {
+      return setMsg("credit-msg", "Enter a quantity to credit on at least one line.", true);
+    }
+
+    var button = $("credit-save");
+    button.disabled = true;
+    setMsg("credit-msg", "Issuing…", false);
+
+    invoke("create_credit_note", {
+      note: {
+        original_invoice_id: openDetail.invoice.id,
+        reason: reason,
+        lines: lines,
+      },
+    })
+      .then(function (note) {
+        button.disabled = false;
+        closeCreditForm();
+        loadCreditHistory(openDetail.invoice.id);
+        // The invoice itself has not changed, so only the credits need redrawing.
+        status("Issued " + note.credit_note_no + " for " + rupees(note.grand_total) + ".");
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        setMsg("credit-msg", errText(err), true);
+      });
+  }
+
+  $("d-credit").addEventListener("click", openCreditForm);
+  $("credit-cancel").addEventListener("click", closeCreditForm);
+  $("credit-form").addEventListener("submit", submitCreditNote);
 
   /* ----------------------------------------------------------------- wiring */
 

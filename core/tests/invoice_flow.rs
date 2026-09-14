@@ -2,8 +2,9 @@
 //! reopened SQLite file with its lines and its `sync_queue` rows intact.
 
 use realinvoice_core::{
-    seed, CoreError, DateRange, Db, InvoiceFilter, ItemFilter, LoginOutcome, NewCustomer,
-    NewInvoice, NewInvoiceLine, NewItem, NewUser, Role, SyncBatch, User,
+    seed, CoreError, DateRange, Db, InvoiceFilter, ItemFilter, LoginOutcome, NewCreditNote,
+    NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser, Role, SyncBatch,
+    User,
 };
 
 fn seeded_db() -> Db {
@@ -1313,7 +1314,7 @@ fn five_failures_lock_the_account_and_the_sixth_is_refused_even_when_correct() {
     assert_eq!(lockout.failures, 5);
     assert_eq!(lockout.remaining, 0);
     assert!(lockout.retry_after_seconds > 0);
-    assert!(lockout.retry_after_seconds <= 15 * 60);
+    assert!(lockout.retry_after_seconds <= realinvoice_core::LOGIN_WINDOW_MINUTES * 60);
 
     // The sixth attempt is refused **with the right password**. This is the whole point:
     // a correct credential does not get you past the limiter.
@@ -1431,7 +1432,8 @@ fn failures_age_out_of_the_window() {
 
     // Rather than sleeping fifteen minutes, backdate the recorded attempts past the
     // window — which is exactly what the passage of time does to them.
-    db.backdate_login_attempts_for_test("priya", 16).unwrap();
+    db.backdate_login_attempts_for_test("priya", realinvoice_core::LOGIN_WINDOW_MINUTES + 1)
+        .unwrap();
 
     assert_eq!(db.recent_failed_logins("priya").unwrap(), 0, "outside the window");
     assert!(db.lockout_for("priya").unwrap().is_none(), "the lock lifts on its own");
@@ -1468,4 +1470,481 @@ fn every_attempt_is_recorded_and_no_secret_is() {
         db.pending_sync_rows().unwrap().iter().map(|r| r.payload_json.clone()).collect();
     assert!(!queued.contains("login_attempt"));
     assert!(!queued.contains("priya"));
+}
+
+// ------------------------------------------------------------------ credit notes
+
+/// Billed: 2 racks at 45,000 (18%) and 40 bags of cement at 410 (28%), to a Tamil Nadu
+/// buyer, so intra-state CGST + SGST. Two different tax rates on purpose — a credit note
+/// that quietly applied one rate to the whole document would pass a single-rate test.
+fn billed_invoice(db: &mut Db) -> realinvoice_core::Invoice {
+    let buyer = customer(db, "9840012345");
+    let rack = item(db, "RACK-42U-PRO");
+    let cement = item(db, "CEM-OPC-53");
+
+    db.create_invoice(&NewInvoice {
+        customer_id: buyer.id,
+        date: None,
+        payment_type: "cash".into(),
+        created_by_user_id: None,
+        lines: vec![
+            NewInvoiceLine { item_id: rack.id, qty: 2.0, rate: None, tax_rate: None },
+            NewInvoiceLine { item_id: cement.id, qty: 40.0, rate: None, tax_rate: None },
+        ],
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_partial_credit_prices_the_credited_quantity_and_leaves_the_invoice_alone() {
+    let mut db = seeded_db();
+    let owner = owner(&mut db);
+    let invoice = billed_invoice(&mut db);
+
+    // 2 × 45,000 = 90,000 at 18% → 16,200 tax; 40 × 410 = 16,400 at 28% → 4,592 tax.
+    assert_eq!(invoice.subtotal, 106_400.0);
+    assert_eq!(invoice.cgst, 10_396.0);
+    assert_eq!(invoice.sgst, 10_396.0);
+    assert_eq!(invoice.grand_total, 127_192.0);
+
+    let lines = db.creditable_lines(invoice.id).unwrap();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].billed_qty, 2.0);
+    assert_eq!(lines[0].credited_qty, 0.0);
+    assert_eq!(lines[0].creditable_qty, 2.0);
+
+    // One rack comes back.
+    let note = db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "  Customer returned one rack, damaged in transit  ".into(),
+            date: None,
+            created_by_user_id: Some(owner.id),
+            lines: vec![NewCreditNoteLine { invoice_line_id: lines[0].invoice_line_id, qty: 1.0 }],
+        })
+        .unwrap();
+
+    assert_eq!(note.credit_note_no, "CN-2026-0001", "its own series, starting at 1");
+    assert_eq!(note.reason, "Customer returned one rack, damaged in transit", "trimmed");
+    assert_eq!(note.original_invoice_id, invoice.id);
+    assert_eq!(note.created_by_user_id, Some(owner.id));
+
+    // Priced as one rack, not as a fraction of the invoice: 45,000 + 9% + 9%.
+    assert_eq!(note.subtotal, 45_000.0);
+    assert_eq!(note.cgst, 4_050.0);
+    assert_eq!(note.sgst, 4_050.0);
+    assert_eq!(note.igst, 0.0, "the invoice was intra-state, so the credit is too");
+    assert_eq!(note.grand_total, 53_100.0);
+    assert_eq!(note.subtotal + note.cgst + note.sgst, note.grand_total);
+
+    // The invoice is untouched. This is the whole point of the design.
+    let after = db.get_invoice(invoice.id).unwrap().unwrap();
+    assert_eq!(after, invoice, "the original is byte-for-byte what was billed");
+    assert_eq!(db.get_invoice_detail(invoice.id).unwrap().unwrap().lines.len(), 2);
+
+    // And the net is the difference.
+    let net = db.invoice_net(invoice.id).unwrap();
+    assert_eq!(net.note_count, 1);
+    assert_eq!(net.credited_total, 53_100.0);
+    assert_eq!(net.net_total, 74_092.0, "127,192 billed less 53,100 credited");
+}
+
+#[test]
+fn a_line_cannot_be_credited_beyond_what_is_left() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let lines = db.creditable_lines(invoice.id).unwrap();
+    let rack_line = lines[0].invoice_line_id;
+
+    // More than was billed, in one go.
+    let too_much = db.create_credit_note(&NewCreditNote {
+        original_invoice_id: invoice.id,
+        reason: "trying it on".into(),
+        date: None,
+        created_by_user_id: None,
+        lines: vec![NewCreditNoteLine { invoice_line_id: rack_line, qty: 3.0 }],
+    });
+    assert!(matches!(too_much, Err(CoreError::Invalid(_))));
+
+    // Credit one, then try for two more: the ceiling is what *remains*, so two notes
+    // cannot add up to more than the invoice however they are ordered.
+    db.create_credit_note(&NewCreditNote {
+        original_invoice_id: invoice.id,
+        reason: "one back".into(),
+        date: None,
+        created_by_user_id: None,
+        lines: vec![NewCreditNoteLine { invoice_line_id: rack_line, qty: 1.0 }],
+    })
+    .unwrap();
+
+    let after_one = db.creditable_lines(invoice.id).unwrap();
+    assert_eq!(after_one[0].credited_qty, 1.0);
+    assert_eq!(after_one[0].creditable_qty, 1.0);
+
+    let over = db.create_credit_note(&NewCreditNote {
+        original_invoice_id: invoice.id,
+        reason: "and another two".into(),
+        date: None,
+        created_by_user_id: None,
+        lines: vec![NewCreditNoteLine { invoice_line_id: rack_line, qty: 2.0 }],
+    });
+    assert!(matches!(over, Err(CoreError::Invalid(_))), "cannot exceed what is left");
+
+    // The refused note wrote nothing.
+    assert_eq!(db.credit_notes_for_invoice(invoice.id).unwrap().len(), 1);
+    assert_eq!(db.invoice_net(invoice.id).unwrap().note_count, 1);
+}
+
+#[test]
+fn a_credit_note_needs_a_reason_and_something_to_credit() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let lines = db.creditable_lines(invoice.id).unwrap();
+    let line = lines[0].invoice_line_id;
+
+    let some = vec![NewCreditNoteLine { invoice_line_id: line, qty: 1.0 }];
+
+    // A correction with no stated reason is the one an auditor asks about and nobody can
+    // answer, so there is no path that writes a blank.
+    for blank in ["", "   ", "\t\n"] {
+        let refused = db.create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: blank.into(),
+            date: None,
+            created_by_user_id: None,
+            lines: some.clone(),
+        });
+        assert!(matches!(refused, Err(CoreError::Invalid(_))), "blank reason {blank:?}");
+    }
+
+    // Nothing selected is not a credit note.
+    assert!(matches!(
+        db.create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "fine".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![],
+        }),
+        Err(CoreError::Invalid(_))
+    ));
+
+    // Nor is a set of zero quantities.
+    assert!(matches!(
+        db.create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "fine".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: line, qty: 0.0 }],
+        }),
+        Err(CoreError::Invalid(_))
+    ));
+
+    // A negative quantity would *add* to an invoice through the correction path.
+    assert!(matches!(
+        db.create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "fine".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: line, qty: -1.0 }],
+        }),
+        Err(CoreError::Invalid(_))
+    ));
+
+    // A line from some other invoice is not on this one.
+    assert!(matches!(
+        db.create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "fine".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: 9_999, qty: 1.0 }],
+        }),
+        Err(CoreError::Invalid(_))
+    ));
+
+    assert!(db.credit_notes_for_invoice(invoice.id).unwrap().is_empty(), "nothing was written");
+}
+
+#[test]
+fn cancelling_an_invoice_is_crediting_every_line_in_full() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let lines = db.creditable_lines(invoice.id).unwrap();
+
+    // No special path for cancellation: it is the ordinary one, used for everything.
+    let note = db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "Order cancelled before dispatch".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: lines
+                .iter()
+                .map(|l| NewCreditNoteLine {
+                    invoice_line_id: l.invoice_line_id,
+                    qty: l.creditable_qty,
+                })
+                .collect(),
+        })
+        .unwrap();
+
+    // A full credit matches the invoice exactly, to the paisa.
+    assert_eq!(note.subtotal, invoice.subtotal);
+    assert_eq!(note.cgst, invoice.cgst);
+    assert_eq!(note.sgst, invoice.sgst);
+    assert_eq!(note.igst, invoice.igst);
+    assert_eq!(note.grand_total, invoice.grand_total);
+
+    let net = db.invoice_net(invoice.id).unwrap();
+    assert_eq!(net.net_total, 0.0, "a cancelled invoice nets to nothing");
+
+    // And there is nothing left to credit twice.
+    assert!(db.creditable_lines(invoice.id).unwrap().iter().all(|l| l.creditable_qty == 0.0));
+    assert!(db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "again".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: lines[0].invoice_line_id, qty: 1.0 }],
+        })
+        .is_err());
+}
+
+#[test]
+fn a_credit_note_reverses_the_tax_that_was_actually_charged() {
+    // An inter-state invoice carries IGST, so its credit note must too — even though the
+    // home state and the credited items are the same.
+    let mut db = seeded_db();
+    let buyer = db
+        .create_customer(&NewCustomer {
+            name: "Deccan Interiors".into(),
+            mobile: "9000012345".into(),
+            gstin: Some("29AABCS1429B1ZP".into()),
+            place_of_supply: "KA".into(),
+        })
+        .unwrap();
+    let rack = item(&db, "RACK-42U-PRO");
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "upi".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+        })
+        .unwrap();
+    assert!(invoice.igst > 0.0 && invoice.cgst == 0.0, "inter-state");
+
+    let lines = db.creditable_lines(invoice.id).unwrap();
+    let note = db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "Returned".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: lines[0].invoice_line_id, qty: 1.0 }],
+        })
+        .unwrap();
+
+    assert_eq!(note.igst, invoice.igst);
+    assert_eq!(note.cgst, 0.0);
+    assert_eq!(note.sgst, 0.0);
+    assert_eq!(note.grand_total, invoice.grand_total);
+}
+
+#[test]
+fn credit_notes_run_a_separate_series_and_are_queued_for_sync() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let second = billed_invoice(&mut db);
+    let lines = db.creditable_lines(invoice.id).unwrap();
+    let second_lines = db.creditable_lines(second.id).unwrap();
+
+    assert_eq!(invoice.invoice_no, "RI-2026-0001");
+    assert_eq!(second.invoice_no, "RI-2026-0002");
+
+    let first_note = db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "one".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: lines[0].invoice_line_id, qty: 1.0 }],
+        })
+        .unwrap();
+    let second_note = db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: second.id,
+            reason: "two".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine {
+                invoice_line_id: second_lines[0].invoice_line_id,
+                qty: 1.0,
+            }],
+        })
+        .unwrap();
+
+    // Its own counter: two invoices and two notes, numbered independently.
+    assert_eq!(first_note.credit_note_no, "CN-2026-0001");
+    assert_eq!(second_note.credit_note_no, "CN-2026-0002");
+
+    // Queued like every other mutation, and the note before its lines so the far end
+    // never sees a line whose parent has not arrived.
+    let queued = db.pending_sync_rows().unwrap();
+    let order: Vec<&str> = queued.iter().map(|r| r.table_name.as_str()).collect();
+    let note_at = order.iter().position(|t| *t == "credit_notes").unwrap();
+    let line_at = order.iter().position(|t| *t == "credit_note_lines").unwrap();
+    assert!(note_at < line_at, "a credit note is queued before its lines");
+
+    let payload = &db.pending_sync_rows_for("credit_notes").unwrap()[0].payload_json;
+    let value: serde_json::Value = serde_json::from_str(payload).unwrap();
+    assert_eq!(value["credit_note_no"], "CN-2026-0001");
+    assert_eq!(value["reason"], "one");
+    assert_eq!(value["original_invoice_id"], invoice.id);
+}
+
+#[test]
+fn several_partial_credits_add_up_to_the_whole_and_no_further() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let cement_line = db.creditable_lines(invoice.id).unwrap()[1].invoice_line_id;
+
+    // 40 bags back in four lots of ten.
+    for lot in 1..=4 {
+        db.create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: format!("return lot {lot}"),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: cement_line, qty: 10.0 }],
+        })
+        .unwrap();
+    }
+
+    let lines = db.creditable_lines(invoice.id).unwrap();
+    assert_eq!(lines[1].credited_qty, 40.0);
+    assert_eq!(lines[1].creditable_qty, 0.0);
+
+    // The four notes together equal that line's share of the invoice: 40 × 410 at 28%,
+    // which is 16,400 + 4,592. Crediting the cement must not pick up the racks' 18%.
+    let net = db.invoice_net(invoice.id).unwrap();
+    assert_eq!(net.note_count, 4);
+    assert_eq!(net.credited_subtotal, 16_400.0);
+    assert_eq!(net.credited_total, 20_992.0);
+    // The racks were never credited, so the net is exactly their share.
+    assert_eq!(net.net_total, 106_200.0, "127,192 billed less 20,992 credited");
+
+    assert!(db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "one bag too many".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: cement_line, qty: 1.0 }],
+        })
+        .is_err());
+}
+
+#[test]
+fn reporting_nets_credit_notes_against_revenue() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let lines = db.creditable_lines(invoice.id).unwrap();
+
+    let gross = db.sales_summary(&DateRange::default()).unwrap();
+    assert_eq!(gross.grand_total, 127_192.0);
+    assert_eq!(gross.credit_note_count, 0);
+    assert_eq!(gross.net_total, gross.grand_total, "nothing credited yet");
+
+    // One rack back: 45,000 + 18%.
+    db.create_credit_note(&NewCreditNote {
+        original_invoice_id: invoice.id,
+        reason: "returned".into(),
+        date: None,
+        created_by_user_id: None,
+        lines: vec![NewCreditNoteLine { invoice_line_id: lines[0].invoice_line_id, qty: 1.0 }],
+    })
+    .unwrap();
+
+    let netted = db.sales_summary(&DateRange::default()).unwrap();
+
+    // What was billed is unchanged — both figures are real, and a report that quietly
+    // rewrote the gross would be answering a different question from the one asked.
+    assert_eq!(netted.invoice_count, 1);
+    assert_eq!(netted.grand_total, 127_192.0);
+    assert_eq!(netted.subtotal, 106_400.0);
+
+    // And what was earned is what is left.
+    assert_eq!(netted.credit_note_count, 1);
+    assert_eq!(netted.credited_subtotal, 45_000.0);
+    assert_eq!(netted.credited_tax, 8_100.0);
+    assert_eq!(netted.credited_total, 53_100.0);
+    assert_eq!(netted.net_subtotal, 61_400.0);
+    assert_eq!(netted.net_tax, 12_692.0);
+    assert_eq!(netted.net_total, 74_092.0);
+    assert_eq!(netted.net_subtotal + netted.net_tax, netted.net_total, "the net reconciles");
+
+    // The day's row nets too.
+    let days = db.daily_totals(&DateRange::default()).unwrap();
+    assert_eq!(days.len(), 1);
+    assert_eq!(days[0].grand_total, 127_192.0);
+    assert_eq!(days[0].credited_total, 53_100.0);
+    assert_eq!(days[0].net_total, 74_092.0);
+
+    // The payment mix nets against the invoice's own payment type.
+    let mix = db.payment_mix(&DateRange::default()).unwrap();
+    assert_eq!(mix.len(), 1);
+    assert_eq!(mix[0].payment_type, "cash");
+    assert_eq!(mix[0].grand_total, 74_092.0);
+
+    // And "what sold" counts one rack, not two: an item sold and returned is not a sale.
+    let top = db.top_items(&DateRange::default(), 8).unwrap();
+    let rack = top.iter().find(|t| t.item_code == "RACK-42U-PRO").unwrap();
+    assert_eq!(rack.qty, 1.0, "2 billed less 1 credited");
+    assert_eq!(rack.revenue, 45_000.0);
+    assert_eq!(rack.credited_qty, 1.0);
+    assert_eq!(rack.credited_revenue, 45_000.0);
+
+    // The cement was untouched, so it is unchanged.
+    let cement = top.iter().find(|t| t.item_code == "CEM-OPC-53").unwrap();
+    assert_eq!(cement.qty, 40.0);
+    assert_eq!(cement.credited_qty, 0.0);
+}
+
+#[test]
+fn a_fully_cancelled_invoice_nets_to_nothing_in_reporting() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let lines = db.creditable_lines(invoice.id).unwrap();
+
+    db.create_credit_note(&NewCreditNote {
+        original_invoice_id: invoice.id,
+        reason: "cancelled".into(),
+        date: None,
+        created_by_user_id: None,
+        lines: lines
+            .iter()
+            .map(|l| NewCreditNoteLine { invoice_line_id: l.invoice_line_id, qty: l.billed_qty })
+            .collect(),
+    })
+    .unwrap();
+
+    let summary = db.sales_summary(&DateRange::default()).unwrap();
+    assert_eq!(summary.net_total, 0.0);
+    assert_eq!(summary.net_subtotal, 0.0);
+    assert_eq!(summary.net_tax, 0.0, "no tax is owed on a sale that was undone");
+    assert_eq!(summary.grand_total, 127_192.0, "but the invoice still happened");
+
+    // Nothing sold on net, so nothing ranks above zero.
+    let top = db.top_items(&DateRange::default(), 8).unwrap();
+    assert!(top.iter().all(|t| t.revenue == 0.0 && t.qty == 0.0));
+
+    assert_eq!(db.payment_mix(&DateRange::default()).unwrap()[0].grand_total, 0.0);
+    assert_eq!(db.daily_totals(&DateRange::default()).unwrap()[0].net_total, 0.0);
 }

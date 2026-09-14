@@ -414,6 +414,10 @@
                   id="d-inv-no"></span>
             <span class="inline-flex items-center gap-1 rounded-field bg-base-200 px-2 py-0.5 text-2xs font-medium text-base-content/70">Read-only</span>
             <div class="ml-auto flex flex-wrap items-center gap-2">
+              <button id="d-credit" type="button" hidden class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">
+                <span class="hero-arrow-left-on-rectangle size-4" aria-hidden="true"></span>
+                Issue Credit Note
+              </button>
               <button id="d-reprint" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">
                 <span class="hero-printer size-4" aria-hidden="true"></span> Reprint
               </button>
@@ -446,6 +450,56 @@
             <!-- Same renderTotals() as the billing card, fed saved data. -->
             <dl class="w-full max-w-sm rounded-field border border-base-300 p-4"
                 id="detail-totals"></dl>
+          </div>
+
+          <!-- Issuing a credit note. Owner-only, and the invoice above is never touched:
+               this writes a separate linked document that nets against it. -->
+          <form class="flex flex-col gap-4 rounded-field border border-base-300 bg-base-200/60 p-4"
+                id="credit-form" autocomplete="off" hidden>
+            <div>
+              <h2 class="text-lg font-semibold tracking-tight">Issue a credit note</h2>
+              <p class="mt-1 max-w-prose text-sm text-base-content/60">The invoice above is
+                not changed — it stays exactly as it was billed. This records what is being
+                credited back against it. To cancel the whole invoice, credit every line in
+                full.</p>
+            </div>
+
+            <div class="overflow-x-auto">
+              <table class="w-full text-left">
+                <thead>
+                  <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                    <th class="w-32">Item Code</th>
+                    <th>Description</th>
+                    <th class="w-24 text-right">Billed</th>
+                    <th class="w-28 pr-4 text-right">Already credited</th>
+                    <th class="w-28 text-right">Credit now</th>
+                  </tr>
+                </thead>
+                <tbody id="credit-lines"></tbody>
+              </table>
+            </div>
+
+            <label class="flex flex-col gap-1 text-xs text-base-content/60">Reason
+              <span class="text-base-content/45">Required — this is the record of why the
+                invoice was corrected.</span>
+              <input id="credit-reason" type="text" required maxlength="200"
+                     placeholder="e.g. One rack returned, damaged in transit"
+                     class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
+            </label>
+
+            <div class="flex flex-wrap items-center gap-3">
+              <button type="submit" id="credit-save" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Issue credit note</button>
+              <button type="button" id="credit-cancel" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+              <span class="text-xs text-base-content/60" id="credit-msg" aria-live="polite"></span>
+            </div>
+          </form>
+
+          <!-- What has already been credited against this invoice. -->
+          <div class="flex flex-col gap-3" id="credit-history" hidden>
+            <h2 class="text-lg font-semibold tracking-tight">Credit notes against this invoice</h2>
+            <div id="credit-list"></div>
+            <dl class="w-full max-w-sm self-end rounded-field border border-base-300 p-4"
+                id="credit-net"></dl>
           </div>
         </div>
       </section>

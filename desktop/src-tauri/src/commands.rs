@@ -7,10 +7,11 @@
 
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use realinvoice_core::{
-    auth, gst, sync, Customer, DailyTotal, DateRange, Invoice, InvoiceDetail, InvoiceFilter,
-    InvoiceLine, InvoiceSummary, Item, ItemFilter, Lockout, LoginOutcome, NewCustomer, NewInvoice,
+    auth, gst, sync, CreditNote, CreditNoteDetail, CreditableLine, Customer, DailyTotal, DateRange,
+    Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine, InvoiceNet, InvoiceSummary, Item,
+    ItemFilter, Lockout, LoginOutcome, NewCreditNote, NewCreditNoteLine, NewCustomer, NewInvoice,
     NewInvoiceLine, NewItem, NewUser, PaymentMix, Role, SalesSummary, SyncStatus, TopItem, User,
-    MAX_FAILED_LOGINS,
+    LOGIN_WINDOW_MINUTES, MAX_FAILED_LOGINS,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -70,13 +71,17 @@ impl LoginError {
         // ignore it, and the one that matters is the last.
         let attempts_remaining = (remaining <= 2 && remaining > 0).then_some(remaining);
 
+        // The window is quoted from the constant rather than written out, so changing the
+        // lockout length cannot leave the screen promising the old one.
+        let window = describe_window();
         let message = match attempts_remaining {
-            Some(1) => "Incorrect username or password. 1 attempt left before this \
-                        account is locked for 15 minutes."
-                .to_string(),
+            Some(1) => format!(
+                "Incorrect username or password. 1 attempt left before this account is \
+                 locked for {window}."
+            ),
             Some(left) => format!(
                 "Incorrect username or password. {left} attempts left before this \
-                 account is locked for 15 minutes."
+                 account is locked for {window}."
             ),
             None => "Incorrect username or password.".to_string(),
         };
@@ -105,6 +110,14 @@ impl From<realinvoice_core::CoreError> for LoginError {
             retry_after_seconds: None,
             attempts_remaining: None,
         }
+    }
+}
+
+/// How long a lockout lasts, in words, straight from core's constant.
+pub fn describe_window() -> String {
+    match LOGIN_WINDOW_MINUTES {
+        1 => "a minute".to_string(),
+        n => format!("{n} minutes"),
     }
 }
 
@@ -577,6 +590,92 @@ pub fn search_customer(
 pub fn search_item(query: String, state: State<'_, AppState>) -> Result<Vec<Item>, String> {
     require_session(&state)?;
     state.db().search_item(&query).map_err(|e| e.to_string())
+}
+
+// ------------------------------------------------------------- credit notes
+
+/// What is still creditable on an invoice, for drawing the form.
+///
+/// Owner-only, like issuing one: a cashier who cannot reverse an invoice has no reason to
+/// be shown the screen for it.
+#[tauri::command]
+pub fn creditable_lines(
+    invoice_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<CreditableLine>, String> {
+    require_owner(&state)?;
+    state.db().creditable_lines(invoice_id).map_err(|e| e.to_string())
+}
+
+/// What the form sends.
+///
+/// Deliberately carries no `created_by_user_id`. Attribution comes from the session, the
+/// same rule invoices follow — a caller must not be able to record a reversal as somebody
+/// else's decision.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewCreditNotePayload {
+    pub original_invoice_id: i64,
+    pub reason: String,
+    pub lines: Vec<CreditLinePayload>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreditLinePayload {
+    pub invoice_line_id: i64,
+    pub qty: f64,
+}
+
+/// Issues a credit note. **Owner-only.**
+///
+/// Reversing an invoice is not a counter decision: a cashier who could issue one could
+/// void their own sales, which is the shape of most till fraud. The Users screen gates on
+/// the same role for the same reason, and this is enforced here rather than only by
+/// hiding the button.
+#[tauri::command]
+pub fn create_credit_note(
+    note: NewCreditNotePayload,
+    state: State<'_, AppState>,
+) -> Result<CreditNote, String> {
+    let session = require_owner(&state)?;
+
+    state
+        .db()
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: note.original_invoice_id,
+            reason: note.reason,
+            date: None,
+            // From the session, never from the payload.
+            created_by_user_id: Some(session.user.id),
+            lines: note
+                .lines
+                .into_iter()
+                .map(|l| NewCreditNoteLine { invoice_line_id: l.invoice_line_id, qty: l.qty })
+                .collect(),
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// An invoice's credit notes and what they net it down to.
+///
+/// Readable by anyone signed in, unlike issuing one: a cashier looking at an invoice
+/// should see that it was partly returned, or the figure on their screen is wrong.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreditHistory {
+    pub notes: Vec<CreditNoteDetail>,
+    pub net: InvoiceNet,
+}
+
+#[tauri::command]
+pub fn credit_history(
+    invoice_id: i64,
+    state: State<'_, AppState>,
+) -> Result<CreditHistory, String> {
+    require_session(&state)?;
+    let db = state.db();
+    Ok(CreditHistory {
+        notes: db.credit_notes_for_invoice(invoice_id).map_err(|e| e.to_string())?,
+        net: db.invoice_net(invoice_id).map_err(|e| e.to_string())?,
+    })
 }
 
 /// The catalogue, for the Inventory pane. Wider than [`search_item`], which exists to

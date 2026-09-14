@@ -6,14 +6,14 @@
 //! payload survives the trip into core unchanged.
 
 use realinvoice_core::{
-    seed, DateRange, InvoiceFilter, LoginOutcome, NewCustomer, NewInvoice, NewInvoiceLine, NewUser,
-    Role, User,
+    seed, DateRange, InvoiceFilter, LoginOutcome, NewCreditNote, NewCreditNoteLine, NewCustomer,
+    NewInvoice, NewInvoiceLine, NewUser, Role, User,
 };
 use realinvoice_desktop_lib::commands::{
     check_expected_totals_for_test as check_expected_totals, check_item_for_test as check_item,
-    describe_wait, quote, require_owner_for_test as require_owner,
-    require_session_for_test as require_session, ExpectedTotals, NewCustomerPayload,
-    NewInvoicePayload, NewItemPayload, NewLinePayload, QuoteLinePayload,
+    describe_wait, describe_window, quote, require_owner_for_test as require_owner,
+    require_session_for_test as require_session, ExpectedTotals, NewCreditNotePayload,
+    NewCustomerPayload, NewInvoicePayload, NewItemPayload, NewLinePayload, QuoteLinePayload,
 };
 use realinvoice_desktop_lib::state::{AppState, Session, DB_FILE_NAME};
 
@@ -930,6 +930,17 @@ fn the_lockout_wait_is_described_in_words_a_person_would_use() {
     assert_eq!(describe_wait(120), "2 minutes");
     assert_eq!(describe_wait(121), "3 minutes");
     assert_eq!(describe_wait(15 * 60), "15 minutes");
+
+    // And the lockout length is quoted from core, so the screen cannot promise a window
+    // the limiter does not keep.
+    assert_eq!(
+        describe_window(),
+        if realinvoice_core::LOGIN_WINDOW_MINUTES == 1 {
+            "a minute".to_string()
+        } else {
+            format!("{} minutes", realinvoice_core::LOGIN_WINDOW_MINUTES)
+        }
+    );
 }
 
 #[test]
@@ -991,4 +1002,84 @@ fn a_lockout_survives_restarting_the_app() {
         restarted.db().attempt_login("priya", "counter-top-2026").unwrap(),
         LoginOutcome::LockedOut(_)
     ));
+}
+
+// ------------------------------------------------------------- credit notes
+
+#[test]
+fn only_an_owner_can_reverse_an_invoice() {
+    // The same gate the Users screen uses, for the same reason: a cashier who could void
+    // their own sales is the shape of most till fraud. Hiding the button is the courtesy;
+    // this is the control.
+    let (_dir, state) = console_state();
+    let owner = set_up_owner(&state);
+    let cashier = state
+        .db()
+        .create_user(
+            &NewUser {
+                username: "meena".into(),
+                display_name: "Meena R".into(),
+                role: Role::Cashier,
+            },
+            "counter-password",
+        )
+        .unwrap();
+
+    let as_owner = Session { token: "t".into(), user: owner };
+    let as_cashier = Session { token: "t".into(), user: cashier };
+
+    assert!(require_owner(Some(as_owner)).is_ok());
+    assert!(
+        require_session(Some(as_cashier.clone())).is_ok(),
+        "a cashier can still bill and read invoices"
+    );
+    assert!(require_owner(Some(as_cashier)).is_err(), "but cannot issue a credit note");
+    assert!(require_owner(None).is_err());
+}
+
+#[test]
+fn a_credit_note_is_attributed_to_the_session_not_the_payload() {
+    let (_dir, state) = console_state();
+    let owner = set_up_owner(&state);
+
+    let mut invoice = worked_example(&state);
+    invoice.created_by_user_id = Some(owner.id);
+    let invoice = state.db().create_invoice(&invoice).unwrap();
+
+    let lines = state.db().creditable_lines(invoice.id).unwrap();
+    assert!(!lines.is_empty());
+
+    // The payload type carries no attribution field at all, so a caller cannot record a
+    // reversal as somebody else's decision — the same rule invoices follow.
+    let json = format!(
+        r#"{{ "original_invoice_id": {}, "reason": "returned",
+              "created_by_user_id": 99,
+              "lines": [{{ "invoice_line_id": {}, "qty": 1 }}] }}"#,
+        invoice.id, lines[0].invoice_line_id
+    );
+    let payload: NewCreditNotePayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(payload.original_invoice_id, invoice.id);
+    assert_eq!(payload.lines.len(), 1);
+
+    // Issued the way the command does it: attribution from the session.
+    let note = state
+        .db()
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: payload.original_invoice_id,
+            reason: payload.reason,
+            date: None,
+            created_by_user_id: Some(owner.id),
+            lines: payload
+                .lines
+                .into_iter()
+                .map(|l| NewCreditNoteLine { invoice_line_id: l.invoice_line_id, qty: l.qty })
+                .collect(),
+        })
+        .unwrap();
+
+    assert_eq!(note.created_by_user_id, Some(owner.id), "the smuggled id is not used");
+    assert_eq!(note.credit_note_no, "CN-2026-0001");
+
+    // The invoice is untouched, which is the point of the whole design.
+    assert_eq!(state.db().get_invoice(invoice.id).unwrap().unwrap(), invoice);
 }

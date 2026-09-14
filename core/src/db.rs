@@ -16,7 +16,7 @@ use crate::auth;
 use crate::error::{CoreError, Result};
 use crate::gst::{self, TaxableLine, DEFAULT_HOME_STATE};
 use crate::models::*;
-use crate::numbering::{financial_year, next_invoice_no};
+use crate::numbering::{financial_year, next_credit_note_no, next_invoice_no};
 use crate::schema::run_migrations;
 
 /// A connection to one RealInvoice SQLite file, with migrations already applied.
@@ -874,6 +874,290 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    // ------------------------------------------------------------- credit notes
+
+    /// What can still be credited on an invoice, line by line.
+    ///
+    /// Built from the invoice's own lines less whatever earlier notes already took, so a
+    /// line credited twice at half quantity shows nothing left the third time. This is
+    /// what the form is drawn from and what [`Db::create_credit_note`] validates against.
+    pub fn creditable_lines(&self, invoice_id: i64) -> Result<Vec<CreditableLine>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.id, l.item_id, i.item_code, i.description, l.rate, l.tax_rate, i.uom,
+                    l.qty,
+                    COALESCE((SELECT SUM(c.qty) FROM credit_note_lines c
+                               WHERE c.invoice_line_id = l.id), 0)
+               FROM invoice_lines l
+               JOIN items i ON i.id = l.item_id
+              WHERE l.invoice_id = ?1
+              ORDER BY l.id",
+        )?;
+        let rows = stmt.query_map([invoice_id], |row| {
+            let billed_qty: f64 = row.get(7)?;
+            let credited_qty: f64 = row.get(8)?;
+            Ok(CreditableLine {
+                invoice_line_id: row.get(0)?,
+                item_id: row.get(1)?,
+                item_code: row.get(2)?,
+                description: row.get(3)?,
+                rate: row.get(4)?,
+                tax_rate: row.get(5)?,
+                uom: row.get(6)?,
+                billed_qty,
+                credited_qty,
+                creditable_qty: (billed_qty - credited_qty).max(0.0),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Issues a credit note against an invoice.
+    ///
+    /// The invoice is read, never written. Nothing in this function touches `invoices` or
+    /// `invoice_lines`: the original stays exactly as it was billed, because that is what
+    /// the customer holds and what a return was filed on. The correction is a separate
+    /// linked document that nets against it.
+    ///
+    /// Totals are recomputed from the credited lines by the same GST code that priced the
+    /// invoice — never a proportion of the original. Crediting 3 of 7 units is three units
+    /// priced and taxed, not three sevenths of a number, which is how rounding errors get
+    /// into a tax return.
+    pub fn create_credit_note(&mut self, new: &NewCreditNote) -> Result<CreditNote> {
+        let reason = new.reason.trim().to_string();
+        if reason.is_empty() {
+            return Err(CoreError::Invalid("a reason is required".into()));
+        }
+
+        let invoice = self
+            .get_invoice(new.original_invoice_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("invoice {}", new.original_invoice_id)))?;
+
+        let date = match &new.date {
+            Some(d) => NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                .map_err(|_| CoreError::Invalid(format!("date must be YYYY-MM-DD, got {d}")))?,
+            None => Local::now().date_naive(),
+        };
+
+        // What is left to credit, before anything is written.
+        let creditable = self.creditable_lines(invoice.id)?;
+
+        let mut priced: Vec<(CreditableLine, f64, TaxableLine)> = Vec::new();
+        for line in &new.lines {
+            if !line.qty.is_finite() || line.qty <= 0.0 {
+                // A zero line is simply not credited; a negative one is a caller trying to
+                // *add* to an invoice through the correction path, which is not what this
+                // is for.
+                if line.qty == 0.0 {
+                    continue;
+                }
+                return Err(CoreError::Invalid(
+                    "a credited quantity must be greater than zero".into(),
+                ));
+            }
+
+            let source = creditable
+                .iter()
+                .find(|c| c.invoice_line_id == line.invoice_line_id)
+                .ok_or_else(|| {
+                    CoreError::Invalid(format!(
+                        "line {} is not on invoice {}",
+                        line.invoice_line_id, invoice.invoice_no
+                    ))
+                })?;
+
+            // The ceiling is what is left, not what was billed. Two notes of half each
+            // must not add up to more than the whole, however they are ordered.
+            if line.qty > source.creditable_qty + QTY_EPSILON {
+                return Err(CoreError::Invalid(format!(
+                    "cannot credit {} of {} — only {} remain uncredited",
+                    line.qty, source.item_code, source.creditable_qty
+                )));
+            }
+
+            // Priced at what it sold for, from the invoice line, not from today's
+            // catalogue: a price change after the sale must not change the refund.
+            priced.push((
+                source.clone(),
+                line.qty,
+                TaxableLine { qty: line.qty, rate: source.rate, tax_rate: source.tax_rate },
+            ));
+        }
+
+        if priced.is_empty() {
+            return Err(CoreError::Invalid("nothing to credit".into()));
+        }
+
+        // The same split the invoice carried. Deriving it from the invoice rather than
+        // recomputing from the customer's state is deliberate: if a customer's place of
+        // supply is edited after the sale, the credit must still reverse the tax that was
+        // actually charged, not the tax that would be charged today.
+        let taxables: Vec<TaxableLine> = priced.iter().map(|(_, _, t)| *t).collect();
+        let totals = if invoice.igst > 0.0 {
+            gst::compute_totals(&taxables, &self.home_state, INTER_STATE_PLACEHOLDER)
+        } else {
+            gst::compute_totals(&taxables, &self.home_state, &self.home_state)
+        };
+
+        // IMMEDIATE for the same reason invoices use it: the number is read and inserted
+        // under one write lock, so two consoles cannot allocate the same one.
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let fy = financial_year(date);
+        let credit_note_no = next_credit_note_no(fy, highest_credit_note_no(&tx, fy)?.as_deref())?;
+        let created_at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+        tx.execute(
+            "INSERT INTO credit_notes
+                 (credit_note_no, original_invoice_id, date, reason, subtotal, cgst, sgst,
+                  igst, grand_total, sync_status, created_at, created_by_user_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?11)",
+            params![
+                credit_note_no,
+                invoice.id,
+                date.to_string(),
+                reason,
+                totals.subtotal,
+                totals.cgst,
+                totals.sgst,
+                totals.igst,
+                totals.grand_total,
+                created_at,
+                new.created_by_user_id,
+            ],
+        )?;
+        let credit_note_id = tx.last_insert_rowid();
+
+        let credit_note = CreditNote {
+            id: credit_note_id,
+            credit_note_no,
+            original_invoice_id: invoice.id,
+            date: date.to_string(),
+            reason,
+            subtotal: totals.subtotal,
+            cgst: totals.cgst,
+            sgst: totals.sgst,
+            igst: totals.igst,
+            grand_total: totals.grand_total,
+            sync_status: "pending".to_string(),
+            created_at,
+            created_by_user_id: new.created_by_user_id,
+        };
+
+        // Queued before its lines, for the same reason invoices are: the worker sends in
+        // queue order, and a line must not reach the back office before its parent.
+        enqueue(&tx, "credit_notes", credit_note.id, SyncOp::Insert, &credit_note)?;
+
+        for (source, qty, taxable) in &priced {
+            let line_total = gst::round_money(qty * source.rate);
+            tx.execute(
+                "INSERT INTO credit_note_lines
+                     (credit_note_id, invoice_line_id, item_id, qty, rate, tax_rate, line_total)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    credit_note_id,
+                    source.invoice_line_id,
+                    source.item_id,
+                    qty,
+                    source.rate,
+                    taxable.tax_rate,
+                    line_total,
+                ],
+            )?;
+            let line = CreditNoteLine {
+                id: tx.last_insert_rowid(),
+                credit_note_id,
+                invoice_line_id: source.invoice_line_id,
+                item_id: source.item_id,
+                qty: *qty,
+                rate: source.rate,
+                tax_rate: taxable.tax_rate,
+                line_total,
+            };
+            enqueue(&tx, "credit_note_lines", line.id, SyncOp::Insert, &line)?;
+        }
+
+        tx.commit()?;
+        Ok(credit_note)
+    }
+
+    /// Every credit note against an invoice, oldest first, with its lines.
+    pub fn credit_notes_for_invoice(&self, invoice_id: i64) -> Result<Vec<CreditNoteDetail>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, credit_note_no, original_invoice_id, date, reason, subtotal, cgst,
+                    sgst, igst, grand_total, sync_status, created_at, created_by_user_id
+               FROM credit_notes
+              WHERE original_invoice_id = ?1
+              ORDER BY id",
+        )?;
+        let notes = stmt
+            .query_map([invoice_id], credit_note_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut out = Vec::with_capacity(notes.len());
+        for note in notes {
+            let created_by = match note.created_by_user_id {
+                Some(id) => self.get_user(id)?,
+                None => None,
+            };
+            out.push(CreditNoteDetail {
+                lines: self.credit_note_lines(note.id)?,
+                created_by,
+                credit_note: note,
+            });
+        }
+        Ok(out)
+    }
+
+    /// One credit note's lines.
+    pub fn credit_note_lines(&self, credit_note_id: i64) -> Result<Vec<CreditNoteLine>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, credit_note_id, invoice_line_id, item_id, qty, rate, tax_rate,
+                    line_total
+               FROM credit_note_lines
+              WHERE credit_note_id = ?1
+              ORDER BY id",
+        )?;
+        let rows = stmt.query_map([credit_note_id], |row| {
+            Ok(CreditNoteLine {
+                id: row.get(0)?,
+                credit_note_id: row.get(1)?,
+                invoice_line_id: row.get(2)?,
+                item_id: row.get(3)?,
+                qty: row.get(4)?,
+                rate: row.get(5)?,
+                tax_rate: row.get(6)?,
+                line_total: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// What an invoice comes to once its credit notes are taken off.
+    pub fn invoice_net(&self, invoice_id: i64) -> Result<InvoiceNet> {
+        let invoice = self
+            .get_invoice(invoice_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("invoice {invoice_id}")))?;
+
+        let (note_count, credited_total, credited_subtotal, credited_tax) = self.conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(grand_total), 0),
+                    COALESCE(SUM(subtotal), 0),
+                    COALESCE(SUM(cgst + sgst + igst), 0)
+               FROM credit_notes
+              WHERE original_invoice_id = ?1",
+            [invoice_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+
+        Ok(InvoiceNet {
+            credited_total: gst::round_money(credited_total),
+            credited_subtotal: gst::round_money(credited_subtotal),
+            credited_tax: gst::round_money(credited_tax),
+            net_total: gst::round_money(invoice.grand_total - credited_total),
+            note_count,
+        })
+    }
+
     // --------------------------------------------------------------- sync queue
 
     /// Queued rows nothing has sent yet, oldest first. Unbounded: used by tests and by
@@ -976,7 +1260,15 @@ impl Db {
     /// produced once, in one place, for every runtime.
     pub fn sales_summary(&self, range: &DateRange) -> Result<SalesSummary> {
         let (from, to) = (range.from.clone(), range.to.clone());
-        Ok(self.conn.query_row(
+
+        let (invoice_count, subtotal, cgst, sgst, igst, grand_total): (
+            i64,
+            f64,
+            f64,
+            f64,
+            f64,
+            f64,
+        ) = self.conn.query_row(
             "SELECT COUNT(*),
                     COALESCE(SUM(subtotal), 0),
                     COALESCE(SUM(cgst), 0),
@@ -988,45 +1280,88 @@ impl Db {
                 AND (?2 IS NULL OR date <= ?2)",
             params![from, to],
             |row| {
-                let cgst: f64 = row.get(2)?;
-                let sgst: f64 = row.get(3)?;
-                let igst: f64 = row.get(4)?;
-                Ok(SalesSummary {
-                    invoice_count: row.get(0)?,
-                    subtotal: row.get(1)?,
-                    cgst,
-                    sgst,
-                    igst,
-                    tax_total: crate::gst::round_money(cgst + sgst + igst),
-                    grand_total: row.get(5)?,
-                })
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
             },
-        )?)
+        )?;
+
+        // Credit notes are dated when they were issued, and counted in the range they fall
+        // in — not pushed back to the invoice's date. A return in October reduces October,
+        // which is the month somebody has to file.
+        let (credit_note_count, credited_subtotal, credited_tax, credited_total): (
+            i64,
+            f64,
+            f64,
+            f64,
+        ) = self.conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(subtotal), 0),
+                    COALESCE(SUM(cgst + sgst + igst), 0),
+                    COALESCE(SUM(grand_total), 0)
+               FROM credit_notes
+              WHERE (?1 IS NULL OR date >= ?1)
+                AND (?2 IS NULL OR date <= ?2)",
+            params![from, to],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+
+        let tax_total = gst::round_money(cgst + sgst + igst);
+
+        Ok(SalesSummary {
+            invoice_count,
+            subtotal,
+            cgst,
+            sgst,
+            igst,
+            tax_total,
+            grand_total,
+            credit_note_count,
+            credited_subtotal: gst::round_money(credited_subtotal),
+            credited_tax: gst::round_money(credited_tax),
+            credited_total: gst::round_money(credited_total),
+            net_subtotal: gst::round_money(subtotal - credited_subtotal),
+            net_tax: gst::round_money(tax_total - credited_tax),
+            net_total: gst::round_money(grand_total - credited_total),
+        })
     }
 
     /// One row per day that had billing, oldest first. A day with no sales is absent
     /// rather than zero: whether a gap is a gap or a zero is the caller's question.
     pub fn daily_totals(&self, range: &DateRange) -> Result<Vec<DailyTotal>> {
         let (from, to) = (range.from.clone(), range.to.clone());
+        // A day appears if it had billing *or* credits: a day whose only activity was a
+        // return is a real day with a real negative net, and dropping it would hide it.
         let mut stmt = self.conn.prepare(
-            "SELECT date,
-                    COUNT(*),
-                    COALESCE(SUM(cgst + sgst), 0),
-                    COALESCE(SUM(igst), 0),
-                    COALESCE(SUM(grand_total), 0)
-               FROM invoices
-              WHERE (?1 IS NULL OR date >= ?1)
-                AND (?2 IS NULL OR date <= ?2)
-              GROUP BY date
-              ORDER BY date",
+            "SELECT d.date,
+                    COALESCE(i.n, 0),
+                    COALESCE(i.cgst_sgst, 0),
+                    COALESCE(i.igst, 0),
+                    COALESCE(i.billed, 0),
+                    COALESCE(c.credited, 0)
+               FROM (SELECT date FROM invoices
+                      UNION SELECT date FROM credit_notes) d
+               LEFT JOIN (SELECT date,
+                                 COUNT(*) AS n,
+                                 SUM(cgst + sgst) AS cgst_sgst,
+                                 SUM(igst) AS igst,
+                                 SUM(grand_total) AS billed
+                            FROM invoices GROUP BY date) i ON i.date = d.date
+               LEFT JOIN (SELECT date, SUM(grand_total) AS credited
+                            FROM credit_notes GROUP BY date) c ON c.date = d.date
+              WHERE (?1 IS NULL OR d.date >= ?1)
+                AND (?2 IS NULL OR d.date <= ?2)
+              ORDER BY d.date",
         )?;
         let rows = stmt.query_map(params![from, to], |row| {
+            let grand_total: f64 = row.get(4)?;
+            let credited_total: f64 = row.get(5)?;
             Ok(DailyTotal {
                 date: row.get(0)?,
                 invoice_count: row.get(1)?,
                 cgst_sgst: row.get(2)?,
                 igst: row.get(3)?,
-                grand_total: row.get(4)?,
+                grand_total,
+                credited_total,
+                net_total: grand_total - credited_total,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1035,18 +1370,35 @@ impl Db {
     /// What sold, by revenue, best first.
     pub fn top_items(&self, range: &DateRange, limit: i64) -> Result<Vec<TopItem>> {
         let (from, to) = (range.from.clone(), range.to.clone());
+        // Ranked on revenue *after* credits. An item sold ten times and returned nine is
+        // not this shop's best seller, and a list that said so would be worse than no
+        // list.
         let mut stmt = self.conn.prepare(
             "SELECT i.item_code,
                     i.description,
-                    COALESCE(SUM(l.qty), 0),
-                    COALESCE(SUM(l.line_total), 0) AS revenue
-               FROM invoice_lines l
-               JOIN items i ON i.id = l.item_id
-               JOIN invoices v ON v.id = l.invoice_id
-              WHERE (?1 IS NULL OR v.date >= ?1)
-                AND (?2 IS NULL OR v.date <= ?2)
-              GROUP BY l.item_id
-              ORDER BY revenue DESC
+                    COALESCE(s.qty, 0) - COALESCE(r.qty, 0) AS net_qty,
+                    COALESCE(s.revenue, 0) - COALESCE(r.revenue, 0) AS net_revenue,
+                    COALESCE(r.qty, 0),
+                    COALESCE(r.revenue, 0)
+               FROM items i
+               LEFT JOIN (SELECT l.item_id,
+                                 SUM(l.qty) AS qty,
+                                 SUM(l.line_total) AS revenue
+                            FROM invoice_lines l
+                            JOIN invoices v ON v.id = l.invoice_id
+                           WHERE (?1 IS NULL OR v.date >= ?1)
+                             AND (?2 IS NULL OR v.date <= ?2)
+                           GROUP BY l.item_id) s ON s.item_id = i.id
+               LEFT JOIN (SELECT cl.item_id,
+                                 SUM(cl.qty) AS qty,
+                                 SUM(cl.line_total) AS revenue
+                            FROM credit_note_lines cl
+                            JOIN credit_notes cn ON cn.id = cl.credit_note_id
+                           WHERE (?1 IS NULL OR cn.date >= ?1)
+                             AND (?2 IS NULL OR cn.date <= ?2)
+                           GROUP BY cl.item_id) r ON r.item_id = i.id
+              WHERE s.item_id IS NOT NULL OR r.item_id IS NOT NULL
+              ORDER BY net_revenue DESC
               LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![from, to, limit], |row| {
@@ -1055,6 +1407,8 @@ impl Db {
                 description: row.get(1)?,
                 qty: row.get(2)?,
                 revenue: row.get(3)?,
+                credited_qty: row.get(4)?,
+                credited_revenue: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1063,14 +1417,22 @@ impl Db {
     /// How customers paid, biggest share first.
     pub fn payment_mix(&self, range: &DateRange) -> Result<Vec<PaymentMix>> {
         let (from, to) = (range.from.clone(), range.to.clone());
+        // Credits are attributed to the payment type of the invoice they reverse: money
+        // refunded on a card sale did not arrive as cash, whatever the refund itself was.
         let mut stmt = self.conn.prepare(
-            "SELECT payment_type,
+            "SELECT v.payment_type,
                     COUNT(*),
-                    COALESCE(SUM(grand_total), 0) AS billed
-               FROM invoices
-              WHERE (?1 IS NULL OR date >= ?1)
-                AND (?2 IS NULL OR date <= ?2)
-              GROUP BY payment_type
+                    COALESCE(SUM(v.grand_total), 0)
+                      - COALESCE((SELECT SUM(cn.grand_total)
+                                    FROM credit_notes cn
+                                    JOIN invoices vi ON vi.id = cn.original_invoice_id
+                                   WHERE vi.payment_type = v.payment_type
+                                     AND (?1 IS NULL OR cn.date >= ?1)
+                                     AND (?2 IS NULL OR cn.date <= ?2)), 0) AS billed
+               FROM invoices v
+              WHERE (?1 IS NULL OR v.date >= ?1)
+                AND (?2 IS NULL OR v.date <= ?2)
+              GROUP BY v.payment_type
               ORDER BY billed DESC",
         )?;
         let rows = stmt.query_map(params![from, to], |row| {
@@ -1082,6 +1444,49 @@ impl Db {
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+/// Floating-point slack when comparing a credited quantity against what remains.
+///
+/// Quantities are `REAL`, so 7.0 minus three lots of 2.333… does not land exactly on
+/// zero. Without this, crediting the last sliver of a line would be refused for a
+/// rounding artefact the person on the screen cannot see.
+const QTY_EPSILON: f64 = 1e-9;
+
+/// A place of supply that is deliberately not the home state, used to reproduce an
+/// inter-state split on a credit note without re-reading the customer's current address.
+const INTER_STATE_PLACEHOLDER: &str = "__INTER_STATE__";
+
+/// Highest credit note number issued in a financial year, or `None` for a fresh year.
+/// Lexical MAX works for the same reason it does for invoices: fixed prefix, zero-padded.
+fn highest_credit_note_no(conn: &Connection, fy: i32) -> Result<Option<String>> {
+    let prefix = format!("{}-{fy}-%", crate::numbering::CREDIT_NOTE_PREFIX);
+    Ok(conn
+        .query_row(
+            "SELECT MAX(credit_note_no) FROM credit_notes WHERE credit_note_no LIKE ?1",
+            [prefix],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+fn credit_note_from_row(row: &Row<'_>) -> rusqlite::Result<CreditNote> {
+    Ok(CreditNote {
+        id: row.get(0)?,
+        credit_note_no: row.get(1)?,
+        original_invoice_id: row.get(2)?,
+        date: row.get(3)?,
+        reason: row.get(4)?,
+        subtotal: row.get(5)?,
+        cgst: row.get(6)?,
+        sgst: row.get(7)?,
+        igst: row.get(8)?,
+        grand_total: row.get(9)?,
+        sync_status: row.get(10)?,
+        created_at: row.get(11)?,
+        created_by_user_id: row.get(12)?,
+    })
 }
 
 /// Highest invoice number issued in a financial year, or `None` for a fresh year.
@@ -1148,7 +1553,12 @@ pub const MAX_FAILED_LOGINS: i64 = 5;
 
 /// How long failures are remembered for, in minutes. Attempts age out of this window on
 /// their own; nothing resets it early.
-pub const LOGIN_WINDOW_MINUTES: i64 = 15;
+///
+/// One minute is short for a lockout. It is enough to make guessing at bcrypt speed
+/// pointless — five tries a minute is not a brute force — while keeping a mistyped
+/// password from costing a counter its next customer. Raise it if this ever faces
+/// anything but a shop floor.
+pub const LOGIN_WINDOW_MINUTES: i64 = 1;
 
 /// One spelling of a username, used by the credential check and the limiter alike.
 ///

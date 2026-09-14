@@ -26,6 +26,11 @@ fifteen.
 an oracle: a real account would eventually start answering "locked", an imaginary one
 never would, and the feature meant to protect accounts would enumerate them.
 
+**The window is one minute** (`LOGIN_WINDOW_MINUTES`). Enough to make guessing at bcrypt
+speed pointless — five tries a minute is not a brute force — without a mistyped password
+costing a counter its next customer. The screen quotes the number from the constant rather
+than writing it out, so changing it cannot leave the message promising the old one.
+
 **A success does not clear earlier failures.** Letting one correct sign-in wipe the slate
 would mean anybody who knew any one password on the machine could reset the limiter for
 every other account at will. Failures age out on their own, and nothing resets the window
@@ -59,7 +64,7 @@ password is wrong when it is right sends them hunting for a mistake they have no
 | State | Message |
 | --- | --- |
 | 1st–3rd failure | "Incorrect username or password." |
-| 4th | "… 2 attempts left before this account is locked for 15 minutes." |
+| 4th | "… 2 attempts left before this account is locked for a minute." |
 | 5th | "… 1 attempt left …" |
 | Locked | "Too many failed attempts. Try again in **12:29**." — counting down every second |
 

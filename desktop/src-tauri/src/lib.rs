@@ -60,6 +60,9 @@ pub fn run() {
             commands::list_todays_invoices,
             commands::list_invoices,
             commands::invoice_detail,
+            commands::creditable_lines,
+            commands::create_credit_note,
+            commands::credit_history,
             commands::quote_invoice,
         ])
         .run(tauri::generate_context!())

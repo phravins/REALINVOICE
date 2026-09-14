@@ -268,6 +268,23 @@ pub struct SalesSummary {
     /// `cgst + sgst + igst` — what has to be remitted, whichever way it split.
     pub tax_total: f64,
     pub grand_total: f64,
+
+    /// Credit notes issued in the same range.
+    ///
+    /// Kept beside the gross figures rather than folded into them, because both are real:
+    /// what was billed is what the invoices say, and what was earned is what is left after
+    /// corrections. A report that showed only one would be answering a different question
+    /// from the one asked.
+    pub credit_note_count: i64,
+    pub credited_subtotal: f64,
+    pub credited_tax: f64,
+    pub credited_total: f64,
+
+    /// What the shop actually earned: billed less credited. This is the figure to file a
+    /// return against, and the one the Analytics pane leads with.
+    pub net_subtotal: f64,
+    pub net_tax: f64,
+    pub net_total: f64,
 }
 
 /// One day's billing, for the chart across the top of Analytics.
@@ -278,6 +295,10 @@ pub struct DailyTotal {
     pub cgst_sgst: f64,
     pub igst: f64,
     pub grand_total: f64,
+    /// Credited on the same day. A day with a large return can net negative, which is
+    /// true and worth seeing rather than clamping to zero.
+    pub credited_total: f64,
+    pub net_total: f64,
 }
 
 /// What sold, by revenue.
@@ -285,8 +306,12 @@ pub struct DailyTotal {
 pub struct TopItem {
     pub item_code: String,
     pub description: String,
+    /// Quantity billed less quantity credited back.
     pub qty: f64,
+    /// Revenue net of credits, which is what "what sold" means once returns exist.
     pub revenue: f64,
+    pub credited_qty: f64,
+    pub credited_revenue: f64,
 }
 
 /// How customers paid.
@@ -294,6 +319,7 @@ pub struct TopItem {
 pub struct PaymentMix {
     pub payment_type: String,
     pub invoice_count: i64,
+    /// Net of credit notes against invoices taken that way.
     pub grand_total: f64,
 }
 
@@ -335,4 +361,102 @@ pub struct LoginAttempt {
     /// Turned away by the lockout without the password being checked. Logged, but not
     /// counted towards the limit.
     pub refused: bool,
+}
+
+// ------------------------------------------------------------------ credit notes
+
+/// A correction against an invoice. The invoice itself is never touched.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreditNote {
+    pub id: i64,
+    pub credit_note_no: String,
+    pub original_invoice_id: i64,
+    pub date: String,
+    pub reason: String,
+    pub subtotal: f64,
+    pub cgst: f64,
+    pub sgst: f64,
+    pub igst: f64,
+    pub grand_total: f64,
+    pub sync_status: String,
+    pub created_at: String,
+    pub created_by_user_id: Option<i64>,
+}
+
+/// One credited line, tied to the invoice line it reverses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreditNoteLine {
+    pub id: i64,
+    pub credit_note_id: i64,
+    pub invoice_line_id: i64,
+    pub item_id: i64,
+    pub qty: f64,
+    pub rate: f64,
+    pub tax_rate: f64,
+    pub line_total: f64,
+}
+
+/// What a caller asks for. Attribution is filled from the session by the runtime, never
+/// taken from the payload — the same rule invoices follow.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewCreditNote {
+    pub original_invoice_id: i64,
+    /// Free text, required. Core refuses a blank one.
+    pub reason: String,
+    #[serde(default)]
+    pub date: Option<String>,
+    #[serde(default)]
+    pub created_by_user_id: Option<i64>,
+    pub lines: Vec<NewCreditNoteLine>,
+}
+
+/// One line to credit, by invoice line and quantity. A line credited at zero is simply
+/// left out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewCreditNoteLine {
+    pub invoice_line_id: i64,
+    pub qty: f64,
+}
+
+/// A credit note with its lines, for display.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreditNoteDetail {
+    pub credit_note: CreditNote,
+    pub lines: Vec<CreditNoteLine>,
+    /// Who issued it, if the record still names a user on this machine.
+    pub created_by: Option<User>,
+}
+
+/// How much of one invoice line has already been credited, and how much is left.
+///
+/// What the form is built from and what the validation checks against: a line can be
+/// credited across several notes, and the sum of them must never exceed what was billed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreditableLine {
+    pub invoice_line_id: i64,
+    pub item_id: i64,
+    pub item_code: String,
+    pub description: String,
+    pub rate: f64,
+    pub tax_rate: f64,
+    pub uom: String,
+    /// Quantity on the original invoice line.
+    pub billed_qty: f64,
+    /// Already credited by earlier notes against this invoice.
+    pub credited_qty: f64,
+    /// `billed_qty - credited_qty`. Zero means this line is fully reversed already.
+    pub creditable_qty: f64,
+}
+
+/// An invoice, what has been credited against it, and what that leaves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InvoiceNet {
+    /// Total of every credit note against this invoice.
+    pub credited_total: f64,
+    pub credited_subtotal: f64,
+    pub credited_tax: f64,
+    /// The invoice's grand total less everything credited. Never below zero, because core
+    /// refuses to credit more than was billed.
+    pub net_total: f64,
+    pub note_count: i64,
 }
