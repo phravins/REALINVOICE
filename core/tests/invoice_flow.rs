@@ -2,8 +2,9 @@
 //! reopened SQLite file with its lines and its `sync_queue` rows intact.
 
 use realinvoice_core::{
-    seed, CoreError, DateRange, Db, InvoiceFilter, ItemFilter, NewCustomer, NewInvoice,
-    NewInvoiceLine, NewItem, NewUser, Role, User,
+    seed, CoreError, DateRange, Db, InvoiceFilter, ItemFilter, LoginOutcome, NewCreditNote,
+    NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser, Role, SyncBatch,
+    User,
 };
 
 fn seeded_db() -> Db {
@@ -734,7 +735,8 @@ fn a_fresh_installation_has_no_accounts_at_all() {
     assert_eq!(db.count_users().unwrap(), 0);
     assert!(db.list_users().unwrap().is_empty());
     assert!(db.find_user("admin").unwrap().is_none(), "no default account exists");
-    assert!(db.verify_login("admin", "admin").unwrap().is_none());
+    let mut db = db;
+    assert_eq!(db.attempt_login("admin", "admin").unwrap(), LoginOutcome::Invalid);
 }
 
 #[test]
@@ -744,12 +746,14 @@ fn the_account_created_at_setup_can_sign_in() {
     assert_eq!(created.role, Role::Owner);
     assert_eq!(db.count_users().unwrap(), 1, "the app is now set up");
 
-    let signed_in = db.verify_login("priya", "counter-top-2026").unwrap().expect("sign-in");
-    assert_eq!(signed_in, created);
+    assert_eq!(
+        db.attempt_login("priya", "counter-top-2026").unwrap(),
+        LoginOutcome::Ok(created.clone())
+    );
 
     // Case-insensitive username, exact password.
-    assert!(db.verify_login("PRIYA", "counter-top-2026").unwrap().is_some());
-    assert!(db.verify_login("priya", "COUNTER-TOP-2026").unwrap().is_none());
+    assert!(matches!(db.attempt_login("PRIYA", "counter-top-2026").unwrap(), LoginOutcome::Ok(_)));
+    assert_eq!(db.attempt_login("priya", "COUNTER-TOP-2026").unwrap(), LoginOutcome::Invalid);
 }
 
 #[test]
@@ -757,9 +761,9 @@ fn a_wrong_password_or_unknown_user_both_return_none() {
     let mut db = Db::open_in_memory().unwrap();
     owner(&mut db);
 
-    assert!(db.verify_login("priya", "not the password").unwrap().is_none());
-    assert!(db.verify_login("nobody", "whatever").unwrap().is_none());
-    assert!(db.verify_login("", "").unwrap().is_none());
+    assert_eq!(db.attempt_login("priya", "not the password").unwrap(), LoginOutcome::Invalid);
+    assert_eq!(db.attempt_login("nobody", "whatever").unwrap(), LoginOutcome::Invalid);
+    assert_eq!(db.attempt_login("", "").unwrap(), LoginOutcome::Invalid);
 }
 
 #[test]
@@ -797,7 +801,7 @@ fn an_owner_can_add_staff_and_duplicates_are_refused() {
         .unwrap();
     assert_eq!(cashier.username, "meena", "usernames normalise to lowercase");
     assert_eq!(cashier.role, Role::Cashier);
-    assert!(db.verify_login("MEENA", "counter-password").unwrap().is_some());
+    assert!(matches!(db.attempt_login("MEENA", "counter-password").unwrap(), LoginOutcome::Ok(_)));
 
     let duplicate = db.create_user(
         &NewUser {
@@ -1142,4 +1146,805 @@ fn the_payment_mix_covers_every_invoice_once() {
 
     // Biggest share first: cash and card both took a rack, UPI took the licences.
     assert_eq!(mix[2].payment_type, "upi");
+}
+
+// ------------------------------------------------------------------ sync queue
+
+#[test]
+fn a_batch_is_taken_oldest_first_and_capped() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let rack = item(&db, "RACK-42U-PRO");
+    db.create_invoice(&NewInvoice {
+        customer_id: buyer.id,
+        date: None,
+        payment_type: "cash".into(),
+        created_by_user_id: None,
+        lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+    })
+    .unwrap();
+
+    let all = db.pending_sync_rows().unwrap();
+    assert!(all.len() > 3, "the demo data and the invoice are queued");
+
+    let batch = db.next_sync_batch(3).unwrap();
+    assert_eq!(batch.len(), 3, "the cap is honoured");
+
+    // Oldest first, and that is load-bearing: a customer is queued before the invoice
+    // that references it, and an invoice before its lines, so sending in this order means
+    // the far end never sees a row whose parent has not arrived.
+    let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(ids, sorted);
+    assert_eq!(ids[0], all[0].id);
+
+    let order: Vec<&str> = all.iter().map(|r| r.table_name.as_str()).collect();
+    let invoice_at = order.iter().position(|t| *t == "invoices").unwrap();
+    let line_at = order.iter().position(|t| *t == "invoice_lines").unwrap();
+    assert!(invoice_at < line_at, "an invoice is queued before its lines");
+}
+
+#[test]
+fn marking_a_batch_sent_removes_it_from_the_queue_and_nothing_else() {
+    let mut db = seeded_db();
+    let before = db.pending_sync_count().unwrap();
+    assert_eq!(before as usize, db.pending_sync_rows().unwrap().len());
+
+    let batch = db.next_sync_batch(5).unwrap();
+    let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
+
+    assert_eq!(db.mark_synced(&ids).unwrap(), 5);
+    assert_eq!(db.pending_sync_count().unwrap(), before - 5);
+
+    // The next batch carries on from where that one stopped, never repeating it.
+    let next = db.next_sync_batch(5).unwrap();
+    assert!(next.iter().all(|r| !ids.contains(&r.id)));
+
+    // Marking the same rows again is harmless — a duplicate acknowledgement must not
+    // rewrite when they were sent, or mark anything else.
+    assert_eq!(db.mark_synced(&ids).unwrap(), 0, "already-sent rows are not re-marked");
+    assert_eq!(db.pending_sync_count().unwrap(), before - 5);
+    assert_eq!(db.mark_synced(&[]).unwrap(), 0);
+}
+
+#[test]
+fn a_failed_push_loses_nothing() {
+    // What the worker does on a non-2xx or a network error: mark nothing. The same batch
+    // has to come back, in the same order, or a rejected batch would cost records.
+    let mut db = seeded_db();
+    let first = db.next_sync_batch(4).unwrap();
+
+    // ... no mark_synced call ...
+
+    let retry = db.next_sync_batch(4).unwrap();
+    assert_eq!(
+        first.iter().map(|r| r.id).collect::<Vec<_>>(),
+        retry.iter().map(|r| r.id).collect::<Vec<_>>(),
+        "a failed batch is retried as the same batch"
+    );
+
+    // And billing during the outage simply lengthens the queue.
+    let buyer = customer(&db, "9840012345");
+    let rack = item(&db, "RACK-42U-PRO");
+    let before = db.pending_sync_count().unwrap();
+    db.create_invoice(&NewInvoice {
+        customer_id: buyer.id,
+        date: None,
+        payment_type: "cash".into(),
+        created_by_user_id: None,
+        lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+    })
+    .unwrap();
+    assert!(db.pending_sync_count().unwrap() > before, "an offline till keeps billing");
+}
+
+#[test]
+fn the_wire_format_carries_each_record_as_an_object() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let rack = item(&db, "RACK-42U-PRO");
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "upi".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+        })
+        .unwrap();
+
+    let queued = db.pending_sync_rows().unwrap();
+    let batch = SyncBatch::build("POS-01", &queued).unwrap();
+
+    assert_eq!(batch.node_id, "POS-01");
+    assert_eq!(batch.rows.len(), queued.len());
+    assert_eq!(batch.ids(), queued.iter().map(|r| r.id).collect::<Vec<_>>());
+
+    let row = batch.rows.iter().find(|r| r.table_name == "invoices").unwrap();
+    assert_eq!(row.row_id, invoice.id);
+    assert_eq!(row.op, "insert");
+
+    // The payload is a JSON object, not the stored string re-quoted: the far end should
+    // receive a record it can decode, not a blob it has to parse a second time.
+    let payload = row.payload.as_object().expect("an object, not a string");
+    assert_eq!(payload["invoice_no"], invoice.invoice_no.as_str());
+    assert_eq!(payload["grand_total"], invoice.grand_total);
+    assert_eq!(payload["payment_type"], "upi");
+    // snake_case keys, matching the column names, so an Ecto schema can map them directly.
+    assert!(payload.contains_key("customer_id"));
+    assert!(payload.contains_key("created_at"));
+
+    // The whole envelope round-trips, which is what the endpoint will actually receive.
+    let json = serde_json::to_string(&batch).unwrap();
+    let parsed: SyncBatch = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, batch);
+}
+
+// ------------------------------------------------------------ login rate limit
+
+/// An owner plus a cashier, so a lockout on one can be shown not to touch the other.
+fn two_accounts(db: &mut Db) {
+    owner(db);
+    db.create_user(
+        &NewUser { username: "meena".into(), display_name: "Meena R".into(), role: Role::Cashier },
+        "counter-password",
+    )
+    .unwrap();
+}
+
+#[test]
+fn five_failures_lock_the_account_and_the_sixth_is_refused_even_when_correct() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    for attempt in 1..=4 {
+        assert_eq!(
+            db.attempt_login("priya", "wrong").unwrap(),
+            LoginOutcome::Invalid,
+            "attempt {attempt} should still be allowed through to the password check"
+        );
+        assert!(db.lockout_for("priya").unwrap().is_none(), "not locked yet at {attempt}");
+    }
+
+    // The fifth failure is the one that trips it.
+    assert_eq!(db.attempt_login("priya", "wrong").unwrap(), LoginOutcome::Invalid);
+
+    let lockout = db.lockout_for("priya").unwrap().expect("locked out after five");
+    assert_eq!(lockout.failures, 5);
+    assert_eq!(lockout.remaining, 0);
+    assert!(lockout.retry_after_seconds > 0);
+    assert!(lockout.retry_after_seconds <= realinvoice_core::LOGIN_WINDOW_MINUTES * 60);
+
+    // The sixth attempt is refused **with the right password**. This is the whole point:
+    // a correct credential does not get you past the limiter.
+    match db.attempt_login("priya", "counter-top-2026").unwrap() {
+        LoginOutcome::LockedOut(l) => assert!(l.retry_after_seconds > 0),
+        other => panic!("expected a lockout, got {other:?}"),
+    }
+}
+
+#[test]
+fn one_accounts_lockout_does_not_touch_another() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    for _ in 0..5 {
+        db.attempt_login("priya", "wrong").unwrap();
+    }
+    assert!(db.lockout_for("priya").unwrap().is_some());
+
+    // The cashier is unaffected, and can still sign in normally.
+    assert!(db.lockout_for("meena").unwrap().is_none());
+    assert!(matches!(db.attempt_login("meena", "counter-password").unwrap(), LoginOutcome::Ok(_)));
+
+    // And a username that does not exist keeps its own count, so one locked account
+    // cannot shut the whole machine.
+    assert!(db.lockout_for("nobody").unwrap().is_none());
+    assert_eq!(db.attempt_login("nobody", "whatever").unwrap(), LoginOutcome::Invalid);
+}
+
+#[test]
+fn the_limit_counts_one_username_however_it_is_typed() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    // If the limiter keyed on the raw string, these would be five buckets of one rather
+    // than one bucket of five, and the limit would be trivially bypassed.
+    for spelling in ["priya", "PRIYA", "  priya  ", "Priya", "pRiYa"] {
+        assert_eq!(db.attempt_login(spelling, "wrong").unwrap(), LoginOutcome::Invalid);
+    }
+
+    assert_eq!(db.recent_failed_logins("priya").unwrap(), 5);
+    assert!(db.lockout_for("PRIYA").unwrap().is_some(), "checked under any spelling too");
+}
+
+#[test]
+fn a_username_that_does_not_exist_locks_out_on_the_same_terms() {
+    // Otherwise the lockout itself becomes an oracle: a real account would eventually
+    // start answering "locked", and an imaginary one never would.
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    for _ in 0..5 {
+        assert_eq!(db.attempt_login("ghost", "wrong").unwrap(), LoginOutcome::Invalid);
+    }
+
+    let lockout = db.lockout_for("ghost").unwrap().expect("an unknown username locks out too");
+    assert_eq!(lockout.failures, 5);
+    assert!(matches!(db.attempt_login("ghost", "wrong").unwrap(), LoginOutcome::LockedOut(_)));
+}
+
+#[test]
+fn a_success_does_not_wipe_earlier_failures() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    for _ in 0..4 {
+        db.attempt_login("priya", "wrong").unwrap();
+    }
+    assert_eq!(db.recent_failed_logins("priya").unwrap(), 4);
+
+    // A correct sign-in in the middle is allowed — four is under the limit — but it must
+    // not reset the count. If it did, anybody who knew one password could clear the
+    // limiter at will and brute-force the rest of the window indefinitely.
+    assert!(matches!(db.attempt_login("priya", "counter-top-2026").unwrap(), LoginOutcome::Ok(_)));
+    assert_eq!(db.recent_failed_logins("priya").unwrap(), 4, "failures survive a success");
+
+    // So the very next failure is the fifth, and it locks.
+    db.attempt_login("priya", "wrong").unwrap();
+    assert!(db.lockout_for("priya").unwrap().is_some());
+}
+
+#[test]
+fn attempting_while_locked_out_does_not_extend_the_lockout() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    for _ in 0..5 {
+        db.attempt_login("priya", "wrong").unwrap();
+    }
+    let first = db.lockout_for("priya").unwrap().unwrap();
+
+    // Hammering a locked account must not keep pushing the deadline out — that would turn
+    // the rate limit into a way of keeping the real owner locked out forever.
+    for _ in 0..10 {
+        assert!(matches!(db.attempt_login("priya", "wrong").unwrap(), LoginOutcome::LockedOut(_)));
+    }
+    let later = db.lockout_for("priya").unwrap().unwrap();
+
+    assert_eq!(later.failures, 5, "refused attempts are logged but do not count");
+    assert!(
+        later.retry_after_seconds <= first.retry_after_seconds,
+        "the deadline moved closer, never further away"
+    );
+}
+
+#[test]
+fn failures_age_out_of_the_window() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    for _ in 0..5 {
+        db.attempt_login("priya", "wrong").unwrap();
+    }
+    assert!(db.lockout_for("priya").unwrap().is_some());
+
+    // Rather than sleeping fifteen minutes, backdate the recorded attempts past the
+    // window — which is exactly what the passage of time does to them.
+    db.backdate_login_attempts_for_test("priya", realinvoice_core::LOGIN_WINDOW_MINUTES + 1)
+        .unwrap();
+
+    assert_eq!(db.recent_failed_logins("priya").unwrap(), 0, "outside the window");
+    assert!(db.lockout_for("priya").unwrap().is_none(), "the lock lifts on its own");
+    assert!(matches!(db.attempt_login("priya", "counter-top-2026").unwrap(), LoginOutcome::Ok(_)));
+
+    // The rows are still there — aged out of the window, not deleted.
+    assert!(db.login_attempts("priya").unwrap().len() > 5);
+}
+
+#[test]
+fn every_attempt_is_recorded_and_no_secret_is() {
+    let mut db = Db::open_in_memory().unwrap();
+    two_accounts(&mut db);
+
+    db.attempt_login("priya", "counter-top-2026").unwrap();
+    db.attempt_login("priya", "wrong").unwrap();
+
+    let log = db.login_attempts("priya").unwrap();
+    assert_eq!(log.len(), 2, "success and failure alike");
+    assert!(log[0].success);
+    assert!(!log[1].success);
+    assert_eq!(log[0].username, "priya", "stored normalised");
+    assert!(log[0].attempted_at.len() >= 19);
+
+    // A failed-login log that recorded what was typed would be a second place passwords
+    // leak from — including the near-misses, which are the most valuable kind.
+    let serialized = serde_json::to_string(&log).unwrap();
+    assert!(!serialized.contains("counter-top-2026"), "{serialized}");
+    assert!(!serialized.contains("wrong"), "{serialized}");
+    assert!(!serialized.contains("$2"), "no hash either");
+
+    // And none of it is queued for the back office.
+    let queued: String =
+        db.pending_sync_rows().unwrap().iter().map(|r| r.payload_json.clone()).collect();
+    assert!(!queued.contains("login_attempt"));
+    assert!(!queued.contains("priya"));
+}
+
+// ------------------------------------------------------------------ credit notes
+
+/// Billed: 2 racks at 45,000 (18%) and 40 bags of cement at 410 (28%), to a Tamil Nadu
+/// buyer, so intra-state CGST + SGST. Two different tax rates on purpose — a credit note
+/// that quietly applied one rate to the whole document would pass a single-rate test.
+fn billed_invoice(db: &mut Db) -> realinvoice_core::Invoice {
+    let buyer = customer(db, "9840012345");
+    let rack = item(db, "RACK-42U-PRO");
+    let cement = item(db, "CEM-OPC-53");
+
+    db.create_invoice(&NewInvoice {
+        customer_id: buyer.id,
+        date: None,
+        payment_type: "cash".into(),
+        created_by_user_id: None,
+        lines: vec![
+            NewInvoiceLine { item_id: rack.id, qty: 2.0, rate: None, tax_rate: None },
+            NewInvoiceLine { item_id: cement.id, qty: 40.0, rate: None, tax_rate: None },
+        ],
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_partial_credit_prices_the_credited_quantity_and_leaves_the_invoice_alone() {
+    let mut db = seeded_db();
+    let owner = owner(&mut db);
+    let invoice = billed_invoice(&mut db);
+
+    // 2 × 45,000 = 90,000 at 18% → 16,200 tax; 40 × 410 = 16,400 at 28% → 4,592 tax.
+    assert_eq!(invoice.subtotal, 106_400.0);
+    assert_eq!(invoice.cgst, 10_396.0);
+    assert_eq!(invoice.sgst, 10_396.0);
+    assert_eq!(invoice.grand_total, 127_192.0);
+
+    let lines = db.creditable_lines(invoice.id).unwrap();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].billed_qty, 2.0);
+    assert_eq!(lines[0].credited_qty, 0.0);
+    assert_eq!(lines[0].creditable_qty, 2.0);
+
+    // One rack comes back.
+    let note = db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "  Customer returned one rack, damaged in transit  ".into(),
+            date: None,
+            created_by_user_id: Some(owner.id),
+            lines: vec![NewCreditNoteLine { invoice_line_id: lines[0].invoice_line_id, qty: 1.0 }],
+        })
+        .unwrap();
+
+    assert_eq!(note.credit_note_no, "CN-2026-0001", "its own series, starting at 1");
+    assert_eq!(note.reason, "Customer returned one rack, damaged in transit", "trimmed");
+    assert_eq!(note.original_invoice_id, invoice.id);
+    assert_eq!(note.created_by_user_id, Some(owner.id));
+
+    // Priced as one rack, not as a fraction of the invoice: 45,000 + 9% + 9%.
+    assert_eq!(note.subtotal, 45_000.0);
+    assert_eq!(note.cgst, 4_050.0);
+    assert_eq!(note.sgst, 4_050.0);
+    assert_eq!(note.igst, 0.0, "the invoice was intra-state, so the credit is too");
+    assert_eq!(note.grand_total, 53_100.0);
+    assert_eq!(note.subtotal + note.cgst + note.sgst, note.grand_total);
+
+    // The invoice is untouched. This is the whole point of the design.
+    let after = db.get_invoice(invoice.id).unwrap().unwrap();
+    assert_eq!(after, invoice, "the original is byte-for-byte what was billed");
+    assert_eq!(db.get_invoice_detail(invoice.id).unwrap().unwrap().lines.len(), 2);
+
+    // And the net is the difference.
+    let net = db.invoice_net(invoice.id).unwrap();
+    assert_eq!(net.note_count, 1);
+    assert_eq!(net.credited_total, 53_100.0);
+    assert_eq!(net.net_total, 74_092.0, "127,192 billed less 53,100 credited");
+}
+
+#[test]
+fn a_line_cannot_be_credited_beyond_what_is_left() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let lines = db.creditable_lines(invoice.id).unwrap();
+    let rack_line = lines[0].invoice_line_id;
+
+    // More than was billed, in one go.
+    let too_much = db.create_credit_note(&NewCreditNote {
+        original_invoice_id: invoice.id,
+        reason: "trying it on".into(),
+        date: None,
+        created_by_user_id: None,
+        lines: vec![NewCreditNoteLine { invoice_line_id: rack_line, qty: 3.0 }],
+    });
+    assert!(matches!(too_much, Err(CoreError::Invalid(_))));
+
+    // Credit one, then try for two more: the ceiling is what *remains*, so two notes
+    // cannot add up to more than the invoice however they are ordered.
+    db.create_credit_note(&NewCreditNote {
+        original_invoice_id: invoice.id,
+        reason: "one back".into(),
+        date: None,
+        created_by_user_id: None,
+        lines: vec![NewCreditNoteLine { invoice_line_id: rack_line, qty: 1.0 }],
+    })
+    .unwrap();
+
+    let after_one = db.creditable_lines(invoice.id).unwrap();
+    assert_eq!(after_one[0].credited_qty, 1.0);
+    assert_eq!(after_one[0].creditable_qty, 1.0);
+
+    let over = db.create_credit_note(&NewCreditNote {
+        original_invoice_id: invoice.id,
+        reason: "and another two".into(),
+        date: None,
+        created_by_user_id: None,
+        lines: vec![NewCreditNoteLine { invoice_line_id: rack_line, qty: 2.0 }],
+    });
+    assert!(matches!(over, Err(CoreError::Invalid(_))), "cannot exceed what is left");
+
+    // The refused note wrote nothing.
+    assert_eq!(db.credit_notes_for_invoice(invoice.id).unwrap().len(), 1);
+    assert_eq!(db.invoice_net(invoice.id).unwrap().note_count, 1);
+}
+
+#[test]
+fn a_credit_note_needs_a_reason_and_something_to_credit() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let lines = db.creditable_lines(invoice.id).unwrap();
+    let line = lines[0].invoice_line_id;
+
+    let some = vec![NewCreditNoteLine { invoice_line_id: line, qty: 1.0 }];
+
+    // A correction with no stated reason is the one an auditor asks about and nobody can
+    // answer, so there is no path that writes a blank.
+    for blank in ["", "   ", "\t\n"] {
+        let refused = db.create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: blank.into(),
+            date: None,
+            created_by_user_id: None,
+            lines: some.clone(),
+        });
+        assert!(matches!(refused, Err(CoreError::Invalid(_))), "blank reason {blank:?}");
+    }
+
+    // Nothing selected is not a credit note.
+    assert!(matches!(
+        db.create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "fine".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![],
+        }),
+        Err(CoreError::Invalid(_))
+    ));
+
+    // Nor is a set of zero quantities.
+    assert!(matches!(
+        db.create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "fine".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: line, qty: 0.0 }],
+        }),
+        Err(CoreError::Invalid(_))
+    ));
+
+    // A negative quantity would *add* to an invoice through the correction path.
+    assert!(matches!(
+        db.create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "fine".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: line, qty: -1.0 }],
+        }),
+        Err(CoreError::Invalid(_))
+    ));
+
+    // A line from some other invoice is not on this one.
+    assert!(matches!(
+        db.create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "fine".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: 9_999, qty: 1.0 }],
+        }),
+        Err(CoreError::Invalid(_))
+    ));
+
+    assert!(db.credit_notes_for_invoice(invoice.id).unwrap().is_empty(), "nothing was written");
+}
+
+#[test]
+fn cancelling_an_invoice_is_crediting_every_line_in_full() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let lines = db.creditable_lines(invoice.id).unwrap();
+
+    // No special path for cancellation: it is the ordinary one, used for everything.
+    let note = db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "Order cancelled before dispatch".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: lines
+                .iter()
+                .map(|l| NewCreditNoteLine {
+                    invoice_line_id: l.invoice_line_id,
+                    qty: l.creditable_qty,
+                })
+                .collect(),
+        })
+        .unwrap();
+
+    // A full credit matches the invoice exactly, to the paisa.
+    assert_eq!(note.subtotal, invoice.subtotal);
+    assert_eq!(note.cgst, invoice.cgst);
+    assert_eq!(note.sgst, invoice.sgst);
+    assert_eq!(note.igst, invoice.igst);
+    assert_eq!(note.grand_total, invoice.grand_total);
+
+    let net = db.invoice_net(invoice.id).unwrap();
+    assert_eq!(net.net_total, 0.0, "a cancelled invoice nets to nothing");
+
+    // And there is nothing left to credit twice.
+    assert!(db.creditable_lines(invoice.id).unwrap().iter().all(|l| l.creditable_qty == 0.0));
+    assert!(db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "again".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: lines[0].invoice_line_id, qty: 1.0 }],
+        })
+        .is_err());
+}
+
+#[test]
+fn a_credit_note_reverses_the_tax_that_was_actually_charged() {
+    // An inter-state invoice carries IGST, so its credit note must too — even though the
+    // home state and the credited items are the same.
+    let mut db = seeded_db();
+    let buyer = db
+        .create_customer(&NewCustomer {
+            name: "Deccan Interiors".into(),
+            mobile: "9000012345".into(),
+            gstin: Some("29AABCS1429B1ZP".into()),
+            place_of_supply: "KA".into(),
+        })
+        .unwrap();
+    let rack = item(&db, "RACK-42U-PRO");
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "upi".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+        })
+        .unwrap();
+    assert!(invoice.igst > 0.0 && invoice.cgst == 0.0, "inter-state");
+
+    let lines = db.creditable_lines(invoice.id).unwrap();
+    let note = db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "Returned".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: lines[0].invoice_line_id, qty: 1.0 }],
+        })
+        .unwrap();
+
+    assert_eq!(note.igst, invoice.igst);
+    assert_eq!(note.cgst, 0.0);
+    assert_eq!(note.sgst, 0.0);
+    assert_eq!(note.grand_total, invoice.grand_total);
+}
+
+#[test]
+fn credit_notes_run_a_separate_series_and_are_queued_for_sync() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let second = billed_invoice(&mut db);
+    let lines = db.creditable_lines(invoice.id).unwrap();
+    let second_lines = db.creditable_lines(second.id).unwrap();
+
+    assert_eq!(invoice.invoice_no, "RI-2026-0001");
+    assert_eq!(second.invoice_no, "RI-2026-0002");
+
+    let first_note = db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "one".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: lines[0].invoice_line_id, qty: 1.0 }],
+        })
+        .unwrap();
+    let second_note = db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: second.id,
+            reason: "two".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine {
+                invoice_line_id: second_lines[0].invoice_line_id,
+                qty: 1.0,
+            }],
+        })
+        .unwrap();
+
+    // Its own counter: two invoices and two notes, numbered independently.
+    assert_eq!(first_note.credit_note_no, "CN-2026-0001");
+    assert_eq!(second_note.credit_note_no, "CN-2026-0002");
+
+    // Queued like every other mutation, and the note before its lines so the far end
+    // never sees a line whose parent has not arrived.
+    let queued = db.pending_sync_rows().unwrap();
+    let order: Vec<&str> = queued.iter().map(|r| r.table_name.as_str()).collect();
+    let note_at = order.iter().position(|t| *t == "credit_notes").unwrap();
+    let line_at = order.iter().position(|t| *t == "credit_note_lines").unwrap();
+    assert!(note_at < line_at, "a credit note is queued before its lines");
+
+    let payload = &db.pending_sync_rows_for("credit_notes").unwrap()[0].payload_json;
+    let value: serde_json::Value = serde_json::from_str(payload).unwrap();
+    assert_eq!(value["credit_note_no"], "CN-2026-0001");
+    assert_eq!(value["reason"], "one");
+    assert_eq!(value["original_invoice_id"], invoice.id);
+}
+
+#[test]
+fn several_partial_credits_add_up_to_the_whole_and_no_further() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let cement_line = db.creditable_lines(invoice.id).unwrap()[1].invoice_line_id;
+
+    // 40 bags back in four lots of ten.
+    for lot in 1..=4 {
+        db.create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: format!("return lot {lot}"),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: cement_line, qty: 10.0 }],
+        })
+        .unwrap();
+    }
+
+    let lines = db.creditable_lines(invoice.id).unwrap();
+    assert_eq!(lines[1].credited_qty, 40.0);
+    assert_eq!(lines[1].creditable_qty, 0.0);
+
+    // The four notes together equal that line's share of the invoice: 40 × 410 at 28%,
+    // which is 16,400 + 4,592. Crediting the cement must not pick up the racks' 18%.
+    let net = db.invoice_net(invoice.id).unwrap();
+    assert_eq!(net.note_count, 4);
+    assert_eq!(net.credited_subtotal, 16_400.0);
+    assert_eq!(net.credited_total, 20_992.0);
+    // The racks were never credited, so the net is exactly their share.
+    assert_eq!(net.net_total, 106_200.0, "127,192 billed less 20,992 credited");
+
+    assert!(db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            reason: "one bag too many".into(),
+            date: None,
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine { invoice_line_id: cement_line, qty: 1.0 }],
+        })
+        .is_err());
+}
+
+#[test]
+fn reporting_nets_credit_notes_against_revenue() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let lines = db.creditable_lines(invoice.id).unwrap();
+
+    let gross = db.sales_summary(&DateRange::default()).unwrap();
+    assert_eq!(gross.grand_total, 127_192.0);
+    assert_eq!(gross.credit_note_count, 0);
+    assert_eq!(gross.net_total, gross.grand_total, "nothing credited yet");
+
+    // One rack back: 45,000 + 18%.
+    db.create_credit_note(&NewCreditNote {
+        original_invoice_id: invoice.id,
+        reason: "returned".into(),
+        date: None,
+        created_by_user_id: None,
+        lines: vec![NewCreditNoteLine { invoice_line_id: lines[0].invoice_line_id, qty: 1.0 }],
+    })
+    .unwrap();
+
+    let netted = db.sales_summary(&DateRange::default()).unwrap();
+
+    // What was billed is unchanged — both figures are real, and a report that quietly
+    // rewrote the gross would be answering a different question from the one asked.
+    assert_eq!(netted.invoice_count, 1);
+    assert_eq!(netted.grand_total, 127_192.0);
+    assert_eq!(netted.subtotal, 106_400.0);
+
+    // And what was earned is what is left.
+    assert_eq!(netted.credit_note_count, 1);
+    assert_eq!(netted.credited_subtotal, 45_000.0);
+    assert_eq!(netted.credited_tax, 8_100.0);
+    assert_eq!(netted.credited_total, 53_100.0);
+    assert_eq!(netted.net_subtotal, 61_400.0);
+    assert_eq!(netted.net_tax, 12_692.0);
+    assert_eq!(netted.net_total, 74_092.0);
+    assert_eq!(netted.net_subtotal + netted.net_tax, netted.net_total, "the net reconciles");
+
+    // The day's row nets too.
+    let days = db.daily_totals(&DateRange::default()).unwrap();
+    assert_eq!(days.len(), 1);
+    assert_eq!(days[0].grand_total, 127_192.0);
+    assert_eq!(days[0].credited_total, 53_100.0);
+    assert_eq!(days[0].net_total, 74_092.0);
+
+    // The payment mix nets against the invoice's own payment type.
+    let mix = db.payment_mix(&DateRange::default()).unwrap();
+    assert_eq!(mix.len(), 1);
+    assert_eq!(mix[0].payment_type, "cash");
+    assert_eq!(mix[0].grand_total, 74_092.0);
+
+    // And "what sold" counts one rack, not two: an item sold and returned is not a sale.
+    let top = db.top_items(&DateRange::default(), 8).unwrap();
+    let rack = top.iter().find(|t| t.item_code == "RACK-42U-PRO").unwrap();
+    assert_eq!(rack.qty, 1.0, "2 billed less 1 credited");
+    assert_eq!(rack.revenue, 45_000.0);
+    assert_eq!(rack.credited_qty, 1.0);
+    assert_eq!(rack.credited_revenue, 45_000.0);
+
+    // The cement was untouched, so it is unchanged.
+    let cement = top.iter().find(|t| t.item_code == "CEM-OPC-53").unwrap();
+    assert_eq!(cement.qty, 40.0);
+    assert_eq!(cement.credited_qty, 0.0);
+}
+
+#[test]
+fn a_fully_cancelled_invoice_nets_to_nothing_in_reporting() {
+    let mut db = seeded_db();
+    let invoice = billed_invoice(&mut db);
+    let lines = db.creditable_lines(invoice.id).unwrap();
+
+    db.create_credit_note(&NewCreditNote {
+        original_invoice_id: invoice.id,
+        reason: "cancelled".into(),
+        date: None,
+        created_by_user_id: None,
+        lines: lines
+            .iter()
+            .map(|l| NewCreditNoteLine { invoice_line_id: l.invoice_line_id, qty: l.billed_qty })
+            .collect(),
+    })
+    .unwrap();
+
+    let summary = db.sales_summary(&DateRange::default()).unwrap();
+    assert_eq!(summary.net_total, 0.0);
+    assert_eq!(summary.net_subtotal, 0.0);
+    assert_eq!(summary.net_tax, 0.0, "no tax is owed on a sale that was undone");
+    assert_eq!(summary.grand_total, 127_192.0, "but the invoice still happened");
+
+    // Nothing sold on net, so nothing ranks above zero.
+    let top = db.top_items(&DateRange::default(), 8).unwrap();
+    assert!(top.iter().all(|t| t.revenue == 0.0 && t.qty == 0.0));
+
+    assert_eq!(db.payment_mix(&DateRange::default()).unwrap()[0].grand_total, 0.0);
+    assert_eq!(db.daily_totals(&DateRange::default()).unwrap()[0].net_total, 0.0);
 }

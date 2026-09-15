@@ -5,10 +5,13 @@
 //! numbering and the `sync_queue` writes all belong to `realinvoice-core`, so the Phoenix
 //! and Ratatui runtimes get identical behaviour for free.
 
+use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use realinvoice_core::{
-    auth, gst, Customer, DailyTotal, DateRange, Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine,
-    InvoiceSummary, Item, ItemFilter, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser,
-    PaymentMix, Role, SalesSummary, TopItem, User,
+    auth, gst, sync, CreditNote, CreditNoteDetail, CreditableLine, Customer, DailyTotal, DateRange,
+    Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine, InvoiceNet, InvoiceSummary, Item,
+    ItemFilter, Lockout, LoginOutcome, NewCreditNote, NewCreditNoteLine, NewCustomer, NewInvoice,
+    NewInvoiceLine, NewItem, NewUser, PaymentMix, Role, SalesSummary, SyncStatus, TopItem, User,
+    LOGIN_WINDOW_MINUTES, MAX_FAILED_LOGINS,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -40,23 +43,118 @@ pub fn auth_status(state: State<'_, AppState>) -> Result<AuthStatus, String> {
     })
 }
 
-/// Signs in. One message for a bad username and a bad password alike, so the screen
-/// cannot be used to find out which accounts exist.
+/// Why a sign-in did not work, in a shape the screen can act on.
+///
+/// A plain string would be enough to print but not enough to count down with, and the
+/// locked-out case has to look different from a wrong password — telling somebody their
+/// password is wrong when it is right, because the account is shut out, is the failure
+/// this whole feature exists to avoid.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoginError {
+    /// `"invalid"`, `"locked_out"` or `"error"`.
+    pub kind: String,
+    /// What to show. Already in the words a cashier should read.
+    pub message: String,
+    /// Seconds until another attempt is allowed. Only on `locked_out`.
+    pub retry_after_seconds: Option<i64>,
+    /// Attempts left before a lockout. Only on `invalid`, and only once it is worth
+    /// warning about — being told "4 left" on a first typo is noise.
+    pub attempts_remaining: Option<i64>,
+}
+
+impl LoginError {
+    /// Wrong username or wrong password: one message for both, so the screen cannot be
+    /// used to find out which accounts exist.
+    fn invalid(failures: i64) -> Self {
+        let remaining = (MAX_FAILED_LOGINS - failures).max(0);
+        // Warn only when it is nearly spent. A warning on every typo trains people to
+        // ignore it, and the one that matters is the last.
+        let attempts_remaining = (remaining <= 2 && remaining > 0).then_some(remaining);
+
+        // The window is quoted from the constant rather than written out, so changing the
+        // lockout length cannot leave the screen promising the old one.
+        let window = describe_window();
+        let message = match attempts_remaining {
+            Some(1) => format!(
+                "Incorrect username or password. 1 attempt left before this account is \
+                 locked for {window}."
+            ),
+            Some(left) => format!(
+                "Incorrect username or password. {left} attempts left before this \
+                 account is locked for {window}."
+            ),
+            None => "Incorrect username or password.".to_string(),
+        };
+
+        Self { kind: "invalid".to_string(), message, retry_after_seconds: None, attempts_remaining }
+    }
+
+    fn locked_out(lockout: &Lockout) -> Self {
+        Self {
+            kind: "locked_out".to_string(),
+            message: format!(
+                "Too many failed attempts — try again in {}.",
+                describe_wait(lockout.retry_after_seconds)
+            ),
+            retry_after_seconds: Some(lockout.retry_after_seconds),
+            attempts_remaining: Some(0),
+        }
+    }
+}
+
+impl From<realinvoice_core::CoreError> for LoginError {
+    fn from(err: realinvoice_core::CoreError) -> Self {
+        Self {
+            kind: "error".to_string(),
+            message: err.to_string(),
+            retry_after_seconds: None,
+            attempts_remaining: None,
+        }
+    }
+}
+
+/// How long a lockout lasts, in words, straight from core's constant.
+pub fn describe_window() -> String {
+    match LOGIN_WINDOW_MINUTES {
+        1 => "a minute".to_string(),
+        n => format!("{n} minutes"),
+    }
+}
+
+/// Seconds as something a person would say. Rounded up, because being told "1 minute" and
+/// still being refused at 55 seconds reads as the app lying.
+pub fn describe_wait(seconds: i64) -> String {
+    if seconds <= 60 {
+        return "less than a minute".to_string();
+    }
+    let minutes = (seconds + 59) / 60;
+    if minutes == 1 {
+        "about a minute".to_string()
+    } else {
+        format!("{minutes} minutes")
+    }
+}
+
+/// Signs in, subject to core's rate limit. One message for a bad username and a bad
+/// password alike, so the screen cannot be used to find out which accounts exist.
 #[tauri::command]
 pub fn login(
     username: String,
     password: String,
     state: State<'_, AppState>,
-) -> Result<Session, String> {
-    let found = state.db().verify_login(&username, &password).map_err(|e| e.to_string())?;
+) -> Result<Session, LoginError> {
+    let outcome = state.db().attempt_login(&username, &password).map_err(LoginError::from)?;
 
-    match found {
-        Some(user) => {
+    match outcome {
+        LoginOutcome::Ok(user) => {
             let session = Session { token: auth::new_session_token(), user };
             state.begin_session(session.clone());
             Ok(session)
         }
-        None => Err("Incorrect username or password.".to_string()),
+        LoginOutcome::Invalid => {
+            Err(LoginError::invalid(state.db().recent_failed_logins(&username).unwrap_or(0)))
+        }
+        LoginOutcome::LockedOut(lockout) => Err(LoginError::locked_out(&lockout)),
     }
 }
 
@@ -341,11 +439,140 @@ pub fn node_status(state: State<'_, AppState>) -> Result<NodeStatus, String> {
     let session = require_session(&state)?;
     Ok(NodeStatus {
         node: NODE_NAME.to_string(),
-        // Stub: real connectivity arrives with the sync stage.
-        connected: true,
+        // Real, now: connected means the push worker is getting through. The badge reads
+        // `sync_status` for the detail; this stays for the rest of the title bar.
+        connected: state.sync().map(|s| healthy(&s.status())).unwrap_or(false),
         db_path: state.db_path().display().to_string(),
         user: Some(session.user),
     })
+}
+
+// -------------------------------------------------------------------- sync
+
+/// Whether the badge should read connected.
+///
+/// True when the last batch the back office accepted landed within twice the poll
+/// interval — one missed poll is a slow network, two is a problem worth showing. An
+/// unconfigured node is not connected and not failing; it is waiting to be pointed at a
+/// back office, which the screen says in those words rather than in red.
+pub fn healthy(status: &SyncStatus) -> bool {
+    if !status.configured || !status.token_set || status.token_rejected {
+        return false;
+    }
+    if status.consecutive_failures > 0 {
+        return false;
+    }
+
+    match status.last_success.as_deref().and_then(parse_stamp) {
+        Some(at) => {
+            let age = Local::now().signed_duration_since(at).num_seconds();
+            age >= 0 && age <= (status.poll_seconds as i64) * 2
+        }
+        None => false,
+    }
+}
+
+/// `YYYY-MM-DD HH:MM:SS` in local time, as core writes it.
+fn parse_stamp(stamp: &str) -> Option<DateTime<Local>> {
+    NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .and_then(|naive| Local.from_local_datetime(&naive).single())
+}
+
+/// What the badge and the Sync screen show.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncView {
+    #[serde(flatten)]
+    pub status: SyncStatus,
+    /// The badge's verdict, decided here rather than in JavaScript so every runtime that
+    /// shows this agrees on what "connected" means.
+    pub healthy: bool,
+}
+
+/// The push worker's current state. Reachable by any signed-in user: a cashier who can
+/// see the badge should be able to see why it is amber.
+#[tauri::command]
+pub fn sync_status(state: State<'_, AppState>) -> Result<SyncView, String> {
+    require_session(&state)?;
+
+    match state.sync() {
+        Some(handle) => {
+            let mut status = handle.status();
+            // The worker refreshes this on each poll; reading it here keeps the count
+            // honest between polls, which is what a cashier watching it expects.
+            status.pending = state.db().pending_sync_count().map_err(|e| e.to_string())?;
+            Ok(SyncView { healthy: healthy(&status), status })
+        }
+        None => Err("The sync worker is not running.".to_string()),
+    }
+}
+
+/// Asks the worker to poll now instead of waiting out its timer.
+///
+/// Returns as soon as the nudge is delivered. It deliberately does not wait for the push
+/// to finish: the button must not hang the screen on a network round trip, and the status
+/// the UI polls will show the result a moment later.
+#[tauri::command]
+pub fn sync_now(state: State<'_, AppState>) -> Result<(), String> {
+    require_session(&state)?;
+    state.sync().ok_or_else(|| "The sync worker is not running.".to_string())?.sync_now();
+    Ok(())
+}
+
+/// Stores the token the back office issued for this node. Owner-only.
+///
+/// The token is written to core's `settings` table — this node's own SQLite file — and
+/// nowhere else. It is never returned to the frontend afterwards: `sync_status` carries
+/// only whether one is set and its last four characters, because anything that reaches
+/// JavaScript can be read out of the page.
+///
+/// Saving lifts a rejection. Somebody pasting a credential is saying "try this one", and
+/// a worker that stayed disabled until the app restarted would be the wrong answer to
+/// exactly the situation this command exists to fix.
+#[tauri::command]
+pub fn set_sync_token(token: String, state: State<'_, AppState>) -> Result<SyncView, String> {
+    require_owner(&state)?;
+    let token = token.trim().to_string();
+
+    state.db().set_setting(sync::TOKEN_KEY, &token).map_err(|e| e.to_string())?;
+
+    if let Some(handle) = state.sync() {
+        handle.token_changed(&token);
+        if !token.is_empty() {
+            // Try it straight away, so somebody who has just pasted a token finds out now
+            // whether it works rather than in ten seconds.
+            handle.sync_now();
+        }
+    }
+    sync_status(state)
+}
+
+/// Points this node at a back office. Owner-only: where a shop's invoices are sent is not
+/// a cashier's decision.
+///
+/// An empty value clears it, which stops the worker attempting anything rather than
+/// leaving it retrying against a URL nobody meant.
+#[tauri::command]
+pub fn set_sync_endpoint(endpoint: String, state: State<'_, AppState>) -> Result<String, String> {
+    require_owner(&state)?;
+    let endpoint = endpoint.trim().to_string();
+
+    // Empty is legitimate — it clears the address and stops the worker attempting
+    // anything. Anything else has to be a URL the HTTP client can actually post to.
+    let usable =
+        endpoint.is_empty() || endpoint.starts_with("http://") || endpoint.starts_with("https://");
+    if !usable {
+        return Err("The address must start with http:// or https://".to_string());
+    }
+
+    state.db().set_setting(sync::ENDPOINT_KEY, &endpoint).map_err(|e| e.to_string())?;
+    if let Some(handle) = state.sync() {
+        handle.set_endpoint(&endpoint);
+        // Try it straight away, so somebody who has just pasted an address finds out now
+        // whether it works rather than in ten seconds.
+        handle.sync_now();
+    }
+    Ok(endpoint)
 }
 
 /// Finds a customer by exact mobile number. `None` when nobody matches.
@@ -363,6 +590,92 @@ pub fn search_customer(
 pub fn search_item(query: String, state: State<'_, AppState>) -> Result<Vec<Item>, String> {
     require_session(&state)?;
     state.db().search_item(&query).map_err(|e| e.to_string())
+}
+
+// ------------------------------------------------------------- credit notes
+
+/// What is still creditable on an invoice, for drawing the form.
+///
+/// Owner-only, like issuing one: a cashier who cannot reverse an invoice has no reason to
+/// be shown the screen for it.
+#[tauri::command]
+pub fn creditable_lines(
+    invoice_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<CreditableLine>, String> {
+    require_owner(&state)?;
+    state.db().creditable_lines(invoice_id).map_err(|e| e.to_string())
+}
+
+/// What the form sends.
+///
+/// Deliberately carries no `created_by_user_id`. Attribution comes from the session, the
+/// same rule invoices follow — a caller must not be able to record a reversal as somebody
+/// else's decision.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewCreditNotePayload {
+    pub original_invoice_id: i64,
+    pub reason: String,
+    pub lines: Vec<CreditLinePayload>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreditLinePayload {
+    pub invoice_line_id: i64,
+    pub qty: f64,
+}
+
+/// Issues a credit note. **Owner-only.**
+///
+/// Reversing an invoice is not a counter decision: a cashier who could issue one could
+/// void their own sales, which is the shape of most till fraud. The Users screen gates on
+/// the same role for the same reason, and this is enforced here rather than only by
+/// hiding the button.
+#[tauri::command]
+pub fn create_credit_note(
+    note: NewCreditNotePayload,
+    state: State<'_, AppState>,
+) -> Result<CreditNote, String> {
+    let session = require_owner(&state)?;
+
+    state
+        .db()
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: note.original_invoice_id,
+            reason: note.reason,
+            date: None,
+            // From the session, never from the payload.
+            created_by_user_id: Some(session.user.id),
+            lines: note
+                .lines
+                .into_iter()
+                .map(|l| NewCreditNoteLine { invoice_line_id: l.invoice_line_id, qty: l.qty })
+                .collect(),
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// An invoice's credit notes and what they net it down to.
+///
+/// Readable by anyone signed in, unlike issuing one: a cashier looking at an invoice
+/// should see that it was partly returned, or the figure on their screen is wrong.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreditHistory {
+    pub notes: Vec<CreditNoteDetail>,
+    pub net: InvoiceNet,
+}
+
+#[tauri::command]
+pub fn credit_history(
+    invoice_id: i64,
+    state: State<'_, AppState>,
+) -> Result<CreditHistory, String> {
+    require_session(&state)?;
+    let db = state.db();
+    Ok(CreditHistory {
+        notes: db.credit_notes_for_invoice(invoice_id).map_err(|e| e.to_string())?,
+        net: db.invoice_net(invoice_id).map_err(|e| e.to_string())?,
+    })
 }
 
 /// The catalogue, for the Inventory pane. Wider than [`search_item`], which exists to

@@ -196,11 +196,14 @@
       <!-- justify-end: the sidebar carries the brand and the navigation, so anything
            left-aligned here would drift away from both. -->
       <header class="sticky top-0 z-10 flex h-12 shrink-0 items-center justify-end gap-1 border-b border-base-300 bg-base-100 px-6">
-        <span class="flex items-center gap-1.5 rounded-field px-2 py-1 text-xs text-base-content/60"
-              id="conn-badge" role="status" title="Connected">
-          <span class="hero-cloud size-4 shrink-0" aria-hidden="true"></span>
-          <span class="sr-only" id="conn-label">Connected</span>
-        </span>
+        <!-- Real state, not a stub: filled by loadSyncBadge() from the push worker. It
+             carries its words as well as its colour, because "amber" alone does not tell
+             a cashier whether anything is waiting. -->
+        <button class="flex items-center gap-1.5 rounded-field px-2 py-1 text-xs transition-colors hover:bg-base-200"
+                id="conn-badge" type="button" title="Sync status">
+          <span class="hero-cloud size-4 shrink-0" id="conn-icon" aria-hidden="true"></span>
+          <span id="conn-label">Checking…</span>
+        </button>
 
         <button class="flex size-7 items-center justify-center rounded-field text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content"
                 id="theme-toggle" type="button" aria-label="Switch theme" title="Switch theme">
@@ -411,6 +414,10 @@
                   id="d-inv-no"></span>
             <span class="inline-flex items-center gap-1 rounded-field bg-base-200 px-2 py-0.5 text-2xs font-medium text-base-content/70">Read-only</span>
             <div class="ml-auto flex flex-wrap items-center gap-2">
+              <button id="d-credit" type="button" hidden class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">
+                <span class="hero-arrow-left-on-rectangle size-4" aria-hidden="true"></span>
+                Issue Credit Note
+              </button>
               <button id="d-reprint" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">
                 <span class="hero-printer size-4" aria-hidden="true"></span> Reprint
               </button>
@@ -443,6 +450,56 @@
             <!-- Same renderTotals() as the billing card, fed saved data. -->
             <dl class="w-full max-w-sm rounded-field border border-base-300 p-4"
                 id="detail-totals"></dl>
+          </div>
+
+          <!-- Issuing a credit note. Owner-only, and the invoice above is never touched:
+               this writes a separate linked document that nets against it. -->
+          <form class="flex flex-col gap-4 rounded-field border border-base-300 bg-base-200/60 p-4"
+                id="credit-form" autocomplete="off" hidden>
+            <div>
+              <h2 class="text-lg font-semibold tracking-tight">Issue a credit note</h2>
+              <p class="mt-1 max-w-prose text-sm text-base-content/60">The invoice above is
+                not changed — it stays exactly as it was billed. This records what is being
+                credited back against it. To cancel the whole invoice, credit every line in
+                full.</p>
+            </div>
+
+            <div class="overflow-x-auto">
+              <table class="w-full text-left">
+                <thead>
+                  <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                    <th class="w-32">Item Code</th>
+                    <th>Description</th>
+                    <th class="w-24 text-right">Billed</th>
+                    <th class="w-28 pr-4 text-right">Already credited</th>
+                    <th class="w-28 text-right">Credit now</th>
+                  </tr>
+                </thead>
+                <tbody id="credit-lines"></tbody>
+              </table>
+            </div>
+
+            <label class="flex flex-col gap-1 text-xs text-base-content/60">Reason
+              <span class="text-base-content/45">Required — this is the record of why the
+                invoice was corrected.</span>
+              <input id="credit-reason" type="text" required maxlength="200"
+                     placeholder="e.g. One rack returned, damaged in transit"
+                     class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
+            </label>
+
+            <div class="flex flex-wrap items-center gap-3">
+              <button type="submit" id="credit-save" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Issue credit note</button>
+              <button type="button" id="credit-cancel" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+              <span class="text-xs text-base-content/60" id="credit-msg" aria-live="polite"></span>
+            </div>
+          </form>
+
+          <!-- What has already been credited against this invoice. -->
+          <div class="flex flex-col gap-3" id="credit-history" hidden>
+            <h2 class="text-lg font-semibold tracking-tight">Credit notes against this invoice</h2>
+            <div id="credit-list"></div>
+            <dl class="w-full max-w-sm self-end rounded-field border border-base-300 p-4"
+                id="credit-net"></dl>
           </div>
         </div>
       </section>
@@ -598,13 +655,61 @@
       </section>
 
       <section class="pane" id="pane-sync" role="tabpanel">
-        <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center">
-          <span class="hero-arrow-path size-8 text-base-content/25" aria-hidden="true"></span>
-          <p class="text-sm font-medium text-base-content">Sync is coming</p>
-          <p class="text-xs text-base-content/60">This pane is not built yet. Billing and
-            History are.</p>
+        <div class="flex flex-col gap-6">
+          <header class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h1 class="text-xl font-semibold tracking-tight">Sync</h1>
+              <p class="mt-1 max-w-prose text-sm text-base-content/60">This till bills on
+                its own and sends copies to the back office in the background. Billing
+                never waits for it, so nothing here can stop you raising an invoice.</p>
+            </div>
+            <button id="sync-now" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">
+              <span class="hero-arrow-path size-4" aria-hidden="true"></span> Sync Now
+            </button>
+          </header>
+
+          <dl class="grid grid-cols-[minmax(140px,220px)_1fr]" id="sync-rows"></dl>
+
+          <div class="flex flex-col gap-2">
+            <h2 class="text-lg font-semibold tracking-tight">Back office address</h2>
+            <p class="max-w-prose text-sm text-base-content/60">Where copies are sent.
+              Leave it empty until you have one — the till keeps every invoice safely
+              queued either way, and sends the backlog once an address is set.</p>
+            <form class="flex flex-wrap items-end gap-3" id="endpoint-form" autocomplete="off">
+              <label class="flex min-w-64 flex-1 flex-col gap-1 text-xs text-base-content/60">Address
+                <input id="sync-endpoint" type="url" spellcheck="false"
+                       placeholder="https://backoffice.example.com/api/sync"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 font-mono" />
+              </label>
+              <button type="submit" id="endpoint-save" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Save address</button>
+              <span class="text-xs text-base-content/60" id="endpoint-msg" aria-live="polite"></span>
+            </form>
+          </div>
+
+          <div class="flex flex-col gap-2">
+            <h2 class="text-lg font-semibold tracking-tight">This till's token</h2>
+            <p class="max-w-prose text-sm text-base-content/60">Register this till in the
+              back office and paste the token it gives you. It is stored on this computer
+              only, and is never shown again once saved — if you lose it, issue a new one.</p>
+
+            <!-- Raised to the top of the section when the back office refuses the token,
+                 because that is the one case where somebody has to act. -->
+            <p class="hidden max-w-prose rounded-field border border-error/30 bg-error/10 px-3 py-2 text-sm text-error"
+               id="token-alert"></p>
+
+            <form class="flex flex-wrap items-end gap-3" id="token-form" autocomplete="off">
+              <label class="flex min-w-64 flex-1 flex-col gap-1 text-xs text-base-content/60">Token
+                <input id="sync-token" type="password" spellcheck="false"
+                       autocomplete="off" placeholder="paste the token from the back office"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 font-mono" />
+              </label>
+              <button type="submit" id="token-save" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Save token</button>
+              <span class="text-xs text-base-content/60" id="token-msg" aria-live="polite"></span>
+            </form>
+          </div>
         </div>
       </section>
+
       <section class="pane" id="pane-settings" role="tabpanel">
         <div class="flex flex-col gap-2">
           <header>
