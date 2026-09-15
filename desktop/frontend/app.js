@@ -146,9 +146,17 @@
 
         var num = ' class="py-2 text-right font-mono tabular-nums"';
 
+        // A one-off's item code is a generated key, not something anyone reads out. The
+        // cell carries a tag instead, which is also the visual mark that this line came
+        // off the counter rather than out of the catalogue.
+        var code = line.custom
+          ? '<span class="rounded-field bg-base-300 px-1.5 py-0.5 text-2xs font-medium ' +
+            'uppercase tracking-wider text-base-content/70">custom</span>'
+          : '<span class="font-mono">' + escapeHtml(line.item_code) + "</span>";
+
         return (
           '<tr class="border-b border-base-300 text-sm last:border-0 hover:bg-base-200/60">' +
-          '<td class="py-2 font-mono">' + escapeHtml(line.item_code) + "</td>" +
+          '<td class="py-2">' + code + "</td>" +
           '<td class="py-2">' + escapeHtml(line.description) + "</td>" +
           '<td class="py-2 text-right">' + qty + "</td>" +
           "<td" + num + ">" + money(line.rate) + "</td>" +
@@ -226,15 +234,32 @@
 
   /* ------------------------------------------------------------------ customer */
 
+  /**
+   * Draws the Customer section from `customer`. Exactly one of three boxes is on screen
+   * at a time — the mobile search, the attached customer, or the "nobody matched"
+   * prompt — so there is never a question of which one the operator is looking at.
+   */
   function renderCustomer() {
-    var line = $("customer-line");
-    if (!customer) {
-      line.innerHTML = "<span>Search a mobile number to attach a customer.</span>";
+    var attached = !!customer;
+
+    $("customer-chip").hidden = !attached;
+    $("customer-search").hidden = attached || locked;
+    // Detaching is an edit, and a saved invoice is not editable.
+    $("customer-detach").hidden = locked;
+    if (attached) $("customer-miss").hidden = true;
+
+    if (!attached) {
+      $("customer-line").innerHTML = "";
       return;
     }
-    line.innerHTML =
+
+    // "Billing to:" rather than a bare name. This line stays up for the whole bill, so it
+    // has to read as a standing statement about the invoice, not as a search result that
+    // happens to still be on screen.
+    $("customer-line").innerHTML =
+      '<span class="text-base-content/60">Billing to:</span> ' +
       '<span class="font-medium text-base-content">' + escapeHtml(customer.name) + "</span>" +
-      ' <span class="text-base-content/60">— GSTIN: ' +
+      ' <span class="text-base-content/60">· GSTIN ' +
       escapeHtml(customer.gstin || "unregistered") +
       "</span>" +
       ' <span class="text-base-content/45">· ' + escapeHtml(customer.mobile) +
@@ -243,14 +268,54 @@
 
   function setCustomer(found) {
     customer = found;
-    renderCustomer();
     hideNewCustomer();
+    $("customer-miss").hidden = true;
+    renderCustomer();
     requote();
+  }
+
+  /** Puts the bill back to nobody attached, ready to search again. */
+  function detachCustomer() {
+    if (locked) return;
+    var was = customer;
+    customer = null;
+    $("customer-miss").hidden = true;
+    hideNewCustomer();
+    renderCustomer();
+    requote();
+    $("mobile-input").value = "";
+    $("mobile-input").focus();
+    status(was ? "Detached " + was.name + "." : "Customer detached.");
+  }
+
+  /**
+   * Brings the Customer section into view and puts the caret in the mobile box.
+   *
+   * This is what "Attach a customer first" does when clicked. An error that names a
+   * requirement but leaves the operator hunting for where to satisfy it is the bug this
+   * whole section exists to fix, so the message is a way there, not just a complaint.
+   */
+  function focusCustomerSection() {
+    var section = $("customer-section");
+    section.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+    // A brief ring, because the section may well have been on screen the whole time and
+    // a silent scroll of nought pixels would look like nothing happened.
+    section.classList.add("rounded-box", "ring-2", "ring-warning", "ring-offset-4",
+                          "ring-offset-base-100");
+    window.setTimeout(function () {
+      section.classList.remove("rounded-box", "ring-2", "ring-warning", "ring-offset-4",
+                               "ring-offset-base-100");
+    }, 1200);
+
+    if (!$("new-customer").hidden) $("nc-name").focus();
+    else $("mobile-input").focus();
   }
 
   function searchCustomer() {
     var mobile = $("mobile-input").value.trim();
     if (!mobile) {
+      $("mobile-input").focus();
       status("Enter a mobile number first.");
       return;
     }
@@ -262,12 +327,16 @@
         if (found) {
           setCustomer(found);
           status("Customer #" + found.id + " attached.");
-        } else {
-          customer = null;
-          renderCustomer();
-          showNewCustomer(mobile);
-          status("No customer for " + mobile + " — register one below.");
+          return;
         }
+        customer = null;
+        hideNewCustomer();
+        renderCustomer();
+        // The miss is not an error. It is the second most common thing that happens at a
+        // counter, so it gets an answer on the spot.
+        $("customer-miss-text").textContent = "No customer with " + mobile + " yet.";
+        $("customer-miss").hidden = false;
+        status("No customer for " + mobile + " — add one below.");
       })
       .catch(function (err) {
         status("search_customer failed: " + errText(err));
@@ -278,10 +347,11 @@
 
   function showNewCustomer(mobile) {
     $("nc-name").value = "";
-    $("nc-mobile").value = mobile || "";
+    $("nc-mobile").value = mobile || $("mobile-input").value.trim();
     $("nc-gstin").value = "";
     $("nc-pos").value = "TN";
-    $("nc-msg").textContent = "";
+    setMsg("nc-msg", "", false);
+    $("customer-miss").hidden = true;
     $("new-customer").hidden = false;
     $("nc-name").focus();
   }
@@ -291,7 +361,6 @@
   }
 
   function createCustomer() {
-    var msg = $("nc-msg");
     var payload = {
       name: $("nc-name").value.trim(),
       mobile: $("nc-mobile").value.trim(),
@@ -300,23 +369,21 @@
     };
 
     if (!payload.name || !payload.mobile || !payload.place_of_supply) {
-      msg.className = "newcust-msg error";
-      msg.textContent = "Name, mobile and place of supply are required.";
-      return;
+      return setMsg("nc-msg", "Name, mobile and place of supply are required.", true);
     }
     if (!invoke) return bridgeMissing("create_customer");
 
-    msg.className = "newcust-msg muted";
-    msg.textContent = "Saving…";
+    setMsg("nc-msg", "Saving…", false);
     invoke("create_customer", { payload: payload })
       .then(function (created) {
+        // Attached straight away: whoever filled this in is mid-sale, and making them
+        // search for the number they just typed would be absurd.
         $("mobile-input").value = created.mobile;
         setCustomer(created);
-        status("Registered " + created.name + " (#" + created.id + ").");
+        status("Registered " + created.name + " (#" + created.id + ") and attached.");
       })
       .catch(function (err) {
-        msg.className = "newcust-msg error";
-        msg.textContent = errText(err);
+        setMsg("nc-msg", errText(err), true);
       });
   }
 
@@ -338,6 +405,7 @@
       rate: item.rate,
       tax_rate: item.tax_rate,
       total: item.rate, // provisional; core's quote overwrites it
+      custom: !!item.custom,
     });
     renderRows();
     requote();
@@ -376,12 +444,14 @@
   function openPicker() {
     $("item-picker").hidden = false;
     $("item-query").value = "";
+    closeOneOff();
     runItemSearch("");
     $("item-query").focus();
   }
 
   function closePicker() {
     $("item-picker").hidden = true;
+    closeOneOff();
   }
 
   function runItemSearch(query) {
@@ -394,9 +464,15 @@
 
     invoke("search_item", { query: query })
       .then(function (items) {
+        // The offer is only ever the way out of an empty result. Showing it alongside
+        // matches would invite a duplicate one-off of something already in stock.
+        offerOneOff(items.length === 0 ? query.trim() : "");
+
         if (!items.length) {
-          list.innerHTML =
-            '<li class="px-3 py-2 text-sm text-base-content/60">No items match.</li>';
+          list.innerHTML = query.trim()
+            ? '<li class="px-3 py-2 text-sm text-base-content/60">No catalogue item ' +
+              "matches “" + escapeHtml(query.trim()) + "”.</li>"
+            : '<li class="px-3 py-2 text-sm text-base-content/60">No items match.</li>';
           return;
         }
         list.innerHTML = items
@@ -423,6 +499,93 @@
           '<li class="px-3 py-2 text-sm text-error">' + escapeHtml(errText(err)) + "</li>";
       });
   }
+
+  /* ------------------------------------------------------------ one-off items */
+
+  /**
+   * Shows or hides the "add this as a one-off" offer.
+   *
+   * A one-off is billed but never filed: core gives it a row so the invoice line has
+   * something to point at, flagged `custom` so it stays out of the catalogue that the
+   * shop actually maintains. Typing a repair charge onto a bill must not quietly grow
+   * the Inventory list by one item a day.
+   */
+  function offerOneOff(text) {
+    var offer = $("oneoff-offer");
+    if (!text || !$("oneoff-form").hidden) {
+      offer.hidden = true;
+      return;
+    }
+    $("oneoff-offer-text").textContent = "Add “" + text + "” as a one-off item";
+    offer.hidden = false;
+  }
+
+  function openOneOff(description) {
+    $("oneoff-offer").hidden = true;
+    $("oo-desc").value = description || "";
+    $("oo-rate").value = "";
+    $("oo-tax").value = "18";
+    $("oo-qty").value = "1";
+    $("oo-uom").value = "NOS";
+    setMsg("oo-msg", "", false);
+    $("oneoff-form").hidden = false;
+    $("oo-rate").focus();
+  }
+
+  function closeOneOff() {
+    $("oneoff-form").hidden = true;
+    $("oneoff-offer").hidden = true;
+  }
+
+  function addOneOff(event) {
+    if (event) event.preventDefault();
+    if (!invoke) return bridgeMissing("create_custom_item");
+
+    var description = $("oo-desc").value.trim();
+    var rate = parseFloat($("oo-rate").value);
+    var taxRate = parseFloat($("oo-tax").value);
+    var qty = parseFloat($("oo-qty").value);
+
+    // Shape only. The amounts themselves are still core's to validate and to price —
+    // nothing here works out what the line costs.
+    if (!description) return setMsg("oo-msg", "Enter a description.", true);
+    if (!isFinite(rate) || rate < 0) return setMsg("oo-msg", "Enter a rate.", true);
+    if (!isFinite(taxRate) || taxRate < 0 || taxRate > 100) {
+      return setMsg("oo-msg", "Tax % must be between 0 and 100.", true);
+    }
+    if (!isFinite(qty) || qty <= 0) return setMsg("oo-msg", "Enter a quantity.", true);
+
+    setMsg("oo-msg", "Adding…", false);
+    invoke("create_custom_item", {
+      description: description,
+      rate: rate,
+      taxRate: taxRate,
+      uom: $("oo-uom").value.trim(),
+    })
+      .then(function (item) {
+        addRow(item);
+        // The quantity is part of the same entry, so it is applied rather than left at
+        // the 1 that `addRow` assumes.
+        rows[rows.length - 1].qty = qty;
+        renderRows();
+        requote();
+        closePicker();
+        status("Added one-off “" + item.description + "”.");
+      })
+      .catch(function (err) {
+        setMsg("oo-msg", errText(err), true);
+      });
+  }
+
+  $("oneoff-open").addEventListener("click", function () {
+    openOneOff($("item-query").value.trim());
+  });
+  $("oneoff-form").addEventListener("submit", addOneOff);
+  $("oo-cancel").addEventListener("click", function () {
+    closeOneOff();
+    offerOneOff($("item-query").value.trim());
+    $("item-query").focus();
+  });
 
   $("add-item-btn").addEventListener("click", openPicker);
   $("picker-close").addEventListener("click", closePicker);
@@ -475,9 +638,30 @@
    * The saved confirmation is not kept here — the banner carries it.
    */
   function clearMessage() {
+    actionMsg("", false);
+  }
+
+  /**
+   * The line under the Print & Lock button.
+   *
+   * `fix` is an optional { label, run } pair rendered as a button beside the text, for
+   * errors that name something the operator can put right from here.
+   */
+  function actionMsg(text, isError, fix) {
     var msg = $("action-msg");
-    msg.className = "action-msg";
-    msg.textContent = "";
+    msg.className = isError ? "text-sm text-error" : "text-sm text-base-content/60";
+    msg.textContent = text || "";
+
+    if (!text || !fix) return;
+
+    var button = document.createElement("button");
+    button.type = "button";
+    button.textContent = fix.label;
+    button.className =
+      "ml-2 rounded-field border border-current px-2 py-0.5 text-xs font-medium " +
+      "underline-offset-2 hover:underline";
+    button.addEventListener("click", fix.run);
+    msg.appendChild(button);
   }
 
   /** Re-prices every row through core. Called on any change to rows or customer. */
@@ -520,6 +704,15 @@
     // finished.
     $("txn-head").hidden = on;
     $("saved-banner").hidden = !on;
+
+    // The Customer section stays — a locked card must still say who it was billed to —
+    // but its editing controls go with everything else.
+    $("customer-search").hidden = on || !!customer;
+    $("customer-detach").hidden = on;
+    if (on) {
+      $("customer-miss").hidden = true;
+      hideNewCustomer();
+    }
     $("add-item").hidden = on;
     $("txn-actions").hidden = on;
 
@@ -554,10 +747,8 @@
     };
   }
 
-  function saveError(message) {
-    var msg = $("action-msg");
-    msg.className = "action-msg error";
-    msg.textContent = message;
+  function saveError(message, fix) {
+    actionMsg(message, true, fix);
     status("Not saved: " + message);
   }
 
@@ -569,7 +760,16 @@
   function printAndLock() {
     if (locked) return; // already saved; New Transaction is the only way on
 
-    if (!customer) return saveError("Attach a customer first.");
+    if (!customer) {
+      // Not just a complaint: the message takes them to the box that satisfies it, and
+      // the section is scrolled to and focused straight away so a keyboard-only operator
+      // is already typing the mobile number.
+      focusCustomerSection();
+      return saveError("Attach a customer first.", {
+        label: "Go to Customer",
+        run: focusCustomerSection,
+      });
+    }
     if (!rows.length) return saveError("Add at least one item.");
     if (!lastQuote) return saveError("Totals not priced yet — try again.");
 
@@ -582,9 +782,7 @@
 
     var button = $("print-lock");
     button.disabled = true;
-    var msg = $("action-msg");
-    msg.className = "action-msg muted";
-    msg.textContent = "Saving…";
+    actionMsg("Saving…", false);
 
     invoke("create_invoice", {
       payload: buildPayload(),
@@ -649,15 +847,14 @@
     lastSaved = null;
 
     $("mobile-input").value = "";
+    $("customer-miss").hidden = true;
+    hideNewCustomer();
     setPayment("cash");
     $("inv-no").hidden = true;
     $("inv-no").textContent = "";
 
     setLocked(false);
-
-    var msg = $("action-msg");
-    msg.className = "action-msg";
-    msg.textContent = "";
+    clearMessage();
 
     renderCustomer();
     renderRows();
@@ -834,6 +1031,7 @@
         item_code: entry.item_code,
         description: entry.description,
         uom: entry.uom,
+        custom: entry.custom,
         qty: entry.line.qty,
         rate: entry.line.rate,
         tax_rate: entry.line.tax_rate,
@@ -919,7 +1117,9 @@
         .map(function (line, index) {
           return (
             "<tr><td>" + (index + 1) + "</td>" +
-            "<td>" + escapeHtml(line.item_code) + "</td>" +
+            // A one-off's code is a generated key. The description is what the line is;
+            // printing a UUID beside it would only make the sheet look broken.
+            "<td>" + (line.custom ? "—" : escapeHtml(line.item_code)) + "</td>" +
             "<td>" + escapeHtml(line.description) + "</td>" +
             "<td>" + escapeHtml(line.uom) + "</td>" +
             '<td class="num">' + line.qty + "</td>" +
@@ -981,6 +1181,7 @@
         item_code: source.item_code || "",
         description: source.description || "",
         uom: source.uom || "",
+        custom: !!source.custom,
       };
     });
   }
@@ -1362,6 +1563,7 @@
   $("user-add-toggle").addEventListener("click", function () {
     resetUserForm();
     showUserForm(true);
+    UI.enhancePasswordFields($("user-form"));
   });
   $("user-cancel").addEventListener("click", function () {
     resetUserForm();
@@ -1524,6 +1726,10 @@
   function refreshAbout() {
     if (!invoke || !user) return;
 
+    // Cashiers do not see it at all; `clear_demo_data` refuses them anyway.
+    $("demo-data").hidden = user.role !== "owner";
+    setMsg("demo-msg", "", false);
+
     invoke("app_info")
       .then(function (info) {
         // The sidebar's version line. Guarded: this pane must still render its rows if
@@ -1551,6 +1757,62 @@
         rowList($("about-rows"), [["Error", errText(err)]]);
       });
   }
+
+  /* -------------------------------------------------------------- demo data */
+
+  /**
+   * Clears the sample catalogue.
+   *
+   * The wipe itself is core's, and it is deliberately narrow: a seeded item or customer
+   * goes only if nothing has ever been billed against it. An invoice is a document that
+   * has left the building, so anything it points at has to stay readable for as long as
+   * the invoice does — which is why this reports what it kept as well as what it removed.
+   */
+  function clearDemoData() {
+    if (!invoke) return bridgeMissing("clear_demo_data");
+
+    // A bill in progress holds item ids that this is about to delete, and the save would
+    // fail on a foreign key with nothing useful to say. Finish or clear the bill first.
+    if (rows.length && !locked) {
+      return setMsg(
+        "demo-msg",
+        "Finish or clear the transaction on the Billing screen first.",
+        true
+      );
+    }
+
+    if (!window.confirm(
+      "Remove the seeded sample customers and stock items?\n\n" +
+      "Anything already billed is kept, along with every invoice and credit note. " +
+      "This cannot be undone."
+    )) {
+      return;
+    }
+
+    var button = $("demo-clear");
+    button.disabled = true;
+    setMsg("demo-msg", "Clearing…", false);
+
+    invoke("clear_demo_data")
+      .then(function (result) {
+        button.disabled = false;
+        var kept = result.items_kept + result.customers_kept;
+        setMsg(
+          "demo-msg",
+          "Removed " + result.items_removed + " item(s) and " +
+            result.customers_removed + " customer(s)." +
+            (kept ? " Kept " + kept + " that have been billed." : ""),
+          false
+        );
+        status("Demo data cleared.");
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        setMsg("demo-msg", errText(err), true);
+      });
+  }
+
+  $("demo-clear").addEventListener("click", clearDemoData);
 
   /** Label-left / value-right rows, separated by dividers — no boxes. */
   function rowList(el, rows) {
@@ -2333,9 +2595,16 @@
     if (event.key === "Enter") searchCustomer();
   });
 
+  $("customer-detach").addEventListener("click", detachCustomer);
+  $("nc-open").addEventListener("click", function () {
+    showNewCustomer($("mobile-input").value.trim());
+  });
   $("nc-save").addEventListener("click", createCustomer);
   $("nc-cancel").addEventListener("click", function () {
     hideNewCustomer();
+    // Back to the search, not to an empty section: they still have a sale to bill.
+    renderCustomer();
+    $("mobile-input").focus();
     status("New customer cancelled.");
   });
 
@@ -2351,5 +2620,8 @@
   renderCustomer();
   renderRows();
   loadTheme();
+  // Every password field in the app gets a show/hide eye from here — the login screen,
+  // first-run setup and Add User alike. A future one gets it by existing.
+  UI.enhancePasswordFields();
   bootstrap();
 })();

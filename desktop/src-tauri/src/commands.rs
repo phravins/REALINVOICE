@@ -8,10 +8,10 @@
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use realinvoice_core::{
     auth, gst, sync, CreditNote, CreditNoteDetail, CreditableLine, Customer, DailyTotal, DateRange,
-    Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine, InvoiceNet, InvoiceSummary, Item,
-    ItemFilter, Lockout, LoginOutcome, NewCreditNote, NewCreditNoteLine, NewCustomer, NewInvoice,
-    NewInvoiceLine, NewItem, NewUser, PaymentMix, Role, SalesSummary, SyncStatus, TopItem, User,
-    LOGIN_WINDOW_MINUTES, MAX_FAILED_LOGINS,
+    DemoDataCleared, Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine, InvoiceNet,
+    InvoiceSummary, Item, ItemFilter, Lockout, LoginOutcome, NewCreditNote, NewCreditNoteLine,
+    NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser, PaymentMix, Role, SalesSummary,
+    SyncStatus, TopItem, User, LOGIN_WINDOW_MINUTES, MAX_FAILED_LOGINS,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -127,12 +127,11 @@ pub fn describe_wait(seconds: i64) -> String {
     if seconds <= 60 {
         return "less than a minute".to_string();
     }
+    // Ceiling, so 61 seconds is quoted as 2 minutes. Over-stating the wait by a few
+    // seconds costs nothing; under-stating it is the app telling somebody to come back
+    // at a moment when it will still refuse them.
     let minutes = (seconds + 59) / 60;
-    if minutes == 1 {
-        "about a minute".to_string()
-    } else {
-        format!("{minutes} minutes")
-    }
+    format!("{minutes} minutes")
 }
 
 /// Signs in, subject to core's rate limit. One message for a bad username and a bad
@@ -739,6 +738,8 @@ fn check_item(item: &NewItemPayload) -> Result<NewItem, String> {
         tax_rate: item.tax_rate,
         // A unit is never blank on a bill; NOS is what a counter means by "each".
         uom: if uom.is_empty() { "NOS".to_string() } else { uom.to_string() },
+        // Saved from the Inventory screen, so it is a catalogue item by definition.
+        custom: false,
     })
 }
 
@@ -746,6 +747,36 @@ fn check_item(item: &NewItemPayload) -> Result<NewItem, String> {
 #[doc(hidden)]
 pub fn check_item_for_test(item: &NewItemPayload) -> Result<NewItem, String> {
     check_item(item)
+}
+
+/// Adds a one-off item for the bill in hand, outside the catalogue.
+///
+/// Any signed-in user, unlike `save_item`: billing something not on the price list is an
+/// ordinary counter action, and a cashier who had to fetch the owner to sell a delivery
+/// charge would go on billing it under the wrong line instead. It does not touch the
+/// catalogue, which is what makes it safe to leave open.
+#[tauri::command]
+pub fn create_custom_item(
+    description: String,
+    rate: f64,
+    tax_rate: f64,
+    uom: String,
+    state: State<'_, AppState>,
+) -> Result<Item, String> {
+    require_session(&state)?;
+    state.db().create_custom_item(&description, rate, tax_rate, &uom).map_err(|e| e.to_string())
+}
+
+/// Removes the demo catalogue a fresh install ships with. **Owner-only.**
+///
+/// Destructive and one-way, so it sits behind the same role as the Users screen. Only
+/// untouched sample rows go: anything an invoice or credit note still refers to stays,
+/// and the result says how many were kept so the screen can report that honestly rather
+/// than claiming a clean sweep.
+#[tauri::command]
+pub fn clear_demo_data(state: State<'_, AppState>) -> Result<DemoDataCleared, String> {
+    require_owner(&state)?;
+    state.db().clear_demo_data().map_err(|e| e.to_string())
 }
 
 /// Everything the Analytics pane draws, in one round trip.
