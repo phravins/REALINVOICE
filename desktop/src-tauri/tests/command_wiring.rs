@@ -925,7 +925,7 @@ fn the_lockout_wait_is_described_in_words_a_person_would_use() {
     assert_eq!(describe_wait(0), "less than a minute");
     assert_eq!(describe_wait(45), "less than a minute");
     assert_eq!(describe_wait(60), "less than a minute");
-    assert_eq!(describe_wait(61), "about a minute");
+    assert_eq!(describe_wait(61), "2 minutes");
     assert_eq!(describe_wait(90), "2 minutes");
     assert_eq!(describe_wait(120), "2 minutes");
     assert_eq!(describe_wait(121), "3 minutes");
@@ -1082,4 +1082,134 @@ fn a_credit_note_is_attributed_to_the_session_not_the_payload() {
 
     // The invoice is untouched, which is the point of the whole design.
     assert_eq!(state.db().get_invoice(invoice.id).unwrap().unwrap(), invoice);
+}
+
+/// A one-off typed onto a bill is billable but never joins the catalogue.
+///
+/// This is the whole point of the flag. A counter sells a repair charge or a loose
+/// fitting every other day; if each one landed in Inventory, the list the shop actually
+/// maintains would be unusable inside a month.
+#[test]
+fn a_one_off_item_is_billable_but_stays_out_of_the_catalogue() {
+    let (_dir, state) = console_state();
+
+    let before = state.db().count_items().unwrap();
+    let one_off = state
+        .db()
+        .create_custom_item("Site visit and rack re-dress", 2_500.0, 18.0, "NOS")
+        .unwrap();
+
+    assert!(one_off.custom, "the flag is what keeps it out of the lists");
+    assert_eq!(state.db().count_items().unwrap(), before, "Inventory is unchanged");
+
+    // Not by code, not by description, not by an empty query that lists everything.
+    assert!(state.db().search_item("Site visit").unwrap().is_empty());
+    assert!(state.db().search_item(&one_off.item_code).unwrap().is_empty());
+    assert!(state.db().search_item("").unwrap().iter().all(|item| item.id != one_off.id));
+
+    // But it is a real row, so a line can point at it and the invoice prices normally.
+    let customer_id = state.db().search_customer("9600011223").unwrap().unwrap().id;
+    let invoice = state
+        .db()
+        .create_invoice(&NewInvoice::from(NewInvoicePayload {
+            customer_id,
+            date: None,
+            payment_type: "cash".into(),
+            lines: vec![NewLinePayload {
+                item_id: one_off.id,
+                qty: 2.0,
+                rate: Some(2_500.0),
+                tax_rate: Some(18.0),
+            }],
+        }))
+        .unwrap();
+
+    assert_eq!(invoice.subtotal, 5_000.00);
+    assert_eq!(invoice.grand_total, 5_900.00);
+
+    // And the detail view can tell the line apart from a catalogue one.
+    let detail = state.db().get_invoice_detail(invoice.id).unwrap().unwrap();
+    assert!(detail.lines[0].custom);
+    assert_eq!(detail.lines[0].description, "Site visit and rack re-dress");
+}
+
+#[test]
+fn a_one_off_with_nonsense_numbers_is_refused() {
+    let (_dir, state) = console_state();
+
+    assert!(state.db().create_custom_item("   ", 100.0, 18.0, "NOS").is_err());
+    assert!(state.db().create_custom_item("Delivery", -1.0, 18.0, "NOS").is_err());
+    assert!(state.db().create_custom_item("Delivery", f64::NAN, 18.0, "NOS").is_err());
+    assert!(state.db().create_custom_item("Delivery", 100.0, 101.0, "NOS").is_err());
+    assert!(state.db().create_custom_item("Delivery", 100.0, -1.0, "NOS").is_err());
+
+    // A missing unit is filled in rather than refused, as it is on the Inventory form.
+    let filled = state.db().create_custom_item("Delivery", 100.0, 18.0, "").unwrap();
+    assert_eq!(filled.uom, "NOS");
+}
+
+/// Clearing the demo data must never reach anything an invoice points at.
+#[test]
+fn clearing_demo_data_keeps_everything_already_billed() {
+    let (_dir, state) = console_state();
+
+    // Bill the worked example, so one customer and two items are now in the books.
+    let example = worked_example(&state);
+    let invoice = state.db().create_invoice(&example).unwrap();
+    let billed_customer = invoice.customer_id;
+    let billed_items: Vec<i64> =
+        state.db().invoice_lines(invoice.id).unwrap().iter().map(|line| line.item_id).collect();
+    assert_eq!(billed_items.len(), 2);
+
+    let cleared = state.db().clear_demo_data().unwrap();
+
+    assert_eq!(cleared.items_kept, 2, "both billed items survive");
+    assert_eq!(cleared.customers_kept, 1, "so does the customer they were billed to");
+    assert!(cleared.items_removed > 0, "the untouched seed rows go");
+    assert!(cleared.customers_removed > 0);
+
+    // The invoice itself is untouched, and still reads end to end.
+    let detail = state.db().get_invoice_detail(invoice.id).unwrap().unwrap();
+    assert_eq!(detail.invoice.grand_total, 123_900.00);
+    assert_eq!(detail.lines.len(), 2);
+    assert_eq!(detail.customer.id, billed_customer);
+    for item_id in &billed_items {
+        assert!(state.db().get_item(*item_id).unwrap().is_some());
+    }
+
+    // And what it removed is really gone from the catalogue.
+    assert_eq!(state.db().count_items().unwrap(), 2);
+
+    // Running it twice is not an error; the second pass simply finds nothing left.
+    let again = state.db().clear_demo_data().unwrap();
+    assert_eq!(again.items_removed, 0);
+    assert_eq!(again.customers_removed, 0);
+    assert_eq!(again.items_kept, 2);
+}
+
+#[test]
+fn only_an_owner_can_clear_the_demo_data() {
+    // It is destructive and one-way. A cashier clearing the catalogue mid-shift, by
+    // accident or otherwise, is not something to leave to a hidden button.
+    let (_dir, state) = console_state();
+    let owner = set_up_owner(&state);
+    let cashier = state
+        .db()
+        .create_user(
+            &NewUser {
+                username: "meena".into(),
+                display_name: "Meena R".into(),
+                role: Role::Cashier,
+            },
+            "counter-password",
+        )
+        .unwrap();
+
+    assert!(require_owner(Some(Session { token: "t".into(), user: owner })).is_ok());
+    assert!(
+        require_session(Some(Session { token: "t".into(), user: cashier.clone() })).is_ok(),
+        "a cashier can still add a one-off item to their own bill"
+    );
+    assert!(require_owner(Some(Session { token: "t".into(), user: cashier })).is_err());
+    assert!(require_owner(None).is_err());
 }

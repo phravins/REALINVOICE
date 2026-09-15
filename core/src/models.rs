@@ -84,6 +84,11 @@ pub struct Item {
     pub rate: f64,
     pub tax_rate: f64,
     pub uom: String,
+    /// Billed once from the billing screen rather than kept in the price list. Hidden
+    /// from the Inventory list and from the item picker, and tagged on the invoice so it
+    /// is clear at a glance which lines came from the catalogue.
+    #[serde(default)]
+    pub custom: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -93,6 +98,8 @@ pub struct NewItem {
     pub rate: f64,
     pub tax_rate: f64,
     pub uom: String,
+    #[serde(default)]
+    pub custom: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -146,6 +153,11 @@ pub struct InvoiceDetailLine {
     pub item_code: String,
     pub description: String,
     pub uom: String,
+    /// True for a one-off item typed straight onto the bill. Carried through so a
+    /// reprint and the history view can mark the line the same way the billing card
+    /// did — the code on a one-off is a synthetic key, not something to read out.
+    #[serde(default)]
+    pub custom: bool,
 }
 
 /// What the history pane filters by. Every field is optional; an empty filter lists
@@ -459,4 +471,18 @@ pub struct InvoiceNet {
     /// refuses to credit more than was billed.
     pub net_total: f64,
     pub note_count: i64,
+}
+
+/// What `clear_demo_data` did.
+///
+/// The "kept" counts are the point: a demo row that has been billed is left in place, and
+/// the screen says so rather than claiming a clean sweep.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DemoDataCleared {
+    pub items_removed: usize,
+    /// Demo items left because an invoice or credit note still refers to them.
+    pub items_kept: usize,
+    pub customers_removed: usize,
+    /// Demo customers left because they have been billed.
+    pub customers_kept: usize,
 }

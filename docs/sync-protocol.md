@@ -84,7 +84,12 @@ Keys are the column names. Money is a JSON number in rupees; `id` fields are int
 
 // items
 { "id": 7, "item_code": "SAND-M-UNIT", "description": "M-Sand per unit",
-  "rate": 4800.0, "tax_rate": 5.0, "uom": "UNIT" }
+  "rate": 4800.0, "tax_rate": 5.0, "uom": "UNIT",
+  "custom": false }                   // true for a one-off typed onto a single bill:
+                                      // a real row so its invoice line can point at it,
+                                      // but not part of the node's catalogue. Absent on
+                                      // rows queued before this field existed, and read
+                                      // as false.
 
 // invoices
 { "id": 1, "invoice_no": "RI-2026-0001", "date": "2026-09-13", "customer_id": 1,

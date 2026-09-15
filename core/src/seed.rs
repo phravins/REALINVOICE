@@ -55,6 +55,7 @@ pub fn demo_items() -> Vec<NewItem> {
             rate: 45_000.0,
             tax_rate: 18.0,
             uom: "NOS".into(),
+            custom: false,
         },
         NewItem {
             item_code: "ABCOS-ENT-LIC".into(),
@@ -62,6 +63,7 @@ pub fn demo_items() -> Vec<NewItem> {
             rate: 12_000.0,
             tax_rate: 18.0,
             uom: "LIC".into(),
+            custom: false,
         },
         NewItem {
             item_code: "CEM-OPC-53".into(),
@@ -69,6 +71,7 @@ pub fn demo_items() -> Vec<NewItem> {
             rate: 410.0,
             tax_rate: 28.0,
             uom: "BAG".into(),
+            custom: false,
         },
         NewItem {
             item_code: "TMT-12MM".into(),
@@ -76,6 +79,7 @@ pub fn demo_items() -> Vec<NewItem> {
             rate: 620.0,
             tax_rate: 18.0,
             uom: "ROD".into(),
+            custom: false,
         },
         NewItem {
             item_code: "PVC-PIPE-4".into(),
@@ -83,6 +87,7 @@ pub fn demo_items() -> Vec<NewItem> {
             rate: 285.5,
             tax_rate: 18.0,
             uom: "NOS".into(),
+            custom: false,
         },
         NewItem {
             item_code: "PAINT-WH-20".into(),
@@ -90,6 +95,7 @@ pub fn demo_items() -> Vec<NewItem> {
             rate: 3150.0,
             tax_rate: 18.0,
             uom: "CAN".into(),
+            custom: false,
         },
         NewItem {
             item_code: "SAND-M-UNIT".into(),
@@ -97,6 +103,7 @@ pub fn demo_items() -> Vec<NewItem> {
             rate: 4800.0,
             tax_rate: 5.0,
             uom: "UNIT".into(),
+            custom: false,
         },
     ]
 }

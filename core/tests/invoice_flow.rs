@@ -76,6 +76,7 @@ fn sync_queue_picks_up_the_invoice_and_every_line() {
             rate: 100.0,
             tax_rate: 18.0,
             uom: "NOS".into(),
+            custom: false,
         })
         .unwrap();
 
@@ -1012,6 +1013,7 @@ fn adding_an_item_puts_it_in_the_catalogue_and_the_sync_queue() {
             rate: 180.0,
             tax_rate: 18.0,
             uom: "NOS".into(),
+            custom: false,
         })
         .unwrap();
 
@@ -1947,4 +1949,163 @@ fn a_fully_cancelled_invoice_nets_to_nothing_in_reporting() {
 
     assert_eq!(db.payment_mix(&DateRange::default()).unwrap()[0].grand_total, 0.0);
     assert_eq!(db.daily_totals(&DateRange::default()).unwrap()[0].net_total, 0.0);
+}
+
+// -------------------------------------------------------------- one-off items
+
+#[test]
+fn a_one_off_item_bills_without_joining_the_catalogue() {
+    let mut db = seeded_db();
+    let before = db.count_items().unwrap();
+
+    let delivery = db.create_custom_item("Delivery to site", 750.0, 18.0, "").unwrap();
+    assert!(delivery.custom);
+    assert_eq!(delivery.uom, "NOS", "a unit is never blank on a bill");
+    assert!(delivery.item_code.starts_with("ONE-OFF-"), "{}", delivery.item_code);
+
+    // Invisible to the price list a shop maintains, and to the billing picker, so it
+    // cannot be picked again by accident on the next sale.
+    assert_eq!(db.count_items().unwrap(), before, "the catalogue count is unchanged");
+    assert!(db.list_items(&ItemFilter::default()).unwrap().iter().all(|i| !i.custom));
+    assert!(db
+        .list_items(&ItemFilter { text: Some("Delivery".into()), ..Default::default() })
+        .unwrap()
+        .is_empty());
+    assert!(db.search_item("Delivery").unwrap().is_empty());
+    assert!(db.search_item("").unwrap().iter().all(|i| !i.custom));
+
+    // But it bills like anything else, and prices through the same GST code.
+    let buyer = customer(&db, "9840012345");
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine {
+                item_id: delivery.id,
+                qty: 2.0,
+                rate: None,
+                tax_rate: None,
+            }],
+        })
+        .unwrap();
+
+    assert_eq!(invoice.subtotal, 1_500.0);
+    assert_eq!(invoice.cgst, 135.0);
+    assert_eq!(invoice.sgst, 135.0);
+    assert_eq!(invoice.grand_total, 1_770.0);
+
+    // And it reads back on the invoice with its description, tagged as custom so the
+    // screen can say which lines came from the catalogue.
+    let detail = db.get_invoice_detail(invoice.id).unwrap().unwrap();
+    assert_eq!(detail.lines.len(), 1);
+    assert_eq!(detail.lines[0].description, "Delivery to site");
+    assert!(db.get_item(delivery.id).unwrap().unwrap().custom);
+}
+
+#[test]
+fn a_one_off_item_refuses_nonsense() {
+    let mut db = seeded_db();
+
+    assert!(db.create_custom_item("   ", 100.0, 18.0, "NOS").is_err(), "no description");
+    assert!(db.create_custom_item("Fitting", -1.0, 18.0, "NOS").is_err(), "negative rate");
+    assert!(db.create_custom_item("Fitting", f64::NAN, 18.0, "NOS").is_err());
+    assert!(db.create_custom_item("Fitting", 100.0, 900.0, "NOS").is_err(), "tax over 100");
+    assert!(db.create_custom_item("Fitting", 100.0, -5.0, "NOS").is_err());
+
+    // Both boundaries are legitimate: zero-rated goods, and a free delivery.
+    assert!(db.create_custom_item("Free delivery", 0.0, 0.0, "NOS").is_ok());
+    assert!(db.create_custom_item("Fully taxed", 100.0, 100.0, "NOS").is_ok());
+
+    // Two one-offs with the same description are two different items, not a collision.
+    let first = db.create_custom_item("Site visit", 500.0, 18.0, "NOS").unwrap();
+    let second = db.create_custom_item("Site visit", 500.0, 18.0, "NOS").unwrap();
+    assert_ne!(first.id, second.id);
+    assert_ne!(first.item_code, second.item_code);
+}
+
+// ------------------------------------------------------------ clearing demo data
+
+#[test]
+fn clearing_demo_data_removes_untouched_samples_only() {
+    let mut db = seeded_db();
+    assert_eq!(db.count_items().unwrap(), 7);
+    assert!(db.search_customer("9791045678").unwrap().is_some(), "a sample customer exists");
+
+    // Bill one demo item to one demo customer, so both are no longer untouched.
+    let buyer = customer(&db, "9840012345");
+    let rack = item(&db, "RACK-42U-PRO");
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+        })
+        .unwrap();
+
+    let cleared = db.clear_demo_data().unwrap();
+
+    // The six unbilled items and four unbilled customers go.
+    assert_eq!(cleared.items_removed, 6);
+    assert_eq!(cleared.items_kept, 1, "the billed rack stays");
+    assert_eq!(cleared.customers_removed, 4);
+    assert_eq!(cleared.customers_kept, 1, "the billed customer stays");
+
+    // What is left is exactly what the invoice still needs.
+    assert_eq!(db.count_items().unwrap(), 1);
+    assert!(db.search_item("ABCOS").unwrap().is_empty(), "the sample licence is gone");
+    assert!(db.search_customer("9791045678").unwrap().is_none(), "an unbilled sample is gone");
+
+    // And the invoice is completely intact and still readable, which is the whole
+    // constraint: clearing sample data must never cost a real record.
+    let after = db.get_invoice(invoice.id).unwrap().unwrap();
+    assert_eq!(after, invoice);
+    let detail = db.get_invoice_detail(invoice.id).unwrap().unwrap();
+    assert_eq!(detail.lines.len(), 1);
+    assert_eq!(detail.lines[0].item_code, "RACK-42U-PRO");
+    assert_eq!(detail.customer.mobile, "9840012345");
+    assert_eq!(db.list_invoices(&InvoiceFilter::default()).unwrap().len(), 1);
+}
+
+#[test]
+fn clearing_demo_data_twice_is_harmless_and_spares_real_rows() {
+    let mut db = seeded_db();
+
+    // A real item a shop added themselves, and a real customer.
+    let real = db
+        .upsert_item(&NewItem {
+            item_code: "PATCH-CAT6".into(),
+            description: "Cat6 patch cable".into(),
+            rate: 180.0,
+            tax_rate: 18.0,
+            uom: "NOS".into(),
+            custom: false,
+        })
+        .unwrap();
+    let real_customer = db
+        .create_customer(&NewCustomer {
+            name: "Deccan Interiors".into(),
+            mobile: "9000012345".into(),
+            gstin: None,
+            place_of_supply: "TN".into(),
+        })
+        .unwrap();
+
+    let first = db.clear_demo_data().unwrap();
+    assert_eq!(first.items_removed, 7);
+    assert_eq!(first.customers_removed, 5);
+
+    // Run again on an already-clean install: nothing to do, and no error.
+    let second = db.clear_demo_data().unwrap();
+    assert_eq!(second.items_removed, 0);
+    assert_eq!(second.customers_removed, 0);
+    assert_eq!(second.items_kept, 0);
+
+    // Nothing the shop made themselves was touched.
+    assert!(db.get_item(real.id).unwrap().is_some());
+    assert!(db.search_customer(&real_customer.mobile).unwrap().is_some());
+    assert_eq!(db.count_items().unwrap(), 1);
 }

@@ -236,40 +236,74 @@
             <span class="rounded-field bg-base-300 px-2 py-0.5 font-mono text-xs text-base-content"
                   id="inv-no" hidden></span>
           </div>
-          <div class="flex flex-none items-center gap-2">
-            <label class="sr-only" for="mobile-input">Customer mobile number</label>
-            <input id="mobile-input" type="tel" inputmode="numeric" autocomplete="off"
-                   placeholder="Customer mobile" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 w-56" />
-            <button id="search-btn" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Search</button>
-          </div>
+
         </header>
 
         <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-1 flex-col gap-4 p-4">
-          <div class="text-sm text-base-content/60" id="customer-line" aria-live="polite">
-            <span>Search a mobile number to attach a customer.</span>
-          </div>
+          <!-- The Customer section. Previously this was an unlabelled box in the page
+               header that read as a global search, so people did not find it and hit
+               "Attach a customer first" with nowhere to go. It is now a titled section at
+               the top of the card, where a bill starts. -->
+          <section class="flex flex-col gap-3" id="customer-section">
+            <h2 class="text-lg font-semibold tracking-tight">Customer</h2>
 
-          <!-- Shown only when a mobile number resolves to nobody. -->
-          <div class="flex flex-col gap-4 rounded-field border border-base-300 bg-base-200/60 p-4"
-               id="new-customer" hidden>
-            <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45">Register new customer</p>
-            <div class="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
-              <label class="flex flex-col gap-1 text-xs text-base-content/60">Name
-                <input id="nc-name" type="text" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
-              <label class="flex flex-col gap-1 text-xs text-base-content/60">Mobile
-                <input id="nc-mobile" type="tel" inputmode="numeric" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
-              <label class="flex flex-col gap-1 text-xs text-base-content/60">GSTIN
-                <span class="text-base-content/45">(optional)</span>
-                <input id="nc-gstin" type="text" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
-              <label class="flex flex-col gap-1 text-xs text-base-content/60">Place of supply
-                <input id="nc-pos" type="text" maxlength="2" placeholder="TN" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+            <!-- Shown while nobody is attached. -->
+            <div class="flex flex-wrap items-end gap-2" id="customer-search">
+              <label class="flex min-w-56 flex-1 flex-col gap-1 text-xs text-base-content/60">
+                Mobile Number
+                <input id="mobile-input" type="tel" inputmode="numeric" autocomplete="off"
+                       placeholder="e.g. 9840012345" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
+              </label>
+              <button id="search-btn" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">
+                <span class="hero-magnifying-glass size-4" aria-hidden="true"></span> Search
+              </button>
             </div>
-            <div class="flex flex-wrap items-center gap-3">
-              <button id="nc-save" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Create customer</button>
-              <button id="nc-cancel" type="button" class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
-              <span class="text-xs text-base-content/60" id="nc-msg"></span>
+
+            <!-- Shown instead, once somebody is attached, and it stays put for the whole
+                 bill rather than flashing once. -->
+            <div class="flex flex-wrap items-center gap-3 rounded-field border border-base-300 bg-base-200/60 px-3 py-2"
+                 id="customer-chip" hidden>
+              <span class="hero-user-circle size-5 shrink-0 text-base-content/45" aria-hidden="true"></span>
+              <p class="min-w-0 flex-1 text-sm" id="customer-line" aria-live="polite"></p>
+              <button id="customer-detach" type="button" title="Detach this customer"
+                      aria-label="Detach this customer"
+                      class="flex size-7 shrink-0 items-center justify-center rounded-field text-base-content/45 transition-colors hover:bg-base-200 hover:text-error">
+                <span class="hero-x-mark size-4" aria-hidden="true"></span>
+              </button>
             </div>
-          </div>
+
+            <!-- Offered inline the moment a number matches nobody, rather than sending
+                 somebody to another screen mid-sale. -->
+            <div class="flex flex-wrap items-center gap-3 rounded-field border border-dashed border-base-300 px-3 py-2"
+                 id="customer-miss" hidden>
+              <p class="min-w-0 flex-1 text-sm text-base-content/60" id="customer-miss-text"></p>
+              <button id="nc-open" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">
+                <span class="hero-user-plus size-4" aria-hidden="true"></span> Add New Customer
+              </button>
+            </div>
+
+            <!-- Opened by "Add New Customer" above; saves and attaches in one step. -->
+            <div class="flex flex-col gap-4 rounded-field border border-base-300 bg-base-200/60 p-4"
+                 id="new-customer" hidden>
+              <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45">Add new customer</p>
+              <div class="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
+                <label class="flex flex-col gap-1 text-xs text-base-content/60">Name
+                  <input id="nc-name" type="text" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+                <label class="flex flex-col gap-1 text-xs text-base-content/60">Mobile
+                  <input id="nc-mobile" type="tel" inputmode="numeric" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+                <label class="flex flex-col gap-1 text-xs text-base-content/60">GSTIN
+                  <span class="text-base-content/45">(optional)</span>
+                  <input id="nc-gstin" type="text" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+                <label class="flex flex-col gap-1 text-xs text-base-content/60">Place of supply
+                  <input id="nc-pos" type="text" maxlength="2" placeholder="TN" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+              </div>
+              <div class="flex flex-wrap items-center gap-3">
+                <button id="nc-save" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Save &amp; attach</button>
+                <button id="nc-cancel" type="button" class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+                <span class="text-xs text-base-content/60" id="nc-msg"></span>
+              </div>
+            </div>
+          </section>
 
           <div class="flex flex-1 flex-col overflow-x-auto">
             <table class="w-full text-left" id="items-table">
@@ -312,6 +346,42 @@
               <button id="picker-close" type="button" class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Close</button>
             </div>
             <ul class="max-h-64 overflow-y-auto" id="picker-results"></ul>
+
+            <!-- A counter sells things that are not in the catalogue — a repair charge, a
+                 loose fitting, a one-time delivery. Offered only when nothing matches, and
+                 it goes onto this bill without being added to Inventory. -->
+            <div id="oneoff-offer" hidden>
+              <button id="oneoff-open" type="button"
+                      class="inline-flex h-9 w-full items-center gap-2 rounded-field border border-dashed border-base-300 px-3 text-left text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">
+                <span class="hero-plus size-4 shrink-0" aria-hidden="true"></span>
+                <span class="min-w-0 flex-1 truncate" id="oneoff-offer-text"></span>
+              </button>
+            </div>
+
+            <form class="flex flex-col gap-3 rounded-field border border-base-300 bg-base-100 p-3"
+                  id="oneoff-form" hidden>
+              <div class="flex items-baseline justify-between gap-3">
+                <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45">One-off item</p>
+                <p class="text-2xs text-base-content/45">Billed once — not saved to Inventory</p>
+              </div>
+              <div class="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3">
+                <label class="flex flex-col gap-1 text-xs text-base-content/60 sm:col-span-2">Description
+                  <input id="oo-desc" type="text" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+                <label class="flex flex-col gap-1 text-xs text-base-content/60">Rate (₹)
+                  <input id="oo-rate" type="number" min="0" step="any" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto text-right font-mono tabular-nums" /></label>
+                <label class="flex flex-col gap-1 text-xs text-base-content/60">Tax %
+                  <input id="oo-tax" type="number" min="0" max="100" step="any" value="18" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto text-right font-mono tabular-nums" /></label>
+                <label class="flex flex-col gap-1 text-xs text-base-content/60">Qty
+                  <input id="oo-qty" type="number" min="0" step="any" value="1" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto text-right font-mono tabular-nums" /></label>
+                <label class="flex flex-col gap-1 text-xs text-base-content/60">Unit
+                  <input id="oo-uom" type="text" maxlength="8" placeholder="NOS" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+              </div>
+              <div class="flex flex-wrap items-center gap-3">
+                <button id="oo-add" type="submit" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Add to bill</button>
+                <button id="oo-cancel" type="button" class="inline-flex h-9 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+                <span class="text-xs text-base-content/60" id="oo-msg"></span>
+              </div>
+            </form>
           </div>
         </div>
 
@@ -724,6 +794,25 @@
             <h2 class="text-lg font-semibold tracking-tight">About</h2>
           </header>
           <dl class="grid grid-cols-[minmax(140px,220px)_1fr]" id="about-app-rows"></dl>
+
+          <!-- Owner-only, and hidden outright for a cashier. The command behind it
+               refuses anyone else regardless. -->
+          <section class="mt-6 flex flex-col gap-3" id="demo-data" hidden>
+            <header>
+              <h2 class="text-lg font-semibold tracking-tight">Demo Data</h2>
+              <p class="mt-1 max-w-prose text-sm text-base-content/60">This console shipped
+                with sample customers and stock so it could be tried out before real
+                billing began. Clearing them removes only the seeded rows nothing has been
+                billed against — invoices, credit notes, and anything they reference stay
+                exactly as they are.</p>
+            </header>
+            <div class="flex flex-wrap items-center gap-3">
+              <button id="demo-clear" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-error/40 bg-base-100 px-3 text-sm font-medium text-error transition-colors hover:bg-error/10">
+                <span class="hero-trash size-4" aria-hidden="true"></span> Clear Demo Data
+              </button>
+              <span class="text-xs text-base-content/60" id="demo-msg" aria-live="polite"></span>
+            </div>
+          </section>
         </div>
       </section>
 

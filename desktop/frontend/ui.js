@@ -334,6 +334,77 @@ var UI = (function () {
     );
   }
 
+  /* ------------------------------------------------------------ password fields
+
+     One implementation, applied to every password input in the app by walking the DOM.
+     Deliberately not a snippet to paste per screen: a future password field should get
+     this by existing, not by somebody remembering. */
+
+  /**
+   * Gives every `input[type=password]` on the page a show/hide eye, once.
+   *
+   * Safe to call repeatedly — already-wrapped inputs are skipped — so a screen that
+   * renders its fields later can simply call it again.
+   */
+  function enhancePasswordFields(root) {
+    var scope = root || document;
+    var inputs = scope.querySelectorAll('input[type="password"]:not([data-eye])');
+
+    Array.prototype.forEach.call(inputs, function (input) {
+      input.dataset.eye = "on";
+
+      // The input keeps its own classes; the wrapper only positions the button, so a
+      // field styled differently on one screen still looks like itself.
+      var wrap = document.createElement("div");
+      wrap.className = "relative w-full";
+      input.parentNode.insertBefore(wrap, input);
+      wrap.appendChild(input);
+
+      // Room for the button, so a long password does not run underneath it.
+      input.classList.add("pr-10");
+
+      var button = document.createElement("button");
+      button.type = "button";
+      button.tabIndex = -1; // Tab should go from the password to the submit, not here.
+      button.className =
+        "absolute inset-y-0 right-0 flex w-10 items-center justify-center " +
+        "rounded-r-field text-base-content/45 transition-colors " +
+        "hover:text-base-content focus-visible:text-base-content";
+
+      var icon = document.createElement("span");
+      icon.className = "hero-eye size-4";
+      icon.setAttribute("aria-hidden", "true");
+      button.appendChild(icon);
+
+      function paint(shown) {
+        // Hidden is the default, and the icon shows what clicking will do next.
+        icon.className = shown ? "hero-eye-slash size-4" : "hero-eye size-4";
+        button.setAttribute("aria-label", shown ? "Hide password" : "Show password");
+        button.title = shown ? "Hide password" : "Show password";
+        button.setAttribute("aria-pressed", shown ? "true" : "false");
+      }
+
+      paint(false);
+
+      button.addEventListener("click", function () {
+        var shown = input.type === "text";
+        input.type = shown ? "password" : "text";
+        paint(!shown);
+        // Put the caret back where it was: revealing a password to check a typo and
+        // landing at the start of the field is worse than not revealing it.
+        var at = input.value.length;
+        input.focus();
+        try {
+          input.setSelectionRange(at, at);
+        } catch (err) {
+          // Some input types refuse setSelectionRange; focus alone is fine.
+        }
+      });
+
+      wrap.appendChild(button);
+    });
+  }
+
   /** A keyboard key, as shown in the shortcut bar and the empty states. */
   function kbd(key) {
     return (
@@ -352,6 +423,7 @@ var UI = (function () {
     rows: rows,
     emptyState: emptyState,
     kbd: kbd,
+    enhancePasswordFields: enhancePasswordFields,
     barChart: barChart,
     donutChart: donutChart,
     statCard: statCard,

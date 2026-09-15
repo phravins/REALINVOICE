@@ -50,6 +50,8 @@ pub fn run() {
             commands::list_items,
             commands::count_items,
             commands::save_item,
+            commands::create_custom_item,
+            commands::clear_demo_data,
             commands::analytics,
             commands::sync_status,
             commands::sync_now,

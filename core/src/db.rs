@@ -495,10 +495,11 @@ impl Db {
     pub fn search_item(&self, query: &str) -> Result<Vec<Item>> {
         let pattern = format!("%{}%", query.trim());
         let mut stmt = self.conn.prepare(
-            "SELECT id, item_code, description, rate, tax_rate, uom
+            "SELECT id, item_code, description, rate, tax_rate, uom, custom
                FROM items
-              WHERE item_code LIKE ?1 COLLATE NOCASE
-                 OR description LIKE ?1 COLLATE NOCASE
+              WHERE custom = 0
+                AND (item_code LIKE ?1 COLLATE NOCASE
+                  OR description LIKE ?1 COLLATE NOCASE)
               ORDER BY item_code
               LIMIT 50",
         )?;
@@ -522,17 +523,18 @@ impl Db {
         let (id, op) = match existing {
             Some(id) => {
                 tx.execute(
-                    "UPDATE items SET description = ?1, rate = ?2, tax_rate = ?3, uom = ?4
-                      WHERE id = ?5",
-                    params![new.description, new.rate, new.tax_rate, new.uom, id],
+                    "UPDATE items SET description = ?1, rate = ?2, tax_rate = ?3, uom = ?4,
+                                     custom = ?5
+                      WHERE id = ?6",
+                    params![new.description, new.rate, new.tax_rate, new.uom, new.custom, id],
                 )?;
                 (id, SyncOp::Update)
             }
             None => {
                 tx.execute(
-                    "INSERT INTO items (item_code, description, rate, tax_rate, uom)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![code, new.description, new.rate, new.tax_rate, new.uom],
+                    "INSERT INTO items (item_code, description, rate, tax_rate, uom, custom)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![code, new.description, new.rate, new.tax_rate, new.uom, new.custom],
                 )?;
                 (tx.last_insert_rowid(), SyncOp::Insert)
             }
@@ -545,6 +547,7 @@ impl Db {
             rate: new.rate,
             tax_rate: new.tax_rate,
             uom: new.uom.clone(),
+            custom: new.custom,
         };
         enqueue(&tx, "items", item.id, op, &item)?;
         tx.commit()?;
@@ -562,11 +565,12 @@ impl Db {
         let limit = filter.limit.unwrap_or(1000) as i64;
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, item_code, description, rate, tax_rate, uom
+            "SELECT id, item_code, description, rate, tax_rate, uom, custom
                FROM items
-              WHERE ?1 = ''
-                 OR item_code LIKE ?2 COLLATE NOCASE
-                 OR description LIKE ?2 COLLATE NOCASE
+              WHERE custom = 0
+                AND (?1 = ''
+                  OR item_code LIKE ?2 COLLATE NOCASE
+                  OR description LIKE ?2 COLLATE NOCASE)
               ORDER BY item_code
               LIMIT ?3",
         )?;
@@ -576,14 +580,122 @@ impl Db {
 
     /// How many items the catalogue holds, ignoring any filter.
     pub fn count_items(&self) -> Result<i64> {
-        Ok(self.conn.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))?)
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM items WHERE custom = 0", [], |row| row.get(0))?)
+    }
+
+    /// Creates a one-off item for a single bill, outside the catalogue.
+    ///
+    /// The code is generated rather than asked for: a cashier mid-sale should type a
+    /// description and a price, not invent a SKU, and a made-up code would collide with
+    /// the real series sooner or later.
+    pub fn create_custom_item(
+        &mut self,
+        description: &str,
+        rate: f64,
+        tax_rate: f64,
+        uom: &str,
+    ) -> Result<Item> {
+        let description = description.trim();
+        if description.is_empty() {
+            return Err(CoreError::Invalid("a description is required".into()));
+        }
+        if !rate.is_finite() || rate < 0.0 {
+            return Err(CoreError::Invalid("rate must be a number, and cannot be negative".into()));
+        }
+        if !tax_rate.is_finite() || !(0.0..=100.0).contains(&tax_rate) {
+            return Err(CoreError::Invalid("tax rate must be between 0 and 100".into()));
+        }
+
+        let uom = uom.trim();
+        let code = format!("ONE-OFF-{}", uuid::Uuid::new_v4().simple());
+
+        self.upsert_item(&NewItem {
+            item_code: code,
+            description: description.to_string(),
+            rate: crate::gst::round_money(rate),
+            tax_rate,
+            uom: if uom.is_empty() { "NOS".to_string() } else { uom.to_string() },
+            custom: true,
+        })
+    }
+
+    /// Removes the demo catalogue a fresh install ships with.
+    ///
+    /// Only rows that are **still untouched**: a seeded item that has been billed, or
+    /// credited, or a seeded customer with an invoice against them, stays exactly where it
+    /// is. Deleting those would orphan real records, and an invoice that cannot name what
+    /// it sold is not a smaller problem than a cluttered price list.
+    ///
+    /// Identified by the seed's own list rather than by a flag, so an item a shop happens
+    /// to have created with the same code as a demo row — having typed it in themselves —
+    /// is left alone only if they have used it. That is the safe direction to be wrong in.
+    pub fn clear_demo_data(&mut self) -> Result<DemoDataCleared> {
+        let demo_items: Vec<String> =
+            crate::seed::demo_items().into_iter().map(|i| i.item_code).collect();
+        let demo_mobiles: Vec<String> =
+            crate::seed::demo_customers().into_iter().map(|c| c.mobile).collect();
+
+        let tx = self.conn.transaction()?;
+        let mut items_removed = 0usize;
+        let mut items_kept = 0usize;
+        let mut customers_removed = 0usize;
+        let mut customers_kept = 0usize;
+
+        for code in &demo_items {
+            let removed = tx.execute(
+                "DELETE FROM items
+                  WHERE item_code = ?1
+                    AND id NOT IN (SELECT item_id FROM invoice_lines)
+                    AND id NOT IN (SELECT item_id FROM credit_note_lines)",
+                [code],
+            )?;
+            if removed > 0 {
+                items_removed += removed;
+            } else {
+                let exists: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM items WHERE item_code = ?1",
+                    [code],
+                    |row| row.get(0),
+                )?;
+                items_kept += exists as usize;
+            }
+        }
+
+        for mobile in &demo_mobiles {
+            let removed = tx.execute(
+                "DELETE FROM customers
+                  WHERE mobile = ?1
+                    AND id NOT IN (SELECT customer_id FROM invoices)",
+                [mobile],
+            )?;
+            if removed > 0 {
+                customers_removed += removed;
+            } else {
+                let exists: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM customers WHERE mobile = ?1",
+                    [mobile],
+                    |row| row.get(0),
+                )?;
+                customers_kept += exists as usize;
+            }
+        }
+
+        // Nothing is queued for sync. These rows were never real business data — they are
+        // sample content this node shipped with — and telling the back office to delete
+        // them would be telling it about records it should never have been sent.
+        tx.commit()?;
+
+        Ok(DemoDataCleared { items_removed, items_kept, customers_removed, customers_kept })
     }
 
     pub fn get_item(&self, id: i64) -> Result<Option<Item>> {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, item_code, description, rate, tax_rate, uom FROM items WHERE id = ?1",
+                "SELECT id, item_code, description, rate, tax_rate, uom, custom
+                 FROM items WHERE id = ?1",
                 [id],
                 item_from_row,
             )
@@ -820,7 +932,7 @@ impl Db {
 
         let mut stmt = self.conn.prepare(
             "SELECT l.id, l.invoice_id, l.item_id, l.qty, l.rate, l.tax_rate, l.line_total,
-                    it.item_code, it.description, it.uom
+                    it.item_code, it.description, it.uom, it.custom
                FROM invoice_lines l
                JOIN items it ON it.id = l.item_id
               WHERE l.invoice_id = ?1
@@ -832,6 +944,7 @@ impl Db {
                 item_code: row.get(7)?,
                 description: row.get(8)?,
                 uom: row.get(9)?,
+                custom: row.get::<_, i64>(10)? != 0,
             })
         })?;
 
@@ -1601,6 +1714,7 @@ fn item_from_row(row: &Row<'_>) -> rusqlite::Result<Item> {
         rate: row.get(3)?,
         tax_rate: row.get(4)?,
         uom: row.get(5)?,
+        custom: row.get::<_, i64>(6)? != 0,
     })
 }
 
