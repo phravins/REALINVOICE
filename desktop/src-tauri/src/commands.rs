@@ -8,11 +8,11 @@
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use realinvoice_core::{
     auth, gst, sync, CreditNote, CreditNoteDetail, CreditableLine, Customer, DailyTotal, DateRange,
-    DemoDataCleared, Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine, InvoiceNet,
-    InvoiceSummary, Item, ItemFilter, ItemPrice, ItemPriceRow, Lockout, LoginOutcome,
-    NewCreditNote, NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser,
-    PaymentMix, PriceList, PricedItem, ResolvedRate, Role, SalesSummary, SyncStatus, TopItem, User,
-    LOGIN_WINDOW_MINUTES, MAX_FAILED_LOGINS,
+    DemoDataCleared, DiscountType, DiscountedTotals, Invoice, InvoiceDetail, InvoiceFilter,
+    InvoiceLine, InvoiceNet, InvoiceSummary, Item, ItemFilter, ItemPrice, ItemPriceRow, Lockout,
+    LoginOutcome, NewCreditNote, NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine,
+    NewItem, NewUser, PaymentMix, PriceList, PricedItem, ResolvedRate, Role, SalesSummary,
+    SyncStatus, TopItem, User, LOGIN_WINDOW_MINUTES, MAX_FAILED_LOGINS,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -275,6 +275,18 @@ pub fn require_owner_for_test(session: Option<Session>) -> Result<Session, Strin
     owner_of(session)
 }
 
+/// Test hook for [`check_discount_approval`], which the command itself reaches only from
+/// inside a running app.
+#[doc(hidden)]
+pub fn check_discount_approval_for_test(
+    db: &mut realinvoice_core::Db,
+    session: &Session,
+    totals: &DiscountedTotals,
+    approval: Option<&OwnerApproval>,
+) -> Result<(), String> {
+    check_discount_approval(db, session, totals, approval)
+}
+
 /// What the About pane shows. Every field comes from the running binary, so bumping the
 /// version in one place is reflected here without a second edit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,8 +382,18 @@ pub struct InvoiceQuote {
     pub home_state: String,
     /// True when the split is CGST + SGST rather than IGST.
     pub intra_state: bool,
-    /// Taxable value per row, in the order supplied — the table's Total column.
+    /// Per row, in the order supplied — the table's Total column, after that row's own
+    /// discount.
     pub line_totals: Vec<f64>,
+    /// Per row: the rupees that row's own discount took off.
+    pub line_discounts: Vec<f64>,
+    /// What the bill would have come to with nothing discounted.
+    pub pre_discount_subtotal: f64,
+    pub line_discount_total: f64,
+    pub invoice_discount_amount: f64,
+    /// Both discounts together — the figure the panel shows on its own line.
+    pub discount_amount: f64,
+    /// The taxable value: after every discount, before tax.
     pub subtotal: f64,
     pub cgst: f64,
     pub sgst: f64,
@@ -400,6 +422,9 @@ pub struct NewInvoicePayload {
     pub date: Option<String>,
     pub payment_type: String,
     #[serde(default)]
+    pub invoice_discount_type: DiscountType,
+    #[serde(default)]
+    pub invoice_discount_value: f64,
     pub lines: Vec<NewLinePayload>,
 }
 
@@ -412,6 +437,10 @@ pub struct NewLinePayload {
     pub rate: Option<f64>,
     #[serde(default)]
     pub tax_rate: Option<f64>,
+    #[serde(default)]
+    pub discount_type: DiscountType,
+    #[serde(default)]
+    pub discount_value: f64,
 }
 
 impl From<NewLinePayload> for NewInvoiceLine {
@@ -421,6 +450,8 @@ impl From<NewLinePayload> for NewInvoiceLine {
             qty: line.qty,
             rate: line.rate,
             tax_rate: line.tax_rate,
+            discount_type: line.discount_type,
+            discount_value: line.discount_value,
         }
     }
 }
@@ -433,6 +464,8 @@ impl From<NewInvoicePayload> for NewInvoice {
             payment_type: payload.payment_type,
             // Never sent by the frontend — `create_invoice` fills it from the session.
             created_by_user_id: None,
+            invoice_discount_type: payload.invoice_discount_type,
+            invoice_discount_value: payload.invoice_discount_value,
             lines: payload.lines.into_iter().map(Into::into).collect(),
         }
     }
@@ -712,6 +745,25 @@ pub fn resolve_rates(
     state.db().resolve_rates(&item_ids, price_list_id).map_err(|e| e.to_string())
 }
 
+/// What a cashier may discount without an owner, as a percentage of the bill.
+#[tauri::command]
+pub fn discount_approval_threshold(state: State<'_, AppState>) -> Result<f64, String> {
+    require_session(&state)?;
+    state.db().discount_approval_threshold().map_err(|e| e.to_string())
+}
+
+/// Owner-only: a cashier who could raise their own ceiling would not have one.
+#[tauri::command]
+pub fn set_discount_approval_threshold(
+    percent: f64,
+    state: State<'_, AppState>,
+) -> Result<f64, String> {
+    require_owner(&state)?;
+    let mut db = state.db();
+    db.set_discount_approval_threshold(percent).map_err(|e| e.to_string())?;
+    db.discount_approval_threshold().map_err(|e| e.to_string())
+}
+
 // ------------------------------------------------------------- credit notes
 
 /// What is still creditable on an invoice, for drawing the form.
@@ -940,6 +992,7 @@ pub fn analytics(range: DateRange, state: State<'_, AppState>) -> Result<Analyti
 pub fn create_invoice(
     payload: NewInvoicePayload,
     expected: Option<ExpectedTotals>,
+    approval: Option<OwnerApproval>,
     state: State<'_, AppState>,
 ) -> Result<SavedInvoice, String> {
     let session = require_session(&state)?;
@@ -958,14 +1011,15 @@ pub fn create_invoice(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("customer {} no longer exists", new_invoice.customer_id))?;
 
+    // Priced by core — price list, then line discounts, then the invoice discount, then
+    // tax — before anything else looks at it. Both the approval gate and the screen check
+    // read these figures rather than the ones the screen sent.
+    let totals = db.price_invoice(&new_invoice).map_err(|e| e.to_string())?;
+
+    check_discount_approval(&mut db, &session, &totals, approval.as_ref())?;
+
     if let Some(expected) = expected {
-        // Priced by core, through this customer's price list, and only then compared with
-        // what the screen showed. Before price lists the frontend sent the rates and this
-        // check could only confirm core agreed with itself; now it catches the case that
-        // matters — a bill totalled at retail for a customer the database has on
-        // wholesale.
-        let priced = db.price_invoice_lines(&new_invoice).map_err(|e| e.to_string())?;
-        check_expected_totals(&expected, &priced, &customer.place_of_supply, db.home_state())?;
+        check_expected_totals(&expected, &totals)?;
     }
 
     let invoice = db.create_invoice(&new_invoice).map_err(|e| e.to_string())?;
@@ -975,26 +1029,35 @@ pub fn create_invoice(
     Ok(SavedInvoice { invoice, lines, customer, queued_sync_rows })
 }
 
-/// Compares what the panel displayed against lines core has already priced.
+/// Compares what the panel displayed against what core priced.
 ///
-/// The rates are not re-derived here — they are handed in from
-/// [`realinvoice_core::Db::price_invoice_lines`], so there is exactly one copy of the
-/// pricing rules and this function's only job is the comparison. A disagreement means the
-/// screen is stale, most often because the customer's price list changed under it, and
-/// the save is refused rather than quietly billing one of the two numbers.
+/// Nothing is re-derived here — `actual` comes from
+/// [`realinvoice_core::Db::price_invoice`], so there is exactly one copy of the pricing
+/// rules and this function's only job is the comparison. A disagreement means the screen
+/// is stale, and the save is refused rather than quietly billing one of the two numbers.
+///
+/// The discount figures are checked too. A screen showing a discount core does not agree
+/// with is the one mistake on this screen a customer would notice at the counter.
 pub(crate) fn check_expected_totals(
     expected: &ExpectedTotals,
-    priced: &[gst::TaxableLine],
-    place_of_supply: &str,
-    home_state: &str,
+    actual: &DiscountedTotals,
 ) -> Result<(), String> {
-    let actual = gst::compute_totals(priced, home_state, place_of_supply);
     let differs = [
         ("subtotal", expected.subtotal, actual.subtotal),
         ("CGST", expected.cgst, actual.cgst),
         ("SGST", expected.sgst, actual.sgst),
         ("IGST", expected.igst, actual.igst),
         ("grand total", expected.grand_total, actual.grand_total),
+        (
+            "pre-discount subtotal",
+            expected.pre_discount_subtotal.unwrap_or(actual.pre_discount_subtotal),
+            actual.pre_discount_subtotal,
+        ),
+        (
+            "discount",
+            expected.discount_amount.unwrap_or(actual.discount_amount),
+            actual.discount_amount,
+        ),
     ]
     .into_iter()
     .find(|(_, shown, computed)| (shown - computed).abs() > MONEY_EPSILON);
@@ -1004,6 +1067,77 @@ pub(crate) fn check_expected_totals(
             "refusing to save: {field} on screen is {shown:.2} but prices to {computed:.2}"
         )),
         None => Ok(()),
+    }
+}
+
+/// An owner authorising something a cashier cannot do alone.
+///
+/// Credentials, not a flag: a boolean the frontend sets would be a gate the frontend can
+/// open. These go through the same rate-limited sign-in path as the login screen, so
+/// guessing at an owner's password here costs exactly what guessing at it there does.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OwnerApproval {
+    pub username: String,
+    pub password: String,
+}
+
+/// Stops a cashier discounting past the shop's limit without an owner standing there.
+///
+/// The threshold is measured against the **total** discount — line discounts and the
+/// invoice discount together — as a percentage of what the bill would otherwise have come
+/// to. Gating only the invoice-level box would leave the obvious way round it open: a
+/// cashier could take 90% off every line instead and never touch the control that asks
+/// for a password. What an auditor cares about is how much came off the bill, so that is
+/// what is measured.
+fn check_discount_approval(
+    db: &mut realinvoice_core::Db,
+    session: &Session,
+    totals: &DiscountedTotals,
+    approval: Option<&OwnerApproval>,
+) -> Result<(), String> {
+    if session.user.role == Role::Owner || totals.discount_amount <= 0.0 {
+        return Ok(());
+    }
+
+    let threshold = db.discount_approval_threshold().map_err(|e| e.to_string())?;
+    let percent = discount_percent(totals);
+    if percent <= threshold + 1e-9 {
+        return Ok(());
+    }
+
+    let Some(approval) = approval else {
+        return Err(format!(
+            "A discount of {percent:.1}% needs an owner's approval — this till allows \
+             {threshold:.0}% without it."
+        ));
+    };
+    approve_as_owner(db, approval)
+}
+
+/// The total discount as a percentage of the pre-discount subtotal.
+pub fn discount_percent(totals: &DiscountedTotals) -> f64 {
+    if totals.pre_discount_subtotal <= 0.0 {
+        return 0.0;
+    }
+    totals.discount_amount / totals.pre_discount_subtotal * 100.0
+}
+
+/// Verifies that the credentials belong to an owner. Anything else is refused with one
+/// message, so this cannot be used to find out which usernames exist.
+fn approve_as_owner(db: &mut realinvoice_core::Db, approval: &OwnerApproval) -> Result<(), String> {
+    let outcome =
+        db.attempt_login(&approval.username, &approval.password).map_err(|e| e.to_string())?;
+
+    match outcome {
+        LoginOutcome::Ok(user) if user.role == Role::Owner => Ok(()),
+        LoginOutcome::Ok(_) => Err("That account is not an owner.".to_string()),
+        LoginOutcome::LockedOut(lockout) => Err(format!(
+            "Too many failed attempts — try again in {}.",
+            describe_wait(lockout.retry_after_seconds)
+        )),
+        LoginOutcome::Invalid => {
+            Err("Owner approval failed: check the username and password.".to_string())
+        }
     }
 }
 
@@ -1057,6 +1191,12 @@ pub struct ExpectedTotals {
     pub sgst: f64,
     pub igst: f64,
     pub grand_total: f64,
+    /// Optional so a caller that predates discounts is still checked on the figures it
+    /// does send, rather than refused for omitting two it never had.
+    #[serde(default)]
+    pub pre_discount_subtotal: Option<f64>,
+    #[serde(default)]
+    pub discount_amount: Option<f64>,
 }
 
 /// Everything the locked screen needs after a successful save: the invoice with its
@@ -1089,33 +1229,61 @@ pub fn create_customer(
 /// so the live totals and the saved invoice come from one implementation.
 #[tauri::command]
 pub fn quote_invoice(
+    customer_id: Option<i64>,
     place_of_supply: String,
-    lines: Vec<QuoteLinePayload>,
+    lines: Vec<NewLinePayload>,
+    invoice_discount_type: Option<DiscountType>,
+    invoice_discount_value: Option<f64>,
     state: State<'_, AppState>,
 ) -> Result<InvoiceQuote, String> {
     require_session(&state)?;
-    Ok(quote(&place_of_supply, &lines))
-}
 
-/// The pricing behind [`quote_invoice`], with no session or app state involved.
-pub fn quote(place_of_supply: &str, lines: &[QuoteLinePayload]) -> InvoiceQuote {
-    let home_state = realinvoice_core::DEFAULT_HOME_STATE;
-    let taxable: Vec<gst::TaxableLine> = lines
-        .iter()
-        .map(|l| gst::TaxableLine { qty: l.qty, rate: l.rate, tax_rate: l.tax_rate })
-        .collect();
+    let db = state.db();
+    let priced: Vec<NewInvoiceLine> = lines.into_iter().map(Into::into).collect();
+    let totals = db
+        .quote_invoice(
+            customer_id,
+            &place_of_supply,
+            &priced,
+            invoice_discount_type.unwrap_or_default(),
+            invoice_discount_value.unwrap_or(0.0),
+        )
+        .map_err(|e| e.to_string())?;
 
-    let totals = gst::compute_totals(&taxable, home_state, place_of_supply);
-    InvoiceQuote {
-        home_state: home_state.to_string(),
-        intra_state: gst::is_intra_state(home_state, place_of_supply),
-        line_totals: taxable.iter().map(|l| l.line_total()).collect(),
+    // Whose state the split was actually decided by. With a customer attached that is
+    // theirs, not whatever the screen sent, so the caption cannot contradict the maths.
+    let state_used = match customer_id {
+        Some(id) => db
+            .get_customer(id)
+            .map_err(|e| e.to_string())?
+            .map(|c| c.place_of_supply)
+            .unwrap_or(place_of_supply),
+        None => place_of_supply,
+    };
+    let home_state = db.home_state().to_string();
+
+    Ok(InvoiceQuote {
+        intra_state: gst::is_intra_state(&home_state, &state_used),
+        home_state,
+        // The Total column per row: what that line comes to after its own discount,
+        // before its share of the invoice discount. Showing the share in the row would
+        // mean the same rupee appeared twice on screen.
+        line_totals: totals
+            .lines
+            .iter()
+            .map(|l| gst::round_money(l.line_gross - l.discount_amount))
+            .collect(),
+        line_discounts: totals.lines.iter().map(|l| l.discount_amount).collect(),
+        pre_discount_subtotal: totals.pre_discount_subtotal,
+        line_discount_total: totals.line_discount_total,
+        invoice_discount_amount: totals.invoice_discount_amount,
+        discount_amount: totals.discount_amount,
         subtotal: totals.subtotal,
         cgst: totals.cgst,
         sgst: totals.sgst,
         igst: totals.igst,
         grand_total: totals.grand_total,
-    }
+    })
 }
 
 /// Test hook for [`check_expected_totals`], which is otherwise an implementation detail
@@ -1123,9 +1291,7 @@ pub fn quote(place_of_supply: &str, lines: &[QuoteLinePayload]) -> InvoiceQuote 
 #[doc(hidden)]
 pub fn check_expected_totals_for_test(
     expected: &ExpectedTotals,
-    priced: &[gst::TaxableLine],
-    place_of_supply: &str,
-    home_state: &str,
+    actual: &DiscountedTotals,
 ) -> Result<(), String> {
-    check_expected_totals(expected, priced, place_of_supply, home_state)
+    check_expected_totals(expected, actual)
 }

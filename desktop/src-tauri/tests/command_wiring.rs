@@ -6,14 +6,15 @@
 //! payload survives the trip into core unchanged.
 
 use realinvoice_core::{
-    seed, DateRange, InvoiceFilter, ItemPrice, LoginOutcome, NewCreditNote, NewCreditNoteLine,
-    NewCustomer, NewInvoice, NewInvoiceLine, NewUser, Role, User,
+    seed, DateRange, DiscountType, InvoiceFilter, ItemPrice, LoginOutcome, NewCreditNote,
+    NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine, NewUser, Role, User,
 };
 use realinvoice_desktop_lib::commands::{
-    check_expected_totals_for_test as check_expected_totals, check_item_for_test as check_item,
-    describe_wait, describe_window, quote, require_owner_for_test as require_owner,
-    require_session_for_test as require_session, ExpectedTotals, NewCreditNotePayload,
-    NewCustomerPayload, NewInvoicePayload, NewItemPayload, NewLinePayload, QuoteLinePayload,
+    check_discount_approval_for_test, check_expected_totals_for_test as check_expected_totals,
+    check_item_for_test as check_item, describe_wait, describe_window, discount_percent,
+    require_owner_for_test as require_owner, require_session_for_test as require_session,
+    ExpectedTotals, NewCreditNotePayload, NewCustomerPayload, NewInvoicePayload, NewItemPayload,
+    NewLinePayload, OwnerApproval,
 };
 use realinvoice_desktop_lib::state::{AppState, Session, DB_FILE_NAME};
 
@@ -57,7 +58,11 @@ fn reopening_the_same_path_keeps_the_data_and_does_not_reseed() {
                     qty: 2.0,
                     rate: None,
                     tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
                 }],
+                invoice_discount_type: DiscountType::None,
+                invoice_discount_value: 0.0,
             })
             .unwrap();
         invoice.invoice_no
@@ -113,7 +118,16 @@ fn a_payload_posted_through_the_console_produces_a_real_invoice() {
         customer_id: buyer.id,
         date: None,
         payment_type: "cash".into(),
-        lines: vec![NewLinePayload { item_id: cement.id, qty: 10.0, rate: None, tax_rate: None }],
+        lines: vec![NewLinePayload {
+            item_id: cement.id,
+            qty: 10.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     };
     let invoice = state.db().create_invoice(&NewInvoice::from(payload)).unwrap();
 
@@ -129,21 +143,51 @@ fn a_payload_posted_through_the_console_produces_a_real_invoice() {
     assert_eq!(queued[0].row_id, invoice.id);
 }
 
-/// The stage-2 worked example, priced through the same command the summary panel calls:
-/// a 42U rack and five enterprise licences to an intra-state Tamil Nadu buyer.
+/// The stage-2 worked example, priced the way the summary panel prices it.
+///
+/// Since price lists the quote resolves its own rates, so it needs a database — there is
+/// no pure function to call any more, and that is the point: the panel and the save run
+/// the same code over the same rows.
+fn worked_lines(state: &AppState) -> Vec<NewLinePayload> {
+    let rack = state.db().search_item("RACK-42U-PRO").unwrap().remove(0);
+    let license = state.db().search_item("ABCOS-ENT-LIC").unwrap().remove(0);
+    vec![
+        NewLinePayload {
+            item_id: rack.id,
+            qty: 1.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        },
+        NewLinePayload {
+            item_id: license.id,
+            qty: 5.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        },
+    ]
+}
+
+fn quoted(
+    state: &AppState,
+    place_of_supply: &str,
+    lines: &[NewLinePayload],
+) -> realinvoice_core::DiscountedTotals {
+    let priced: Vec<NewInvoiceLine> = lines.iter().cloned().map(Into::into).collect();
+    state.db().quote_invoice(None, place_of_supply, &priced, DiscountType::None, 0.0).unwrap()
+}
+
 #[test]
 fn the_summary_panel_quote_matches_the_worked_example() {
-    let quote = quote(
-        "TN",
-        &[
-            QuoteLinePayload { qty: 1.0, rate: 45_000.0, tax_rate: 18.0 },
-            QuoteLinePayload { qty: 5.0, rate: 12_000.0, tax_rate: 18.0 },
-        ],
-    );
+    let (_dir, state) = console_state();
+    let lines = worked_lines(&state);
+    let quote = quoted(&state, "TN", &lines);
 
-    assert!(quote.intra_state);
-    assert_eq!(quote.home_state, "TN");
-    assert_eq!(quote.line_totals, vec![45_000.00, 60_000.00]);
+    assert_eq!(quote.pre_discount_subtotal, 105_000.00);
+    assert_eq!(quote.discount_amount, 0.0);
     assert_eq!(quote.subtotal, 105_000.00);
     assert_eq!(quote.cgst, 9_450.00);
     assert_eq!(quote.sgst, 9_450.00);
@@ -153,15 +197,10 @@ fn the_summary_panel_quote_matches_the_worked_example() {
 
 #[test]
 fn the_same_rows_billed_out_of_state_move_to_igst() {
-    let quote = quote(
-        "KA",
-        &[
-            QuoteLinePayload { qty: 1.0, rate: 45_000.0, tax_rate: 18.0 },
-            QuoteLinePayload { qty: 5.0, rate: 12_000.0, tax_rate: 18.0 },
-        ],
-    );
+    let (_dir, state) = console_state();
+    let lines = worked_lines(&state);
+    let quote = quoted(&state, "KA", &lines);
 
-    assert!(!quote.intra_state);
     assert_eq!(quote.cgst, 0.0);
     assert_eq!(quote.sgst, 0.0);
     assert_eq!(quote.igst, 18_900.00);
@@ -170,18 +209,13 @@ fn the_same_rows_billed_out_of_state_move_to_igst() {
 
 #[test]
 fn removing_a_row_reprices_the_rest() {
-    // Both rows, then the licence row alone — what the panel shows after a delete.
-    let both = quote(
-        "TN",
-        &[
-            QuoteLinePayload { qty: 1.0, rate: 45_000.0, tax_rate: 18.0 },
-            QuoteLinePayload { qty: 5.0, rate: 12_000.0, tax_rate: 18.0 },
-        ],
-    );
-    assert_eq!(both.grand_total, 123_900.00);
+    let (_dir, state) = console_state();
+    let lines = worked_lines(&state);
 
-    let one = quote("TN", &[QuoteLinePayload { qty: 5.0, rate: 12_000.0, tax_rate: 18.0 }]);
-    assert_eq!(one.line_totals, vec![60_000.00]);
+    assert_eq!(quoted(&state, "TN", &lines).grand_total, 123_900.00);
+
+    // The licence row alone — what the panel shows after a delete.
+    let one = quoted(&state, "TN", &lines[1..]);
     assert_eq!(one.subtotal, 60_000.00);
     assert_eq!(one.cgst, 5_400.00);
     assert_eq!(one.sgst, 5_400.00);
@@ -190,14 +224,41 @@ fn removing_a_row_reprices_the_rest() {
 
 #[test]
 fn an_empty_or_half_typed_table_quotes_to_zero() {
-    let empty = quote("TN", &[]);
-    assert_eq!(empty.line_totals, Vec::<f64>::new());
-    assert_eq!(empty.grand_total, 0.0);
+    let (_dir, state) = console_state();
 
-    // A cleared qty box prices as zero rather than erroring the panel out.
-    let blank_qty = quote("TN", &[QuoteLinePayload { qty: 0.0, rate: 45_000.0, tax_rate: 18.0 }]);
-    assert_eq!(blank_qty.line_totals, vec![0.0]);
-    assert_eq!(blank_qty.grand_total, 0.0);
+    let empty = quoted(&state, "TN", &[]);
+    assert_eq!(empty.grand_total, 0.0);
+    assert_eq!(empty.pre_discount_subtotal, 0.0);
+
+    // A cleared qty box prices as zero rather than erroring the panel out — the
+    // "must be positive" rule lives on the save, not on the quote.
+    let mut blank = worked_lines(&state);
+    blank.truncate(1);
+    blank[0].qty = 0.0;
+    let half_typed = quoted(&state, "TN", &blank);
+    assert_eq!(half_typed.lines[0].taxable_value, 0.0);
+    assert_eq!(half_typed.grand_total, 0.0);
+}
+
+/// The panel's discount breakdown, from the same call, with the hand-calculated figures.
+#[test]
+fn the_panel_quotes_the_full_discount_breakdown() {
+    let (_dir, state) = console_state();
+    let mut lines = worked_lines(&state);
+    lines[1].discount_type = DiscountType::Percentage;
+    lines[1].discount_value = 10.0;
+
+    let priced: Vec<NewInvoiceLine> = lines.iter().cloned().map(Into::into).collect();
+    let quote = state.db().quote_invoice(None, "TN", &priced, DiscountType::Flat, 1_000.0).unwrap();
+
+    assert_eq!(quote.pre_discount_subtotal, 105_000.00);
+    assert_eq!(quote.line_discount_total, 6_000.00);
+    assert_eq!(quote.invoice_discount_amount, 1_000.00);
+    assert_eq!(quote.discount_amount, 7_000.00);
+    assert_eq!(quote.subtotal, 98_000.00);
+    assert_eq!(quote.cgst, 8_820.00);
+    assert_eq!(quote.sgst, 8_820.00);
+    assert_eq!(quote.grand_total, 115_640.00);
 }
 
 #[test]
@@ -280,18 +341,11 @@ fn the_logged_print_and_lock_payload_is_ready_for_create_invoice() {
 
     // And it prices to the figures the panel displayed when it was logged.
     let (_dir, state) = console_state();
-    let priced: Vec<QuoteLinePayload> = new_invoice
-        .lines
-        .iter()
-        .map(|l| QuoteLinePayload {
-            qty: l.qty,
-            rate: l.rate.unwrap(),
-            tax_rate: l.tax_rate.unwrap(),
-        })
-        .collect();
-    let quote = quote("TN", &priced);
+    let quote =
+        state.db().quote_invoice(None, "TN", &new_invoice.lines, DiscountType::None, 0.0).unwrap();
     assert_eq!(quote.subtotal, 105_000.00);
     assert_eq!(quote.grand_total, 123_900.00);
+    assert_eq!(quote.discount_amount, 0.0, "an old payload carries no discount");
 
     // Saved against the seeded catalogue, core reaches the same numbers independently —
     // the ids in the payload are the seeded rack and licence.
@@ -316,14 +370,20 @@ fn worked_example(state: &AppState) -> NewInvoice {
                 qty: 1.0,
                 rate: Some(45_000.0),
                 tax_rate: Some(18.0),
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
             },
             NewLinePayload {
                 item_id: license.id,
                 qty: 5.0,
                 rate: Some(12_000.0),
                 tax_rate: Some(18.0),
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
             },
         ],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     })
 }
 
@@ -385,7 +445,11 @@ fn a_second_invoice_takes_the_next_number() {
                 qty: 20.0,
                 rate: None,
                 tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
             }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap();
 
@@ -417,7 +481,16 @@ fn a_rejected_save_writes_nothing() {
         date: None,
         payment_type: "cash".into(),
         created_by_user_id: None,
-        lines: vec![NewInvoiceLine { item_id: 9_999, qty: 1.0, rate: None, tax_rate: None }],
+        lines: vec![NewInvoiceLine {
+            item_id: 9_999,
+            qty: 1.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     });
     assert!(rejected.is_err());
 
@@ -440,10 +513,12 @@ fn totals_matching_the_screen_are_accepted() {
         sgst: 9_450.00,
         igst: 0.0,
         grand_total: 123_900.00,
+        pre_discount_subtotal: None,
+        discount_amount: None,
     };
     let example = worked_example(&state);
-    let priced = state.db().price_invoice_lines(&example).unwrap();
-    assert!(check_expected_totals(&expected, &priced, "TN", "TN").is_ok());
+    let priced = state.db().price_invoice(&example).unwrap();
+    assert!(check_expected_totals(&expected, &priced).is_ok());
 }
 
 #[test]
@@ -458,21 +533,76 @@ fn totals_that_disagree_with_the_screen_are_refused() {
         sgst: 9_450.00,
         igst: 0.0,
         grand_total: 123_899.00,
+        pre_discount_subtotal: None,
+        discount_amount: None,
     };
-    let priced = state.db().price_invoice_lines(&invoice).unwrap();
-    let refused = check_expected_totals(&stale, &priced, "TN", "TN").unwrap_err();
+    let priced = state.db().price_invoice(&invoice).unwrap();
+    let refused = check_expected_totals(&stale, &priced).unwrap_err();
     assert!(refused.contains("grand total"), "{refused}");
 
-    // Billing the same rows out of state moves the tax to IGST, so an intra-state
-    // expectation no longer matches.
+    // Billing the same rows to an out-of-state buyer moves the tax to IGST, so a panel
+    // still showing CGST and SGST no longer matches. The state comes from the stored
+    // customer now, not from the caller, which is why this has to be set up on a real
+    // buyer rather than passed in as a string.
+    let out_of_state = state
+        .db()
+        .create_customer(&NewCustomer {
+            name: "Deccan Interiors".into(),
+            mobile: "9000012345".into(),
+            gstin: None,
+            place_of_supply: "KA".into(),
+            price_list_id: None,
+        })
+        .unwrap();
+    let mut elsewhere = worked_example(&state);
+    elsewhere.customer_id = out_of_state.id;
+    let priced_elsewhere = state.db().price_invoice(&elsewhere).unwrap();
+
     let intra = ExpectedTotals {
         subtotal: 105_000.00,
         cgst: 9_450.00,
         sgst: 9_450.00,
         igst: 0.0,
         grand_total: 123_900.00,
+        pre_discount_subtotal: None,
+        discount_amount: None,
     };
-    assert!(check_expected_totals(&intra, &priced, "KA", "TN").is_err());
+    let refused = check_expected_totals(&intra, &priced_elsewhere).unwrap_err();
+    assert!(refused.contains("CGST"), "{refused}");
+}
+
+/// A discount on screen that core does not agree with is refused, like any other figure.
+#[test]
+fn a_discount_the_screen_got_wrong_is_refused() {
+    let (_dir, state) = console_state();
+    let mut invoice = worked_example(&state);
+    invoice.invoice_discount_type = DiscountType::Flat;
+    invoice.invoice_discount_value = 1_000.0;
+    invoice.lines[1].discount_type = DiscountType::Percentage;
+    invoice.lines[1].discount_value = 10.0;
+
+    let priced = state.db().price_invoice(&invoice).unwrap();
+
+    // The hand-calculated figures, which pass.
+    let right = ExpectedTotals {
+        subtotal: 98_000.00,
+        cgst: 8_820.00,
+        sgst: 8_820.00,
+        igst: 0.0,
+        grand_total: 115_640.00,
+        pre_discount_subtotal: Some(105_000.00),
+        discount_amount: Some(7_000.00),
+    };
+    assert!(check_expected_totals(&right, &priced).is_ok());
+
+    // A panel that added the two discounts up wrong, even with the right grand total.
+    let wrong_discount = ExpectedTotals { discount_amount: Some(6_000.00), ..right.clone() };
+    let refused = check_expected_totals(&wrong_discount, &priced).unwrap_err();
+    assert!(refused.contains("discount"), "{refused}");
+
+    // And one that quoted the pre-discount subtotal as the discounted one.
+    let wrong_gross = ExpectedTotals { pre_discount_subtotal: Some(98_000.00), ..right };
+    assert!(check_expected_totals(&wrong_gross, &priced).is_err());
 }
 
 /// Rows that defer to the price list are still checked.
@@ -490,13 +620,29 @@ fn rows_priced_by_core_are_still_checked_against_the_screen() {
         date: None,
         payment_type: "cash".into(),
         created_by_user_id: None,
-        lines: vec![NewInvoiceLine { item_id: cement.id, qty: 1.0, rate: None, tax_rate: None }],
+        lines: vec![NewInvoiceLine {
+            item_id: cement.id,
+            qty: 1.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     };
-    let priced = state.db().price_invoice_lines(&deferred).unwrap();
+    let priced = state.db().price_invoice(&deferred).unwrap();
 
-    let nonsense =
-        ExpectedTotals { subtotal: 1.0, cgst: 1.0, sgst: 1.0, igst: 1.0, grand_total: 1.0 };
-    assert!(check_expected_totals(&nonsense, &priced, "TN", "TN").is_err());
+    let nonsense = ExpectedTotals {
+        subtotal: 1.0,
+        cgst: 1.0,
+        sgst: 1.0,
+        igst: 1.0,
+        grand_total: 1.0,
+        pre_discount_subtotal: None,
+        discount_amount: None,
+    };
+    assert!(check_expected_totals(&nonsense, &priced).is_err());
 
     // Cement is 410.00 at 28%, so the honest expectation passes.
     let right = ExpectedTotals {
@@ -505,8 +651,10 @@ fn rows_priced_by_core_are_still_checked_against_the_screen() {
         sgst: 57.40,
         igst: 0.0,
         grand_total: 524.80,
+        pre_discount_subtotal: None,
+        discount_amount: None,
     };
-    assert!(check_expected_totals(&right, &priced, "TN", "TN").is_ok());
+    assert!(check_expected_totals(&right, &priced).is_ok());
 }
 
 /// Bills four invoices through the console the way stage 3 saves them.
@@ -521,7 +669,16 @@ fn billed_history(state: &AppState) -> Vec<realinvoice_core::Invoice> {
         date: None,
         payment_type: "upi".into(),
         created_by_user_id: None,
-        lines: vec![NewInvoiceLine { item_id: cement.id, qty: 20.0, rate: None, tax_rate: None }],
+        lines: vec![NewInvoiceLine {
+            item_id: cement.id,
+            qty: 20.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     };
     let second = state.db().create_invoice(&second).unwrap();
 
@@ -532,7 +689,16 @@ fn billed_history(state: &AppState) -> Vec<realinvoice_core::Invoice> {
         date: None,
         payment_type: "credit".into(),
         created_by_user_id: None,
-        lines: vec![NewInvoiceLine { item_id: license.id, qty: 2.0, rate: None, tax_rate: None }],
+        lines: vec![NewInvoiceLine {
+            item_id: license.id,
+            qty: 2.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     };
     let third = state.db().create_invoice(&third).unwrap();
 
@@ -543,7 +709,16 @@ fn billed_history(state: &AppState) -> Vec<realinvoice_core::Invoice> {
         date: Some("2026-08-20".into()),
         payment_type: "cash".into(),
         created_by_user_id: None,
-        lines: vec![NewInvoiceLine { item_id: pipe.id, qty: 4.0, rate: None, tax_rate: None }],
+        lines: vec![NewInvoiceLine {
+            item_id: pipe.id,
+            qty: 4.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     };
     let older = state.db().create_invoice(&older).unwrap();
 
@@ -838,8 +1013,14 @@ fn each_payment_type_is_saved_as_selected() {
         new_invoice.created_by_user_id = Some(owner.id);
         new_invoice.customer_id = state.db().search_customer("9600011223").unwrap().unwrap().id;
         let rack = state.db().search_item("RACK-42U-PRO").unwrap().remove(0);
-        new_invoice.lines =
-            vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }];
+        new_invoice.lines = vec![NewInvoiceLine {
+            item_id: rack.id,
+            qty: 1.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }];
 
         let saved = state.db().create_invoice(&new_invoice).unwrap();
         assert_eq!(saved.payment_type, chosen);
@@ -1137,7 +1318,11 @@ fn a_one_off_item_is_billable_but_stays_out_of_the_catalogue() {
                 qty: 2.0,
                 rate: Some(2_500.0),
                 tax_rate: Some(18.0),
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
             }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         }))
         .unwrap();
 
@@ -1271,10 +1456,19 @@ fn a_bill_totalled_on_the_wrong_price_list_is_refused() {
         customer_id: buyer.id,
         date: None,
         payment_type: "cash".into(),
-        lines: vec![NewLinePayload { item_id: cement.id, qty: 10.0, rate: None, tax_rate: None }],
+        lines: vec![NewLinePayload {
+            item_id: cement.id,
+            qty: 10.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     };
     let new_invoice = NewInvoice::from(payload);
-    let priced = state.db().price_invoice_lines(&new_invoice).unwrap();
+    let priced = state.db().price_invoice(&new_invoice).unwrap();
 
     // What a screen still on Retail would have shown: 10 × 410 at 28%.
     let stale = ExpectedTotals {
@@ -1283,8 +1477,10 @@ fn a_bill_totalled_on_the_wrong_price_list_is_refused() {
         sgst: 574.00,
         igst: 0.0,
         grand_total: 5_248.00,
+        pre_discount_subtotal: None,
+        discount_amount: None,
     };
-    let refused = check_expected_totals(&stale, &priced, "TN", "TN").unwrap_err();
+    let refused = check_expected_totals(&stale, &priced).unwrap_err();
     assert!(refused.contains("subtotal"), "{refused}");
 
     // The wholesale figures the screen should have been showing: 10 × 365 at 28%.
@@ -1294,8 +1490,10 @@ fn a_bill_totalled_on_the_wrong_price_list_is_refused() {
         sgst: 511.00,
         igst: 0.0,
         grand_total: 4_672.00,
+        pre_discount_subtotal: None,
+        discount_amount: None,
     };
-    assert!(check_expected_totals(&right, &priced, "TN", "TN").is_ok());
+    assert!(check_expected_totals(&right, &priced).is_ok());
 
     // And the save itself agrees with the check.
     let saved = state.db().create_invoice(&new_invoice).unwrap();
@@ -1383,4 +1581,188 @@ fn clearing_demo_data_leaves_no_orphan_prices_behind() {
         assert!(resolved.from_price_list, "a billed item keeps its price row");
     }
     assert!(state.db().price_lists().unwrap().iter().any(|l| l.is_default), "the list survives");
+}
+
+// ================================================= discount approval limit
+
+#[test]
+fn the_approval_threshold_defaults_to_fifteen_percent_and_is_a_setting() {
+    let (_dir, state) = console_state();
+
+    assert_eq!(
+        state.db().discount_approval_threshold().unwrap(),
+        realinvoice_core::DEFAULT_DISCOUNT_APPROVAL_PCT
+    );
+
+    state.db().set_discount_approval_threshold(25.0).unwrap();
+    assert_eq!(state.db().discount_approval_threshold().unwrap(), 25.0);
+
+    // Out of range is refused rather than stored and later misread.
+    assert!(state.db().set_discount_approval_threshold(-1.0).is_err());
+    assert!(state.db().set_discount_approval_threshold(101.0).is_err());
+    assert_eq!(state.db().discount_approval_threshold().unwrap(), 25.0);
+
+    // And a value some other tool scribbled into the settings table falls back rather
+    // than being trusted: a corrupt threshold must not read as "no limit".
+    state.db().set_setting("discount_approval_threshold_pct", "not a number").unwrap();
+    assert_eq!(
+        state.db().discount_approval_threshold().unwrap(),
+        realinvoice_core::DEFAULT_DISCOUNT_APPROVAL_PCT
+    );
+}
+
+/// The gate measures the **total** discount against the pre-discount subtotal, so a
+/// cashier cannot get past it by moving the discount onto the lines.
+#[test]
+fn the_gate_measures_every_discount_on_the_bill_not_just_the_invoice_one() {
+    let (_dir, state) = console_state();
+    let rack = state.db().search_item("RACK-42U-PRO").unwrap().remove(0);
+    let customer_id = state.db().search_customer("9600011223").unwrap().unwrap().id;
+
+    let bill = |line_pct: f64, invoice_pct: f64| {
+        let invoice = NewInvoice::from(NewInvoicePayload {
+            customer_id,
+            date: None,
+            payment_type: "cash".into(),
+            invoice_discount_type: DiscountType::Percentage,
+            invoice_discount_value: invoice_pct,
+            lines: vec![NewLinePayload {
+                item_id: rack.id,
+                qty: 1.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::Percentage,
+                discount_value: line_pct,
+            }],
+        });
+        discount_percent(&state.db().price_invoice(&invoice).unwrap())
+    };
+
+    // Nothing on the invoice line, everything on the item line.
+    let via_lines = bill(40.0, 0.0);
+    assert!((via_lines - 40.0).abs() < 0.001, "{via_lines}");
+
+    // The same 40% expressed as an invoice discount reads the same.
+    let via_invoice = bill(0.0, 40.0);
+    assert!((via_invoice - 40.0).abs() < 0.001, "{via_invoice}");
+
+    // And both together compound rather than adding: 10% then 10% is 19%, not 20%.
+    let both = bill(10.0, 10.0);
+    assert!((both - 19.0).abs() < 0.001, "{both}");
+
+    // Under the default 15% ceiling, a cashier is not interrupted.
+    let small = bill(5.0, 0.0);
+    assert!(small <= realinvoice_core::DEFAULT_DISCOUNT_APPROVAL_PCT);
+}
+
+/// An owner needs no approval; a cashier past the ceiling does; under it, neither does.
+#[test]
+fn only_a_cashier_past_the_ceiling_is_asked_for_an_owner() {
+    let (_dir, state) = console_state();
+    let owner = set_up_owner(&state);
+    let cashier = state
+        .db()
+        .create_user(
+            &NewUser {
+                username: "meena".into(),
+                display_name: "Meena R".into(),
+                role: Role::Cashier,
+            },
+            "counter-password",
+        )
+        .unwrap();
+
+    let rack = state.db().search_item("RACK-42U-PRO").unwrap().remove(0);
+    let customer_id = state.db().search_customer("9600011223").unwrap().unwrap().id;
+    let bill = |pct: f64| {
+        NewInvoice::from(NewInvoicePayload {
+            customer_id,
+            date: None,
+            payment_type: "cash".into(),
+            invoice_discount_type: DiscountType::Percentage,
+            invoice_discount_value: pct,
+            lines: vec![NewLinePayload {
+                item_id: rack.id,
+                qty: 1.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+        })
+    };
+
+    let as_owner = Session { token: "t".into(), user: owner };
+    let as_cashier = Session { token: "t".into(), user: cashier };
+
+    let big = state.db().price_invoice(&bill(40.0)).unwrap();
+    let small = state.db().price_invoice(&bill(10.0)).unwrap();
+
+    // A cashier, over the line, with nobody standing behind them.
+    let refused =
+        check_discount_approval_for_test(&mut state.db(), &as_cashier, &big, None).unwrap_err();
+    assert!(refused.contains("owner"), "{refused}");
+    assert!(refused.contains("40"), "the message names the discount: {refused}");
+
+    // The same cashier, under the line.
+    assert!(
+        check_discount_approval_for_test(&mut state.db(), &as_cashier, &small, None).is_ok(),
+        "a small discount does not interrupt the counter"
+    );
+
+    // An owner is never asked to approve their own discount.
+    assert!(check_discount_approval_for_test(&mut state.db(), &as_owner, &big, None).is_ok());
+
+    // The owner's real password lets the cashier through.
+    let approved = check_discount_approval_for_test(
+        &mut state.db(),
+        &as_cashier,
+        &big,
+        Some(&OwnerApproval { username: "priya".into(), password: "counter-top-2026".into() }),
+    );
+    assert!(approved.is_ok(), "{approved:?}");
+
+    // A wrong password does not, and neither does another cashier's right one.
+    assert!(check_discount_approval_for_test(
+        &mut state.db(),
+        &as_cashier,
+        &big,
+        Some(&OwnerApproval { username: "priya".into(), password: "guess".into() }),
+    )
+    .is_err());
+    assert!(
+        check_discount_approval_for_test(
+            &mut state.db(),
+            &as_cashier,
+            &big,
+            Some(&OwnerApproval { username: "meena".into(), password: "counter-password".into() }),
+        )
+        .is_err(),
+        "a cashier cannot approve themselves"
+    );
+}
+
+/// Raising the ceiling is an owner's call. A cashier who could raise it has none.
+#[test]
+fn only_an_owner_can_move_the_discount_ceiling() {
+    let (_dir, state) = console_state();
+    let owner = set_up_owner(&state);
+    let cashier = state
+        .db()
+        .create_user(
+            &NewUser {
+                username: "meena".into(),
+                display_name: "Meena R".into(),
+                role: Role::Cashier,
+            },
+            "counter-password",
+        )
+        .unwrap();
+
+    assert!(require_owner(Some(Session { token: "t".into(), user: owner })).is_ok());
+    assert!(
+        require_session(Some(Session { token: "t".into(), user: cashier.clone() })).is_ok(),
+        "a cashier can still read the threshold, to know where the line is"
+    );
+    assert!(require_owner(Some(Session { token: "t".into(), user: cashier })).is_err());
 }

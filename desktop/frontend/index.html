@@ -351,6 +351,36 @@
             </button>
           </div>
 
+          <!-- Opened by a row's discount button. One editor reused by every row rather
+               than an input per line: a bill of thirty items would otherwise carry thirty
+               discount boxes nobody is looking at. -->
+          <form class="flex flex-col gap-3 rounded-field border border-base-300 bg-base-200/60 p-3"
+                id="line-discount" hidden>
+            <div class="flex flex-wrap items-baseline justify-between gap-2">
+              <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45">
+                Discount on <span id="ld-item" class="font-mono normal-case"></span>
+              </p>
+              <p class="text-2xs text-base-content/45">Comes off before GST is charged</p>
+            </div>
+            <div class="flex flex-wrap items-end gap-3">
+              <label class="flex min-w-36 flex-col gap-1 text-xs text-base-content/60">Type
+                <select id="ld-type" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8 mt-auto">
+                  <option value="none">No discount</option>
+                  <option value="percentage">Percentage</option>
+                  <option value="flat">Flat (₹)</option>
+                </select>
+              </label>
+              <label class="flex min-w-32 flex-col gap-1 text-xs text-base-content/60">Value
+                <input id="ld-value" type="number" min="0" step="any"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto text-right font-mono tabular-nums" />
+              </label>
+              <button type="submit" id="ld-apply" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Apply</button>
+              <button type="button" id="ld-clear" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Remove</button>
+              <button type="button" id="ld-cancel" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+              <span class="text-xs text-base-content/60" id="ld-msg" aria-live="polite"></span>
+            </div>
+          </form>
+
           <!-- Item picker: opened by Add Item, closed on pick or Escape. -->
           <div class="flex flex-col gap-2 rounded-field border border-base-300 bg-base-200/60 p-3"
                id="item-picker" hidden>
@@ -427,8 +457,32 @@
             <span class="font-mono text-xs text-base-content/45" id="gst-mode"></span>
           </div>
 
-          <!-- Filled by renderTotals(), the same function the history detail uses. -->
-          <dl class="rounded-box border border-base-300 bg-base-100 shadow-sm w-full max-w-sm p-4" id="billing-totals"></dl>
+          <div class="flex w-full max-w-sm flex-col gap-3">
+            <!-- The whole-bill discount, next to the figures it changes. Applied to what
+                 the lines already came down to, never to the original subtotal. -->
+            <div class="rounded-box border border-base-300 bg-base-100 shadow-sm p-4"
+                 id="invoice-discount">
+              <div class="flex flex-wrap items-baseline justify-between gap-2">
+                <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45">Invoice discount</p>
+                <p class="text-2xs text-base-content/45" id="id-limit"></p>
+              </div>
+              <div class="mt-2 flex flex-wrap items-end gap-2">
+                <label class="sr-only" for="id-type">Invoice discount type</label>
+                <select id="id-type" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8 w-36 shrink-0">
+                  <option value="none">No discount</option>
+                  <option value="percentage">Percentage</option>
+                  <option value="flat">Flat (₹)</option>
+                </select>
+                <label class="sr-only" for="id-value">Invoice discount value</label>
+                <input id="id-value" type="number" min="0" step="any" disabled
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 min-w-24 flex-1 text-right font-mono tabular-nums" />
+              </div>
+              <p class="mt-2 text-xs text-base-content/60" id="id-msg" aria-live="polite"></p>
+            </div>
+
+            <!-- Filled by renderTotals(), the same function the history detail uses. -->
+            <dl class="rounded-box border border-base-300 bg-base-100 shadow-sm w-full p-4" id="billing-totals"></dl>
+          </div>
         </div>
 
         <div class="flex flex-wrap items-center justify-end gap-3" id="txn-actions">
@@ -829,6 +883,27 @@
           </header>
           <dl class="grid grid-cols-[minmax(140px,220px)_1fr]" id="about-app-rows"></dl>
 
+          <!-- Owner-only. Different shops draw this line in different places, so it is a
+               setting rather than a number in the source. -->
+          <section class="mt-6 flex flex-col gap-3" id="discount-limit-section" hidden>
+            <header>
+              <h2 class="text-lg font-semibold tracking-tight">Discount Limit</h2>
+              <p class="mt-1 max-w-prose text-sm text-base-content/60">How much of a bill a
+                cashier may discount on their own, counting line and invoice discounts
+                together. Anything above this needs an owner's username and password
+                before the invoice will save. Owners are never asked.</p>
+            </header>
+            <div class="flex flex-wrap items-end gap-2">
+              <label class="flex w-40 flex-col gap-1 text-xs text-base-content/60">
+                Threshold (%)
+                <input id="dl-value" type="number" min="0" max="100" step="0.5"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 text-right font-mono tabular-nums" />
+              </label>
+              <button id="dl-save" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Save limit</button>
+              <span class="text-xs text-base-content/60" id="dl-msg" aria-live="polite"></span>
+            </div>
+          </section>
+
           <!-- Owner-only. What a customer pays is a commercial decision, so the lists
                themselves are managed here rather than at the counter. -->
           <section class="mt-6 flex flex-col gap-3" id="price-lists-section" hidden>
@@ -942,6 +1017,34 @@
         </div>
       </section>
     </main>
+
+    <!-- Asked for when a cashier discounts past the shop's limit. Credentials rather
+         than a flag: the check that matters runs in Rust on the way to the save, and this
+         is only how the password gets there. -->
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-base-300/70 p-4"
+         id="approval-overlay" hidden role="dialog" aria-modal="true"
+         aria-labelledby="approval-title">
+      <form class="flex w-full max-w-sm flex-col gap-4 rounded-box border border-base-300 bg-base-100 p-5 shadow-sm"
+            id="approval-form" autocomplete="off">
+        <div>
+          <h2 class="text-lg font-semibold tracking-tight" id="approval-title">Owner approval</h2>
+          <p class="mt-1 text-sm text-base-content/60" id="approval-why"></p>
+        </div>
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Owner username
+          <input id="ap-user" type="text" autocapitalize="off" spellcheck="false" required
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
+        </label>
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Owner password
+          <input id="ap-pass" type="password" autocomplete="off" required
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
+        </label>
+        <div class="flex flex-wrap items-center gap-3">
+          <button type="submit" id="ap-ok" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Approve &amp; save</button>
+          <button type="button" id="ap-cancel" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+        </div>
+        <p class="min-h-[18px] text-xs text-base-content/60" id="ap-msg" aria-live="polite"></p>
+      </form>
+    </div>
 
     <!-- Where UI.toast() puts its notes. Fixed, so it is not in any pane's scroll, and
          pointer-events-none so it never swallows a click meant for the bill underneath. -->

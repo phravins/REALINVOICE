@@ -62,6 +62,8 @@ pub fn run() {
             commands::item_prices,
             commands::set_item_prices,
             commands::resolve_rates,
+            commands::discount_approval_threshold,
+            commands::set_discount_approval_threshold,
             commands::analytics,
             commands::sync_status,
             commands::sync_now,

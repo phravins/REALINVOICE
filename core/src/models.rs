@@ -113,6 +113,52 @@ pub struct NewItem {
     pub custom: bool,
 }
 
+/// How a discount is expressed.
+///
+/// There is no "after tax" variant, and that is a deliberate omission rather than a gap.
+/// A discount known and disclosed when the sale happens is a trade discount: it reduces
+/// the taxable value, and GST is charged on what was actually charged. A discount handed
+/// over after the invoice is a legally distinct thing that generally cannot reduce GST
+/// liability retrospectively. Offering both as a toggle would let a shop pick the wrong
+/// one by accident, so this type only expresses the correct one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiscountType {
+    #[default]
+    None,
+    /// `value` is a percentage of the amount being discounted, e.g. 10.0 for 10%.
+    Percentage,
+    /// `value` is rupees off, e.g. 500.0.
+    Flat,
+}
+
+impl DiscountType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiscountType::None => "none",
+            DiscountType::Percentage => "percentage",
+            DiscountType::Flat => "flat",
+        }
+    }
+
+    /// Anything unrecognised reads as no discount. A row whose type could not be parsed
+    /// must not silently become a percentage.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(DiscountType::None),
+            "percentage" => Some(DiscountType::Percentage),
+            "flat" => Some(DiscountType::Flat),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for DiscountType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A named set of prices — "Retail", "Wholesale", "VIP".
 ///
 /// Exactly one list is the default at any time, enforced by a partial unique index rather
@@ -176,6 +222,22 @@ pub struct Invoice {
     /// ISO-8601 date, `YYYY-MM-DD`.
     pub date: String,
     pub customer_id: i64,
+    /// What the bill would have come to before any discount: the sum of every line's
+    /// `qty * rate`. Stored rather than derived, so a later rate change cannot move it.
+    #[serde(default)]
+    pub pre_discount_subtotal: f64,
+    /// Line discounts plus the invoice discount, in rupees.
+    #[serde(default)]
+    pub discount_amount: f64,
+    #[serde(default)]
+    pub invoice_discount_type: DiscountType,
+    #[serde(default)]
+    pub invoice_discount_value: f64,
+    /// The invoice-level discount alone, in rupees.
+    #[serde(default)]
+    pub invoice_discount_amount: f64,
+    /// **The taxable value** — what is left after every discount, and what CGST/SGST/IGST
+    /// were charged on. Equal to `pre_discount_subtotal` when nothing was discounted.
     pub subtotal: f64,
     pub cgst: f64,
     pub sgst: f64,
@@ -252,7 +314,32 @@ pub struct InvoiceLine {
     pub qty: f64,
     pub rate: f64,
     pub tax_rate: f64,
+    /// `qty * rate`, before any discount. Unchanged in meaning from before discounts
+    /// existed, which is why every historical line is still correct.
     pub line_total: f64,
+    #[serde(default)]
+    pub discount_type: DiscountType,
+    #[serde(default)]
+    pub discount_value: f64,
+    /// This line's own discount, in rupees.
+    #[serde(default)]
+    pub discount_amount: f64,
+    /// This line's apportioned share of the invoice-level discount, in rupees. Part of
+    /// the tax base, so it is stored per line rather than left to be re-derived.
+    #[serde(default)]
+    pub invoice_discount_share: f64,
+    /// `line_total - discount_amount - invoice_discount_share`: what tax was charged on.
+    #[serde(default)]
+    pub taxable_value: f64,
+}
+
+impl InvoiceLine {
+    /// What this line actually cost, tax included. Derived from the stored taxable value
+    /// and nothing else, so it says the same thing in ten years' time.
+    pub fn charged(&self, intra_state: bool) -> f64 {
+        let tax = crate::gst::split_line_tax(self.taxable_value, self.tax_rate, intra_state);
+        crate::gst::round_money(self.taxable_value + tax.total())
+    }
 }
 
 /// A line as supplied by a caller, before it has an id. `rate` and `tax_rate` are
@@ -265,6 +352,11 @@ pub struct NewInvoiceLine {
     pub rate: Option<f64>,
     #[serde(default)]
     pub tax_rate: Option<f64>,
+    /// A trade discount on this line, off `qty * rate` before tax.
+    #[serde(default)]
+    pub discount_type: DiscountType,
+    #[serde(default)]
+    pub discount_value: f64,
 }
 
 /// What a caller hands to [`crate::Db::create_invoice`].
@@ -275,6 +367,12 @@ pub struct NewInvoice {
     #[serde(default)]
     pub date: Option<String>,
     pub payment_type: String,
+    /// A trade discount on the whole bill, applied to the subtotal that is left *after*
+    /// every line discount — so 10% off is 10% of what the lines already came down to.
+    #[serde(default)]
+    pub invoice_discount_type: DiscountType,
+    #[serde(default)]
+    pub invoice_discount_value: f64,
     /// Who billed it, from the active session. `None` only where no one is signed in,
     /// which the desktop app never allows.
     #[serde(default)]
@@ -516,7 +614,14 @@ pub struct CreditableLine {
     pub item_id: i64,
     pub item_code: String,
     pub description: String,
+    /// The rate the line was billed at, before any discount. What the customer's copy
+    /// shows in the Rate column.
     pub rate: f64,
+    /// What each unit actually cost once every discount had come off:
+    /// `taxable_value / billed_qty`. **This is what a credit is priced at** — refunding
+    /// the sticker price on a discounted line would hand back money that was never taken.
+    #[serde(default)]
+    pub effective_rate: f64,
     pub tax_rate: f64,
     pub uom: String,
     /// Quantity on the original invoice line.

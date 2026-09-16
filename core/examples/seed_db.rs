@@ -7,7 +7,7 @@
 //! cargo run -p realinvoice-core --example seed_db -- ~/.config/in.osworks.realinvoice.desktop/db.sqlite --invoice
 //! ```
 
-use realinvoice_core::{seed, Db, NewInvoice, NewInvoiceLine};
+use realinvoice_core::{seed, Db, DiscountType, NewInvoice, NewInvoiceLine};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -29,9 +29,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             payment_type: "cash".into(),
             created_by_user_id: None,
             lines: vec![
-                NewInvoiceLine { item_id: cement.id, qty: 10.0, rate: None, tax_rate: None },
-                NewInvoiceLine { item_id: steel.id, qty: 5.0, rate: None, tax_rate: None },
+                NewInvoiceLine {
+                    item_id: cement.id,
+                    qty: 10.0,
+                    rate: None,
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
+                NewInvoiceLine {
+                    item_id: steel.id,
+                    qty: 5.0,
+                    rate: None,
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
             ],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })?;
 
         println!(

@@ -66,6 +66,16 @@
   var priceLists = [];
   var activeList = null;
 
+  /**
+   * The whole-bill discount, and the ceiling a cashier may reach without an owner.
+   *
+   * Both are only ever *displayed* from here. The discount is sent to core with the save
+   * and re-applied there, and the ceiling is enforced in Rust — a gate the frontend can
+   * open is not a gate.
+   */
+  var invoiceDiscount = { type: "none", value: 0 };
+  var discountLimitPct = 15;
+
   function listName(id) {
     var match = priceLists.filter(function (l) { return l.id === id; })[0];
     return match ? match.name : "";
@@ -96,30 +106,56 @@
    * live quote from core, the history detail feeds it a saved invoice. Intra-state shows
    * CGST + SGST, inter-state shows IGST — never both.
    */
+  /**
+   * The totals block, on the billing card and on a saved invoice alike.
+   *
+   * When anything was discounted the panel shows the whole working — what it would have
+   * cost, what came off, and what tax was then charged on. Collapsing the discount into
+   * the subtotal would leave a cashier unable to answer "why is this not the shelf
+   * price", and would leave an auditor unable to answer it at all.
+   */
   function renderTotals(el, t) {
-    function row(label, value, grand) {
+    function row(label, value, style) {
+      var grand = style === "grand";
+      var discount = style === "discount";
+      var taxable = style === "taxable";
       return (
         '<div class="flex items-baseline justify-between gap-4 ' +
         (grand
           ? 'mt-2 border-t border-base-300 pt-3"><dt class="text-base font-semibold">'
-          : 'py-1"><dt class="text-sm text-base-content/60">') +
+          : taxable
+            ? 'border-t border-base-300 pt-2 mt-1 py-1"><dt class="text-sm font-medium">'
+            : 'py-1"><dt class="text-sm ' +
+              (discount ? "text-error" : "text-base-content/60") + '">') +
         label +
         "</dt><dd class=" +
         (grand
           ? '"font-mono text-2xl font-semibold tabular-nums">'
-          : '"font-mono text-sm tabular-nums">') +
+          : discount
+            ? '"font-mono text-sm tabular-nums text-error">'
+            : '"font-mono text-sm tabular-nums">') +
+        (discount ? "−" : "") +
         rupees(value) +
         "</dd></div>"
       );
     }
 
-    var html = row("Subtotal", t.subtotal);
+    var discounted = t.discount_amount > 0;
+
+    // With a discount the first line is what it would have cost; without one there is
+    // nothing to distinguish, so it stays the plain "Subtotal" it has always been.
+    var html = row(discounted ? "Subtotal (before discount)" : "Subtotal",
+                   discounted ? t.pre_discount_subtotal : t.subtotal);
+    if (discounted) {
+      html += row("Discount", t.discount_amount, "discount");
+      html += row("Taxable Value", t.subtotal, "taxable");
+    }
     if (t.intra_state) {
       html += row("CGST", t.cgst) + row("SGST", t.sgst);
     } else {
       html += row("IGST", t.igst);
     }
-    el.innerHTML = html + row("Grand Total", t.grand_total, true);
+    el.innerHTML = html + row("Grand Total", t.grand_total, "grand");
   }
 
   /** A saved invoice's totals, in the shape renderTotals expects. */
@@ -127,6 +163,10 @@
     return {
       // A stored invoice carries the split itself: IGST is only ever set inter-state.
       intra_state: !(invoice.igst > 0),
+      // Read from the row as stored, never recomputed — which is what makes reopening a
+      // discounted invoice show the breakdown it was billed with.
+      pre_discount_subtotal: invoice.pre_discount_subtotal,
+      discount_amount: invoice.discount_amount,
       subtotal: invoice.subtotal,
       cgst: invoice.cgst,
       sgst: invoice.sgst,
@@ -160,6 +200,34 @@
             '"><span class="hero-x-mark size-4" aria-hidden="true"></span></button></td>'
           : "";
 
+        // The discount control lives under the Rate, collapsed to a single icon until
+        // the row actually has one. Most rows never do, and a discount box on every line
+        // is a discount box nobody reads.
+        var discounted = line.discount_type && line.discount_type !== "none" &&
+                         line.discount_value > 0;
+        var discountCell = "";
+        if (editable) {
+          discountCell =
+            '<button type="button" data-discount="' + index + '" ' +
+            'title="Discount this line" aria-label="Discount ' +
+            escapeHtml(line.item_code) + '" class="mt-0.5 flex items-center gap-1 ' +
+            'text-2xs ' + (discounted ? "text-error" : "text-base-content/45") +
+            ' transition-colors hover:text-base-content">' +
+            '<span class="hero-receipt-percent size-3.5" aria-hidden="true"></span>' +
+            (discounted ? escapeHtml(discountLabel(line)) : "Discount") +
+            "</button>";
+        } else if (discounted) {
+          // A flat discount's label is the same number as its amount, so it is only
+          // spelled out for a percentage, where the two genuinely differ.
+          discountCell =
+            '<span class="mt-0.5 block text-2xs text-error">−' +
+            money(line.discount_amount) +
+            (line.discount_type === "percentage"
+              ? " (" + escapeHtml(discountLabel(line)) + ")"
+              : "") +
+            "</span>";
+        }
+
         var num = ' class="py-2 text-right font-mono tabular-nums"';
 
         // A one-off's item code is a generated key, not something anyone reads out. The
@@ -175,7 +243,9 @@
           '<td class="py-2">' + code + "</td>" +
           '<td class="py-2">' + escapeHtml(line.description) + "</td>" +
           '<td class="py-2 text-right">' + qty + "</td>" +
-          "<td" + num + ">" + money(line.rate) + "</td>" +
+          '<td class="py-2 text-right font-mono tabular-nums">' + money(line.rate) +
+          (discountCell ? '<span class="block font-sans">' + discountCell + "</span>" : "") +
+          "</td>" +
           "<td" + num + ">" + money(line.tax_rate) + "</td>" +
           '<td class="py-2 text-right font-mono tabular-nums" data-total="' + index +
           '">' + money(line.total) + "</td>" +
@@ -184,6 +254,18 @@
         );
       })
       .join("");
+  }
+
+  /** Paise, the way core rounds. Only ever used to subtract two figures core produced. */
+  function gstRound(value) {
+    return Math.round(value * 100) / 100;
+  }
+
+  /** "10%" or "₹500" — how a line's discount was expressed, not what it came to. */
+  function discountLabel(line) {
+    if (line.discount_type === "percentage") return money(line.discount_value) + "%";
+    if (line.discount_type === "flat") return "₹" + money(line.discount_value);
+    return "";
   }
 
   /** `YYYY-MM-DD HH:MM:SS` -> `YYYY-MM-DD HH:MM`, falling back to the invoice date. */
@@ -603,6 +685,11 @@
 
   // Delegated so the handlers survive every re-render.
   $("items-body").addEventListener("click", function (event) {
+    var discount = event.target.closest("[data-discount]");
+    if (discount) {
+      openLineDiscount(Number(discount.dataset.discount));
+      return;
+    }
     var button = event.target.closest("[data-remove]");
     if (button) removeRow(Number(button.dataset.remove));
   });
@@ -811,6 +898,7 @@
 
   function renderQuote(quote) {
     lastQuote = quote;
+    setMsg("id-msg", "", false);
 
     // Row totals are core's line values, not a number this file worked out.
     quote.line_totals.forEach(function (total, index) {
@@ -818,6 +906,21 @@
       var cell = document.querySelector('#items-body [data-total="' + index + '"]');
       if (cell) cell.textContent = money(total);
     });
+    (quote.line_discounts || []).forEach(function (amount, index) {
+      if (rows[index]) rows[index].discount_amount = amount;
+    });
+
+    // What the shop's limit makes of this bill, before the save says so.
+    var pct = quote.pre_discount_subtotal > 0
+      ? (quote.discount_amount / quote.pre_discount_subtotal) * 100
+      : 0;
+    $("id-limit").textContent =
+      quote.discount_amount > 0
+        ? money(pct) + "% of the bill" + (needsApproval(pct) ? " · needs owner approval" : "")
+        : "Cashiers may discount up to " + money(discountLimitPct) + "%";
+    $("id-limit").className = needsApproval(pct)
+      ? "text-2xs text-error"
+      : "text-2xs text-base-content/45";
 
     renderTotals($("billing-totals"), quote);
 
@@ -867,22 +970,202 @@
     if (!user) return;
 
     // With no customer resolved yet, quote against the home state so the operator still
-    // sees live figures; the split is re-quoted the moment one is attached.
+    // sees live figures; the split is re-quoted the moment one is attached. With one
+    // attached, core uses *their* state and ignores this.
     var placeOfSupply = customer ? customer.place_of_supply : "TN";
+
+    // Item and quantity and discount — no rates and no money. Core resolves the price
+    // from the customer's list and does every sum, here exactly as it does on the save,
+    // so the panel cannot show a figure the save would disagree with.
     var lines = rows.map(function (row) {
-      return { qty: row.qty, rate: row.rate, tax_rate: row.tax_rate };
+      return {
+        item_id: row.item_id,
+        qty: row.qty,
+        rate: null,
+        tax_rate: null,
+        discount_type: row.discount_type || "none",
+        discount_value: row.discount_value || 0,
+      };
     });
 
     var seq = ++quoteSeq;
-    invoke("quote_invoice", { placeOfSupply: placeOfSupply, lines: lines })
+    invoke("quote_invoice", {
+      customerId: customer ? customer.id : null,
+      placeOfSupply: placeOfSupply,
+      lines: lines,
+      invoiceDiscountType: invoiceDiscount.type,
+      invoiceDiscountValue: invoiceDiscount.value,
+    })
       .then(function (quote) {
         if (seq !== quoteSeq) return; // a newer edit already won
         renderQuote(quote);
       })
       .catch(function (err) {
+        // A discount core refuses — bigger than the bill, say — leaves the last good
+        // figures on screen and says why, rather than blanking the panel.
+        setMsg("id-msg", errText(err), true);
         status("quote_invoice failed: " + errText(err));
       });
   }
+
+  /* ---------------------------------------------------------------- discounts */
+
+  /** Whether the shop's limit puts this discount behind an owner, for a cashier. */
+  function needsApproval(percent) {
+    return !!user && user.role !== "owner" && percent > discountLimitPct + 1e-9;
+  }
+
+  /** Which row the discount editor is open on, or null. */
+  var discountRow = null;
+
+  function openLineDiscount(index) {
+    var row = rows[index];
+    if (!row || locked) return;
+
+    discountRow = index;
+    $("ld-item").textContent = row.item_code;
+    $("ld-type").value = row.discount_type || "none";
+    $("ld-value").value = row.discount_value || "";
+    setMsg("ld-msg", "", false);
+    $("line-discount").hidden = false;
+    closePicker();
+    $("ld-value").focus();
+  }
+
+  function closeLineDiscount() {
+    discountRow = null;
+    $("line-discount").hidden = true;
+  }
+
+  function applyLineDiscount(event) {
+    if (event) event.preventDefault();
+    var row = rows[discountRow];
+    if (!row) return closeLineDiscount();
+
+    var kind = $("ld-type").value;
+    if (kind === "none") return clearLineDiscount();
+
+    var value = parseFloat($("ld-value").value);
+    // Shape only — whether it is bigger than the line is core's to say, and it says so
+    // when the re-quote comes back.
+    if (!isFinite(value) || value <= 0) {
+      return setMsg("ld-msg", "Enter a discount above zero.", true);
+    }
+    if (kind === "percentage" && value > 100) {
+      return setMsg("ld-msg", "A percentage cannot be more than 100.", true);
+    }
+
+    row.discount_type = kind;
+    row.discount_value = value;
+    closeLineDiscount();
+    renderRows();
+    requote();
+    status("Discounted " + row.item_code + " by " + discountLabel(row) + ".");
+  }
+
+  function clearLineDiscount() {
+    var row = rows[discountRow];
+    if (row) {
+      row.discount_type = "none";
+      row.discount_value = 0;
+      row.discount_amount = 0;
+    }
+    closeLineDiscount();
+    renderRows();
+    requote();
+    if (row) status("Discount removed from " + row.item_code + ".");
+  }
+
+  $("line-discount").addEventListener("submit", applyLineDiscount);
+  $("ld-clear").addEventListener("click", clearLineDiscount);
+  $("ld-cancel").addEventListener("click", function () {
+    closeLineDiscount();
+    status("Discount unchanged.");
+  });
+
+  /** The whole-bill control. A type of "none" disables the value box rather than hiding
+   *  it, so the row does not jump about as somebody cycles through the options. */
+  function syncInvoiceDiscountControls() {
+    var kind = $("id-type").value;
+    $("id-value").disabled = kind === "none";
+    if (kind === "none") $("id-value").value = "";
+  }
+
+  function applyInvoiceDiscount() {
+    var kind = $("id-type").value;
+    var raw = $("id-value").value.trim();
+    var value = parseFloat(raw);
+
+    if (kind === "none") {
+      invoiceDiscount = { type: "none", value: 0 };
+      setMsg("id-msg", "", false);
+      return requote();
+    }
+    if (!raw) {
+      // Mid-typing: hold the last good discount rather than flickering to zero.
+      return;
+    }
+    if (!isFinite(value) || value < 0) {
+      return setMsg("id-msg", "Enter a discount of zero or more.", true);
+    }
+    if (kind === "percentage" && value > 100) {
+      return setMsg("id-msg", "A percentage cannot be more than 100.", true);
+    }
+
+    invoiceDiscount = { type: kind, value: value };
+    setMsg("id-msg", "", false);
+    requote();
+  }
+
+  $("id-type").addEventListener("change", function () {
+    syncInvoiceDiscountControls();
+    applyInvoiceDiscount();
+  });
+  $("id-value").addEventListener("input", applyInvoiceDiscount);
+
+  /* ---------------------------------------------------------- owner approval */
+
+  /** Resolved with the credentials, or rejected when the prompt is cancelled. */
+  var approvalPending = null;
+
+  function askOwnerApproval(percent) {
+    $("approval-why").textContent =
+      "This bill discounts " + money(percent) + "% of " +
+      money(discountLimitPct) + "% allowed at the counter. An owner has to sign it off.";
+    $("ap-user").value = "";
+    $("ap-pass").value = "";
+    setMsg("ap-msg", "", false);
+    $("approval-overlay").hidden = false;
+    UI.enhancePasswordFields($("approval-form"));
+    $("ap-user").focus();
+
+    return new Promise(function (resolve, reject) {
+      approvalPending = { resolve: resolve, reject: reject };
+    });
+  }
+
+  function closeApproval() {
+    $("approval-overlay").hidden = true;
+    approvalPending = null;
+  }
+
+  $("approval-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    var username = $("ap-user").value.trim();
+    var password = $("ap-pass").value;
+    if (!username || !password) {
+      return setMsg("ap-msg", "Enter the owner's username and password.", true);
+    }
+    var waiting = approvalPending;
+    closeApproval();
+    if (waiting) waiting.resolve({ username: username, password: password });
+  });
+
+  $("ap-cancel").addEventListener("click", function () {
+    var waiting = approvalPending;
+    closeApproval();
+    if (waiting) waiting.reject(new Error("Owner approval cancelled — nothing was saved."));
+  });
 
   /* -------------------------------------------------------------- print & lock */
 
@@ -913,6 +1196,9 @@
     renderPricing();
     $("add-item").hidden = on;
     $("txn-actions").hidden = on;
+    // A saved invoice's discount is part of the document now, not a control.
+    $("invoice-discount").hidden = on;
+    if (on) closeLineDiscount();
 
     // "Saving…" was the last thing this row said; the banner has superseded it.
     clearMessage();
@@ -939,12 +1225,22 @@
       customer_id: customer.id,
       date: null, // core stamps today
       payment_type: selectedPayment(),
+      invoice_discount_type: invoiceDiscount.type,
+      invoice_discount_value: invoiceDiscount.value,
       // No rate and no tax rate. Both are core's to resolve, from the price list this
       // customer is actually on rather than from whatever this screen last displayed —
       // and the totals the screen *did* display are sent separately as `expected`, so a
-      // stale price is refused rather than billed.
+      // stale price is refused rather than billed. The discounts travel as the type and
+      // value they were entered as; core works out the rupees.
       lines: rows.map(function (row) {
-        return { item_id: row.item_id, qty: row.qty, rate: null, tax_rate: null };
+        return {
+          item_id: row.item_id,
+          qty: row.qty,
+          rate: null,
+          tax_rate: null,
+          discount_type: row.discount_type || "none",
+          discount_value: row.discount_value || 0,
+        };
       }),
     };
   }
@@ -986,17 +1282,35 @@
     button.disabled = true;
     actionMsg("Saving…", false);
 
-    invoke("create_invoice", {
-      payload: buildPayload(),
-      // What the panel is showing. Core refuses the save if it prices differently.
-      expected: {
-        subtotal: lastQuote.subtotal,
-        cgst: lastQuote.cgst,
-        sgst: lastQuote.sgst,
-        igst: lastQuote.igst,
-        grand_total: lastQuote.grand_total,
-      },
-    })
+    // What the panel is showing, discounts included. Core refuses the save if it prices
+    // any of it differently.
+    var expected = {
+      subtotal: lastQuote.subtotal,
+      cgst: lastQuote.cgst,
+      sgst: lastQuote.sgst,
+      igst: lastQuote.igst,
+      grand_total: lastQuote.grand_total,
+      pre_discount_subtotal: lastQuote.pre_discount_subtotal,
+      discount_amount: lastQuote.discount_amount,
+    };
+
+    // Asked for here so the password reaches the same call that does the checking. The
+    // prompt is a convenience: a cashier who skipped it is refused by core anyway.
+    var percent = lastQuote.pre_discount_subtotal > 0
+      ? (lastQuote.discount_amount / lastQuote.pre_discount_subtotal) * 100
+      : 0;
+    var approval = needsApproval(percent)
+      ? askOwnerApproval(percent)
+      : Promise.resolve(null);
+
+    approval
+      .then(function (credentials) {
+        return invoke("create_invoice", {
+          payload: buildPayload(),
+          expected: expected,
+          approval: credentials,
+        });
+      })
       .then(function (saved) {
         button.disabled = false;
         showSaved(saved);
@@ -1017,11 +1331,17 @@
     badge.textContent = invoice.invoice_no;
     badge.hidden = false;
 
-    // Render what was actually stored, not what was on screen a moment ago.
+    // Render what was actually stored, not what was on screen a moment ago. The Total
+    // column means the same thing locked as it did while editing: the line after its own
+    // discount, with the invoice-level share left to the totals block.
     saved.lines.forEach(function (line, index) {
+      var afterLineDiscount = gstRound(line.line_total - line.discount_amount);
       var cell = document.querySelector('#items-body [data-total="' + index + '"]');
-      if (cell) cell.textContent = money(line.line_total);
-      if (rows[index]) rows[index].total = line.line_total;
+      if (cell) cell.textContent = money(afterLineDiscount);
+      if (rows[index]) {
+        rows[index].total = afterLineDiscount;
+        rows[index].discount_amount = line.discount_amount;
+      }
     });
     renderTotals($("billing-totals"), totalsOf(invoice));
 
@@ -1051,6 +1371,12 @@
     $("mobile-input").value = "";
     $("customer-miss").hidden = true;
     hideNewCustomer();
+    invoiceDiscount = { type: "none", value: 0 };
+    $("id-type").value = "none";
+    $("id-value").value = "";
+    syncInvoiceDiscountControls();
+    setMsg("id-msg", "", false);
+    closeLineDiscount();
     setPayment("cash");
     $("inv-no").hidden = true;
     $("inv-no").textContent = "";
@@ -1239,7 +1565,12 @@
         qty: entry.line.qty,
         rate: entry.line.rate,
         tax_rate: entry.line.tax_rate,
-        total: entry.line.line_total,
+        // Straight off the stored row. A reprint shows the discount the invoice was
+        // billed with, not one worked out again from today's prices.
+        discount_type: entry.line.discount_type,
+        discount_value: entry.line.discount_value,
+        discount_amount: entry.line.discount_amount,
+        total: gstRound(entry.line.line_total - entry.line.discount_amount),
       };
     });
   }
@@ -1300,6 +1631,15 @@
       : "<tr><th>CGST</th><td>" + rupees(invoice.cgst) + "</td></tr>" +
         "<tr><th>SGST</th><td>" + rupees(invoice.sgst) + "</td></tr>";
 
+    // A Discount column only when there is one, so an ordinary bill keeps its layout.
+    var anyDiscount = invoice.discount_amount > 0;
+    var discountHead = anyDiscount ? '<th class="num">Discount</th>' : "";
+    var discountRows = anyDiscount
+      ? "<tr><th>Subtotal</th><td>" + rupees(invoice.pre_discount_subtotal) + "</td></tr>" +
+        "<tr><th>Discount</th><td>−" + rupees(invoice.discount_amount) + "</td></tr>" +
+        "<tr><th>Taxable Value</th><td>" + rupees(invoice.subtotal) + "</td></tr>"
+      : "<tr><th>Subtotal</th><td>" + rupees(invoice.subtotal) + "</td></tr>";
+
     $("print-sheet").innerHTML =
       '<div class="sheet-head">' +
         "<div><h1>TAX INVOICE</h1>" +
@@ -1314,7 +1654,7 @@
         escapeHtml(buyer.place_of_supply) + "</div></div>" +
       '<table class="sheet-lines"><thead><tr>' +
         "<th>#</th><th>Item</th><th>Description</th><th>UOM</th>" +
-        '<th class="num">Qty</th><th class="num">Rate</th>' +
+        '<th class="num">Qty</th><th class="num">Rate</th>' + discountHead +
         '<th class="num">Tax %</th><th class="num">Amount</th>' +
       "</tr></thead><tbody>" +
       lines
@@ -1328,14 +1668,21 @@
             "<td>" + escapeHtml(line.uom) + "</td>" +
             '<td class="num">' + line.qty + "</td>" +
             '<td class="num">' + money(line.rate) + "</td>" +
+            (anyDiscount
+              ? '<td class="num">' +
+                (line.discount_amount > 0 ? "−" + money(line.discount_amount) : "—") +
+                "</td>"
+              : "") +
             '<td class="num">' + money(line.tax_rate) + "</td>" +
+            // The line after its own discount. The invoice-level share is in the totals
+            // block rather than here, so no rupee is shown coming off twice.
             '<td class="num">' + money(line.total) + "</td></tr>"
           );
         })
         .join("") +
       "</tbody></table>" +
       '<table class="sheet-totals">' +
-        "<tr><th>Subtotal</th><td>" + rupees(invoice.subtotal) + "</td></tr>" +
+        discountRows +
         taxRows +
         '<tr class="grand"><th>Grand Total</th><td>' + rupees(invoice.grand_total) +
         "</td></tr>" +
@@ -1441,8 +1788,10 @@
     $("menu-role").textContent = user.role + " · " + user.username;
     loadNodeStatus();
     // Before anything is billed: the picker quotes from the active list, so it has to
-    // exist before the first search.
+    // exist before the first search, and the panel has to know where the discount
+    // ceiling sits before it can say whether a bill is over it.
     loadPriceLists();
+    loadDiscountLimit();
     refreshAbout();
     startSyncPolling();
     showPane("billing");
@@ -1936,8 +2285,11 @@
     // Cashiers do not see either of these; the commands refuse them anyway.
     $("demo-data").hidden = user.role !== "owner";
     $("price-lists-section").hidden = user.role !== "owner";
+    $("discount-limit-section").hidden = user.role !== "owner";
     setMsg("demo-msg", "", false);
     setMsg("pl-msg", "", false);
+    setMsg("dl-msg", "", false);
+    $("dl-value").value = discountLimitPct;
     renderPriceListRows();
 
     invoke("app_info")
@@ -2147,6 +2499,43 @@
   }
 
   $("demo-clear").addEventListener("click", clearDemoData);
+
+  /**
+   * Loads the shop's discount ceiling. Read by everyone — a cashier needs to know where
+   * the line is before they hit it — but only an owner can move it, and only core can
+   * enforce it.
+   */
+  function loadDiscountLimit() {
+    if (!invoke) return Promise.resolve();
+    return invoke("discount_approval_threshold")
+      .then(function (percent) {
+        discountLimitPct = percent;
+        $("dl-value").value = percent;
+      })
+      .catch(function (err) {
+        status("discount_approval_threshold failed: " + errText(err));
+      });
+  }
+
+  $("dl-save").addEventListener("click", function () {
+    if (!invoke) return bridgeMissing("set_discount_approval_threshold");
+    var percent = parseFloat($("dl-value").value);
+    if (!isFinite(percent) || percent < 0 || percent > 100) {
+      return setMsg("dl-msg", "Enter a percentage between 0 and 100.", true);
+    }
+
+    setMsg("dl-msg", "Saving…", false);
+    invoke("set_discount_approval_threshold", { percent: percent })
+      .then(function (saved) {
+        discountLimitPct = saved;
+        $("dl-value").value = saved;
+        setMsg("dl-msg", "Cashiers may now discount up to " + money(saved) + "%.", false);
+        requote();
+      })
+      .catch(function (err) {
+        setMsg("dl-msg", errText(err), true);
+      });
+  });
 
   /** Label-left / value-right rows, separated by dividers — no boxes. */
   function rowList(el, rows) {
