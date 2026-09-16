@@ -2,9 +2,9 @@
 //! reopened SQLite file with its lines and its `sync_queue` rows intact.
 
 use realinvoice_core::{
-    seed, CoreError, DateRange, Db, InvoiceFilter, ItemFilter, LoginOutcome, NewCreditNote,
-    NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser, Role, SyncBatch,
-    User,
+    seed, CoreError, DateRange, Db, InvoiceFilter, ItemFilter, ItemPrice, LoginOutcome,
+    NewCreditNote, NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser,
+    Role, SyncBatch, User,
 };
 
 fn seeded_db() -> Db {
@@ -67,6 +67,7 @@ fn sync_queue_picks_up_the_invoice_and_every_line() {
             gstin: Some("33AABCS1429B1ZP".into()),
             place_of_supply: "TN".into(),
             mobile: "9840012345".into(),
+            price_list_id: None,
         })
         .unwrap();
     let widget = db
@@ -320,6 +321,7 @@ fn a_new_customer_can_be_registered_from_the_counter() {
             gstin: Some("  33AAFCA1234M1Z9  ".into()),
             place_of_supply: "tn".into(),
             mobile: " 9884455661 ".into(),
+            price_list_id: None,
         })
         .expect("register customer");
 
@@ -347,6 +349,7 @@ fn registering_a_duplicate_mobile_is_refused() {
         gstin: None,
         place_of_supply: "TN".into(),
         mobile: "9840012345".into(),
+        price_list_id: None,
     });
     assert!(matches!(duplicate, Err(CoreError::Invalid(_))));
 
@@ -364,6 +367,7 @@ fn a_blank_gstin_is_stored_as_unregistered() {
             gstin: Some("   ".into()),
             place_of_supply: "TN".into(),
             mobile: "9112233445".into(),
+            price_list_id: None,
         })
         .unwrap();
 
@@ -378,6 +382,7 @@ fn incomplete_customers_are_refused() {
         gstin: None,
         place_of_supply: "TN".into(),
         mobile: "9111111111".into(),
+        price_list_id: None,
     };
 
     let no_name = db.create_customer(&NewCustomer { name: "  ".into(), ..base.clone() });
@@ -1727,6 +1732,7 @@ fn a_credit_note_reverses_the_tax_that_was_actually_charged() {
             mobile: "9000012345".into(),
             gstin: Some("29AABCS1429B1ZP".into()),
             place_of_supply: "KA".into(),
+            price_list_id: None,
         })
         .unwrap();
     let rack = item(&db, "RACK-42U-PRO");
@@ -2091,6 +2097,7 @@ fn clearing_demo_data_twice_is_harmless_and_spares_real_rows() {
             mobile: "9000012345".into(),
             gstin: None,
             place_of_supply: "TN".into(),
+            price_list_id: None,
         })
         .unwrap();
 
@@ -2108,4 +2115,385 @@ fn clearing_demo_data_twice_is_harmless_and_spares_real_rows() {
     assert!(db.get_item(real.id).unwrap().is_some());
     assert!(db.search_customer(&real_customer.mobile).unwrap().is_some());
     assert_eq!(db.count_items().unwrap(), 1);
+}
+
+// ============================================================== price lists
+
+/// The migration leaves a database that prices exactly as it did before it ran.
+#[test]
+fn an_existing_database_lands_on_a_default_list_at_its_existing_prices() {
+    let db = seeded_db();
+
+    let lists = db.price_lists().unwrap();
+    assert_eq!(lists.len(), 1, "one list to start with");
+    assert_eq!(lists[0].name, "Retail");
+    assert!(lists[0].is_default);
+    assert_eq!(db.default_price_list().unwrap().id, lists[0].id);
+
+    // Every seeded item now has that price stated rather than assumed, and it is the
+    // same number `items.rate` always held.
+    for item in db.search_item("").unwrap() {
+        let resolved = db.resolve_rate(item.id, lists[0].id).unwrap();
+        assert_eq!(resolved.rate, item.rate, "{} priced differently", item.item_code);
+        assert!(resolved.from_price_list, "{} should have a Retail entry", item.item_code);
+    }
+
+    // And a customer nobody has assigned is billed from it.
+    let buyer = customer(&db, "9840012345");
+    assert_eq!(buyer.price_list_id, None);
+    assert_eq!(db.price_list_for_customer(buyer.id).unwrap().id, lists[0].id);
+}
+
+/// A one-off is not a price list entry. It is one line on one bill.
+#[test]
+fn a_one_off_item_gets_no_price_list_entry_and_keeps_its_typed_rate() {
+    let mut db = seeded_db();
+    let retail = db.default_price_list().unwrap();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+
+    let one_off =
+        db.create_custom_item("Shutter spring replacement", 1_450.0, 18.0, "NOS").unwrap();
+
+    for list in [&retail, &wholesale] {
+        let resolved = db.resolve_rate(one_off.id, list.id).unwrap();
+        assert_eq!(resolved.rate, 1_450.0);
+        assert!(!resolved.from_price_list, "a one-off falls back on every list");
+    }
+    assert!(db.item_prices(one_off.id).unwrap().iter().all(|row| row.rate.is_none()));
+}
+
+/// The headline case: same item, two customers, two rates.
+#[test]
+fn two_customers_on_different_lists_are_billed_different_rates_for_the_same_item() {
+    let mut db = seeded_db();
+    let retail = db.default_price_list().unwrap();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+
+    let cement = item(&db, "CEM-OPC-53"); // 410.00 at 28%
+    db.set_item_prices(
+        cement.id,
+        &[
+            ItemPrice { item_id: cement.id, price_list_id: retail.id, rate: 410.0 },
+            ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 },
+        ],
+    )
+    .unwrap();
+
+    let builder = db
+        .create_customer(&NewCustomer {
+            name: "Kavi Constructions".into(),
+            mobile: "9111122233".into(),
+            gstin: None,
+            place_of_supply: "TN".into(),
+            price_list_id: Some(wholesale.id),
+        })
+        .unwrap();
+    let walk_in = customer(&db, "9840012345"); // left on the default
+
+    // Neither invoice states a rate. That is the point: the rate is the database's to
+    // decide from who is being billed, not the caller's to assert.
+    let line = |item_id| NewInvoiceLine { item_id, qty: 100.0, rate: None, tax_rate: None };
+
+    let trade = db
+        .create_invoice(&NewInvoice {
+            customer_id: builder.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![line(cement.id)],
+        })
+        .unwrap();
+    let counter = db
+        .create_invoice(&NewInvoice {
+            customer_id: walk_in.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![line(cement.id)],
+        })
+        .unwrap();
+
+    assert_eq!(trade.subtotal, 36_500.00, "100 bags at the wholesale 365.00");
+    assert_eq!(counter.subtotal, 41_000.00, "100 bags at the retail 410.00");
+
+    // Taxed on what was actually charged, not on a single sticker price.
+    assert_eq!(trade.grand_total, 46_720.00); // 36,500 + 28%
+    assert_eq!(counter.grand_total, 52_480.00); // 41,000 + 28%
+
+    // The rate is on the line, so each invoice stays readable on its own terms.
+    assert_eq!(db.invoice_lines(trade.id).unwrap()[0].rate, 365.0);
+    assert_eq!(db.invoice_lines(counter.id).unwrap()[0].rate, 410.0);
+}
+
+/// A list only has to price what the shop actually discounts.
+#[test]
+fn an_item_with_no_entry_on_the_list_falls_back_to_its_base_rate() {
+    let mut db = seeded_db();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+
+    let cement = item(&db, "CEM-OPC-53");
+    let steel = item(&db, "TMT-12MM"); // deliberately left unpriced on Wholesale
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 }],
+    )
+    .unwrap();
+
+    let priced = db.resolve_rate(cement.id, wholesale.id).unwrap();
+    assert_eq!(priced.rate, 365.0);
+    assert!(priced.from_price_list);
+
+    let fell_back = db.resolve_rate(steel.id, wholesale.id).unwrap();
+    assert_eq!(fell_back.rate, steel.rate, "620.00, the base rate");
+    assert!(!fell_back.from_price_list, "and the screen can say so");
+
+    let builder = db
+        .create_customer(&NewCustomer {
+            name: "Kavi Constructions".into(),
+            mobile: "9111122233".into(),
+            gstin: None,
+            place_of_supply: "TN".into(),
+            price_list_id: Some(wholesale.id),
+        })
+        .unwrap();
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: builder.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![
+                NewInvoiceLine { item_id: cement.id, qty: 10.0, rate: None, tax_rate: None },
+                NewInvoiceLine { item_id: steel.id, qty: 10.0, rate: None, tax_rate: None },
+            ],
+        })
+        .unwrap();
+
+    let lines = db.invoice_lines(invoice.id).unwrap();
+    assert_eq!(lines[0].rate, 365.0, "the wholesale rate");
+    assert_eq!(lines[1].rate, 620.0, "and the base rate beside it on the same bill");
+}
+
+/// "Exactly one default" is the database's rule, not a convention.
+#[test]
+fn the_default_flag_moves_and_never_splits_or_disappears() {
+    let mut db = seeded_db();
+    let retail = db.default_price_list().unwrap();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    assert!(!wholesale.is_default, "a new list does not seize the default");
+
+    let now_default = db.set_default_price_list(wholesale.id).unwrap();
+    assert!(now_default.is_default);
+
+    let flagged: Vec<_> = db.price_lists().unwrap().into_iter().filter(|l| l.is_default).collect();
+    assert_eq!(flagged.len(), 1, "one default, always");
+    assert_eq!(flagged[0].id, wholesale.id);
+    assert!(!db.get_price_list(retail.id).unwrap().unwrap().is_default, "the old one stood down");
+
+    // And an unassigned customer follows the flag rather than being pinned to the list
+    // that happened to be default when they were registered.
+    let walk_in = customer(&db, "9840012345");
+    assert_eq!(walk_in.price_list_id, None);
+    assert_eq!(db.price_list_for_customer(walk_in.id).unwrap().id, wholesale.id);
+}
+
+#[test]
+fn price_lists_are_named_once_and_renamed_without_touching_their_rates() {
+    let mut db = seeded_db();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    let cement = item(&db, "CEM-OPC-53");
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 }],
+    )
+    .unwrap();
+
+    assert!(db.create_price_list("  ").is_err(), "a list needs a name");
+    assert!(db.create_price_list("wholesale").is_err(), "and names are unique, case aside");
+
+    let renamed = db.rename_price_list(wholesale.id, "Trade").unwrap();
+    assert_eq!(renamed.name, "Trade");
+    assert_eq!(renamed.id, wholesale.id);
+    assert_eq!(
+        db.resolve_rate(cement.id, wholesale.id).unwrap().rate,
+        365.0,
+        "renaming a list is not repricing it"
+    );
+    assert!(db.rename_price_list(wholesale.id, "Retail").is_err(), "onto another list's name");
+    assert!(db.rename_price_list(9_999, "Anything").is_err(), "or a list that does not exist");
+}
+
+/// Clearing a box on the form means "fall back", not "leave it alone".
+#[test]
+fn setting_prices_replaces_the_whole_table_for_that_item() {
+    let mut db = seeded_db();
+    let retail = db.default_price_list().unwrap();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    let cement = item(&db, "CEM-OPC-53");
+
+    db.set_item_prices(
+        cement.id,
+        &[
+            ItemPrice { item_id: cement.id, price_list_id: retail.id, rate: 410.0 },
+            ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 },
+        ],
+    )
+    .unwrap();
+
+    // Submitting the form with Wholesale blanked removes that entry.
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: retail.id, rate: 415.0 }],
+    )
+    .unwrap();
+
+    let rows = db.item_prices(cement.id).unwrap();
+    let retail_row = rows.iter().find(|r| r.price_list.id == retail.id).unwrap();
+    let wholesale_row = rows.iter().find(|r| r.price_list.id == wholesale.id).unwrap();
+    assert_eq!(retail_row.rate, Some(415.0));
+    assert_eq!(wholesale_row.rate, None, "blanked, so it falls back");
+    assert_eq!(db.resolve_rate(cement.id, wholesale.id).unwrap().rate, cement.rate);
+
+    assert!(
+        db.set_item_prices(
+            cement.id,
+            &[ItemPrice { item_id: cement.id, price_list_id: retail.id, rate: -1.0 }]
+        )
+        .is_err(),
+        "a negative price is a typo"
+    );
+    assert!(
+        db.set_item_prices(
+            cement.id,
+            &[ItemPrice { item_id: cement.id, price_list_id: 9_999, rate: 1.0 }]
+        )
+        .is_err(),
+        "and so is a list that does not exist"
+    );
+}
+
+/// Moving a customer between lists changes what they pay next, never what they paid.
+#[test]
+fn reassigning_a_customer_leaves_their_old_invoices_exactly_as_billed() {
+    let mut db = seeded_db();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    let cement = item(&db, "CEM-OPC-53");
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 }],
+    )
+    .unwrap();
+
+    let buyer = customer(&db, "9840012345");
+    let before = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine {
+                item_id: cement.id,
+                qty: 10.0,
+                rate: None,
+                tax_rate: None,
+            }],
+        })
+        .unwrap();
+    assert_eq!(before.subtotal, 4_100.00);
+
+    let moved = db.set_customer_price_list(buyer.id, Some(wholesale.id)).unwrap();
+    assert_eq!(moved.price_list_id, Some(wholesale.id));
+    assert_eq!(db.price_list_for_customer(buyer.id).unwrap().id, wholesale.id);
+
+    // The invoice already raised is untouched, in the row and in its lines.
+    assert_eq!(db.get_invoice(before.id).unwrap().unwrap(), before);
+    assert_eq!(db.invoice_lines(before.id).unwrap()[0].rate, 410.0);
+
+    // The next one is billed at the new list.
+    let after = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine {
+                item_id: cement.id,
+                qty: 10.0,
+                rate: None,
+                tax_rate: None,
+            }],
+        })
+        .unwrap();
+    assert_eq!(after.subtotal, 3_650.00);
+
+    // And back to the default with None.
+    let reset = db.set_customer_price_list(buyer.id, None).unwrap();
+    assert_eq!(reset.price_list_id, None);
+    assert!(db.set_customer_price_list(buyer.id, Some(9_999)).is_err());
+}
+
+/// An explicit rate still wins, which is the hook a per-line discount will use.
+#[test]
+fn an_explicit_rate_overrides_the_price_list() {
+    let mut db = seeded_db();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    let cement = item(&db, "CEM-OPC-53");
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 }],
+    )
+    .unwrap();
+    let buyer =
+        db.set_customer_price_list(customer(&db, "9840012345").id, Some(wholesale.id)).unwrap();
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine {
+                item_id: cement.id,
+                qty: 10.0,
+                rate: Some(350.0),
+                tax_rate: None,
+            }],
+        })
+        .unwrap();
+
+    assert_eq!(invoice.subtotal, 3_500.00);
+    assert_eq!(db.invoice_lines(invoice.id).unwrap()[0].rate, 350.0);
+}
+
+/// The picker shows the rate that will be billed, not the one on the sticker.
+#[test]
+fn the_priced_search_resolves_every_row_for_the_list_it_is_given() {
+    let mut db = seeded_db();
+    let retail = db.default_price_list().unwrap();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    let cement = item(&db, "CEM-OPC-53");
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 }],
+    )
+    .unwrap();
+
+    let on_retail = db.search_item_priced("CEM-OPC-53", retail.id).unwrap();
+    assert_eq!(on_retail.len(), 1);
+    assert_eq!(on_retail[0].rate, 410.0);
+    assert!(!on_retail[0].from_price_list, "the Retail entry went when the table was replaced");
+
+    let on_wholesale = db.search_item_priced("CEM-OPC-53", wholesale.id).unwrap();
+    assert_eq!(on_wholesale[0].rate, 365.0);
+    assert!(on_wholesale[0].from_price_list);
+    assert_eq!(on_wholesale[0].item.rate, 410.0, "the base rate is still reported as itself");
+
+    // One-offs stay out of the picker whichever list is being priced.
+    let one_off = db.create_custom_item("Crane hire", 9_000.0, 18.0, "DAY").unwrap();
+    assert!(db
+        .search_item_priced("", wholesale.id)
+        .unwrap()
+        .iter()
+        .all(|p| p.item.id != one_off.id));
 }

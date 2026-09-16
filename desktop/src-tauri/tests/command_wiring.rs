@@ -6,8 +6,8 @@
 //! payload survives the trip into core unchanged.
 
 use realinvoice_core::{
-    seed, DateRange, InvoiceFilter, LoginOutcome, NewCreditNote, NewCreditNoteLine, NewCustomer,
-    NewInvoice, NewInvoiceLine, NewUser, Role, User,
+    seed, DateRange, InvoiceFilter, ItemPrice, LoginOutcome, NewCreditNote, NewCreditNoteLine,
+    NewCustomer, NewInvoice, NewInvoiceLine, NewUser, Role, User,
 };
 use realinvoice_desktop_lib::commands::{
     check_expected_totals_for_test as check_expected_totals, check_item_for_test as check_item,
@@ -442,7 +442,8 @@ fn totals_matching_the_screen_are_accepted() {
         grand_total: 123_900.00,
     };
     let example = worked_example(&state);
-    assert!(check_expected_totals(&expected, &example, "TN", "TN").is_ok());
+    let priced = state.db().price_invoice_lines(&example).unwrap();
+    assert!(check_expected_totals(&expected, &priced, "TN", "TN").is_ok());
 }
 
 #[test]
@@ -458,7 +459,8 @@ fn totals_that_disagree_with_the_screen_are_refused() {
         igst: 0.0,
         grand_total: 123_899.00,
     };
-    let refused = check_expected_totals(&stale, &invoice, "TN", "TN").unwrap_err();
+    let priced = state.db().price_invoice_lines(&invoice).unwrap();
+    let refused = check_expected_totals(&stale, &priced, "TN", "TN").unwrap_err();
     assert!(refused.contains("grand total"), "{refused}");
 
     // Billing the same rows out of state moves the tax to IGST, so an intra-state
@@ -470,13 +472,17 @@ fn totals_that_disagree_with_the_screen_are_refused() {
         igst: 0.0,
         grand_total: 123_900.00,
     };
-    assert!(check_expected_totals(&intra, &invoice, "KA", "TN").is_err());
+    assert!(check_expected_totals(&intra, &priced, "KA", "TN").is_err());
 }
 
-/// Rows that defer to the item master are priced inside core; the guard skips them
-/// rather than keeping a second copy of core's pricing rules.
+/// Rows that defer to the price list are still checked.
+///
+/// They used to be skipped, because re-deriving their rates here would have meant a
+/// second copy of core's pricing rules. Core now hands the priced lines over instead, so
+/// there is still only one copy and the guard covers every row — which matters far more
+/// now that the rate depends on which list the buyer is on.
 #[test]
-fn rows_without_explicit_prices_skip_the_guard() {
+fn rows_priced_by_core_are_still_checked_against_the_screen() {
     let (_dir, state) = console_state();
     let cement = state.db().search_item("CEM-OPC-53").unwrap().remove(0);
     let deferred = NewInvoice {
@@ -486,10 +492,21 @@ fn rows_without_explicit_prices_skip_the_guard() {
         created_by_user_id: None,
         lines: vec![NewInvoiceLine { item_id: cement.id, qty: 1.0, rate: None, tax_rate: None }],
     };
+    let priced = state.db().price_invoice_lines(&deferred).unwrap();
 
     let nonsense =
         ExpectedTotals { subtotal: 1.0, cgst: 1.0, sgst: 1.0, igst: 1.0, grand_total: 1.0 };
-    assert!(check_expected_totals(&nonsense, &deferred, "TN", "TN").is_ok());
+    assert!(check_expected_totals(&nonsense, &priced, "TN", "TN").is_err());
+
+    // Cement is 410.00 at 28%, so the honest expectation passes.
+    let right = ExpectedTotals {
+        subtotal: 410.00,
+        cgst: 57.40,
+        sgst: 57.40,
+        igst: 0.0,
+        grand_total: 524.80,
+    };
+    assert!(check_expected_totals(&right, &priced, "TN", "TN").is_ok());
 }
 
 /// Bills four invoices through the console the way stage 3 saves them.
@@ -1212,4 +1229,158 @@ fn only_an_owner_can_clear_the_demo_data() {
     );
     assert!(require_owner(Some(Session { token: "t".into(), user: cashier })).is_err());
     assert!(require_owner(None).is_err());
+}
+
+// ============================================================== price lists
+
+/// The console opens onto a database that already has a default list and prices on it.
+#[test]
+fn a_fresh_console_starts_with_one_default_price_list() {
+    let (_dir, state) = console_state();
+
+    let lists = state.db().price_lists().unwrap();
+    assert_eq!(lists.len(), 1);
+    assert_eq!(lists[0].name, "Retail");
+    assert!(lists[0].is_default);
+
+    // The picker's rate is the list's rate, not a sticker price beside it.
+    let priced = state.db().search_item_priced("CEM-OPC-53", lists[0].id).unwrap();
+    assert_eq!(priced[0].rate, 410.0);
+    assert!(priced[0].from_price_list);
+}
+
+/// The save is priced from the stored customer, so a screen showing retail totals for a
+/// wholesale buyer is refused rather than billed at whichever number arrived last.
+#[test]
+fn a_bill_totalled_on_the_wrong_price_list_is_refused() {
+    let (_dir, state) = console_state();
+    let wholesale = state.db().create_price_list("Wholesale").unwrap();
+    let cement = state.db().search_item("CEM-OPC-53").unwrap().remove(0);
+    state
+        .db()
+        .set_item_prices(
+            cement.id,
+            &[ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 }],
+        )
+        .unwrap();
+
+    let buyer = state.db().search_customer("9840012345").unwrap().unwrap();
+    state.db().set_customer_price_list(buyer.id, Some(wholesale.id)).unwrap();
+
+    let payload = NewInvoicePayload {
+        customer_id: buyer.id,
+        date: None,
+        payment_type: "cash".into(),
+        lines: vec![NewLinePayload { item_id: cement.id, qty: 10.0, rate: None, tax_rate: None }],
+    };
+    let new_invoice = NewInvoice::from(payload);
+    let priced = state.db().price_invoice_lines(&new_invoice).unwrap();
+
+    // What a screen still on Retail would have shown: 10 × 410 at 28%.
+    let stale = ExpectedTotals {
+        subtotal: 4_100.00,
+        cgst: 574.00,
+        sgst: 574.00,
+        igst: 0.0,
+        grand_total: 5_248.00,
+    };
+    let refused = check_expected_totals(&stale, &priced, "TN", "TN").unwrap_err();
+    assert!(refused.contains("subtotal"), "{refused}");
+
+    // The wholesale figures the screen should have been showing: 10 × 365 at 28%.
+    let right = ExpectedTotals {
+        subtotal: 3_650.00,
+        cgst: 511.00,
+        sgst: 511.00,
+        igst: 0.0,
+        grand_total: 4_672.00,
+    };
+    assert!(check_expected_totals(&right, &priced, "TN", "TN").is_ok());
+
+    // And the save itself agrees with the check.
+    let saved = state.db().create_invoice(&new_invoice).unwrap();
+    assert_eq!(saved.grand_total, 4_672.00);
+}
+
+/// A payload from the customer form carries the chosen list through unchanged.
+#[test]
+fn the_customer_form_carries_a_price_list_through_to_core() {
+    let (_dir, state) = console_state();
+    let wholesale = state.db().create_price_list("Wholesale").unwrap();
+
+    let assigned: NewCustomer = NewCustomerPayload {
+        name: "Kavi Constructions".into(),
+        gstin: None,
+        place_of_supply: "TN".into(),
+        mobile: "9111122233".into(),
+        price_list_id: Some(wholesale.id),
+    }
+    .into();
+    assert_eq!(assigned.price_list_id, Some(wholesale.id));
+    let created = state.db().create_customer(&assigned).unwrap();
+    assert_eq!(state.db().price_list_for_customer(created.id).unwrap().id, wholesale.id);
+
+    // And a form with nothing picked means the default, not "no pricing".
+    let unassigned: NewCustomer = NewCustomerPayload {
+        name: "Walk-in".into(),
+        gstin: None,
+        place_of_supply: "TN".into(),
+        mobile: "9111122244".into(),
+        price_list_id: None,
+    }
+    .into();
+    let walk_in = state.db().create_customer(&unassigned).unwrap();
+    assert_eq!(walk_in.price_list_id, None);
+    assert!(state.db().price_list_for_customer(walk_in.id).unwrap().is_default);
+}
+
+#[test]
+fn only_an_owner_can_change_what_a_customer_pays() {
+    // Pricing is a commercial decision, not a counter one. A cashier who could move a
+    // customer onto Wholesale mid-sale could discount any bill at will.
+    let (_dir, state) = console_state();
+    let owner = set_up_owner(&state);
+    let cashier = state
+        .db()
+        .create_user(
+            &NewUser {
+                username: "meena".into(),
+                display_name: "Meena R".into(),
+                role: Role::Cashier,
+            },
+            "counter-password",
+        )
+        .unwrap();
+
+    assert!(require_owner(Some(Session { token: "t".into(), user: owner })).is_ok());
+    assert!(
+        require_session(Some(Session { token: "t".into(), user: cashier.clone() })).is_ok(),
+        "a cashier still bills, and still sees which list is being applied"
+    );
+    assert!(require_owner(Some(Session { token: "t".into(), user: cashier })).is_err());
+    assert!(require_owner(None).is_err());
+}
+
+/// Clearing the demo data takes the sample items' price rows with them.
+#[test]
+fn clearing_demo_data_leaves_no_orphan_prices_behind() {
+    let (_dir, state) = console_state();
+    let retail = state.db().default_price_list().unwrap();
+
+    // `worked_example` takes the db lock of its own, so it has to finish before the
+    // guard for `create_invoice` is taken.
+    let example = worked_example(&state);
+    let invoice = state.db().create_invoice(&example).unwrap();
+    let billed: Vec<i64> =
+        state.db().invoice_lines(invoice.id).unwrap().iter().map(|line| line.item_id).collect();
+
+    state.db().clear_demo_data().unwrap();
+
+    // The items that went took their prices with them, and the ones that stayed kept
+    // theirs — so a reprint of the old invoice still resolves.
+    for item_id in &billed {
+        let resolved = state.db().resolve_rate(*item_id, retail.id).unwrap();
+        assert!(resolved.from_price_list, "a billed item keeps its price row");
+    }
+    assert!(state.db().price_lists().unwrap().iter().any(|l| l.is_default), "the list survives");
 }

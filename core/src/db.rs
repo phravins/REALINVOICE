@@ -377,7 +377,7 @@ impl Db {
         let found = self
             .conn
             .query_row(
-                "SELECT id, name, gstin, place_of_supply, mobile
+                "SELECT id, name, gstin, place_of_supply, mobile, price_list_id
                    FROM customers
                   WHERE mobile = ?1",
                 [mobile],
@@ -410,11 +410,17 @@ impl Db {
             new.gstin.as_ref().map(|g| g.trim()).filter(|g| !g.is_empty()).map(String::from);
         let place_of_supply = new.place_of_supply.trim().to_uppercase();
 
+        // A list that does not exist would silently become "use the default" on every
+        // later lookup, which is a wrong price rather than an error.
+        if let Some(id) = new.price_list_id {
+            self.require_price_list(id)?;
+        }
+
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO customers (name, gstin, place_of_supply, mobile)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![new.name.trim(), gstin, place_of_supply, mobile],
+            "INSERT INTO customers (name, gstin, place_of_supply, mobile, price_list_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![new.name.trim(), gstin, place_of_supply, mobile, new.price_list_id],
         )?;
         let customer = Customer {
             id: tx.last_insert_rowid(),
@@ -422,6 +428,7 @@ impl Db {
             gstin,
             place_of_supply,
             mobile,
+            price_list_id: new.price_list_id,
         };
         enqueue(&tx, "customers", customer.id, SyncOp::Insert, &customer)?;
         tx.commit()?;
@@ -441,11 +448,15 @@ impl Db {
 
         let customer = match existing {
             Some(current) => {
+                // An upsert that does not mention a price list keeps the one the customer
+                // is on. Re-seeding or a sync of a stale record must not quietly move a
+                // wholesale buyer back to retail prices.
+                let price_list_id = new.price_list_id.or(current.price_list_id);
                 tx.execute(
                     "UPDATE customers
-                        SET name = ?1, gstin = ?2, place_of_supply = ?3
-                      WHERE id = ?4",
-                    params![new.name, new.gstin, new.place_of_supply, current.id],
+                        SET name = ?1, gstin = ?2, place_of_supply = ?3, price_list_id = ?4
+                      WHERE id = ?5",
+                    params![new.name, new.gstin, new.place_of_supply, price_list_id, current.id],
                 )?;
                 Customer {
                     id: current.id,
@@ -453,13 +464,14 @@ impl Db {
                     gstin: new.gstin.clone(),
                     place_of_supply: new.place_of_supply.clone(),
                     mobile,
+                    price_list_id,
                 }
             }
             None => {
                 tx.execute(
-                    "INSERT INTO customers (name, gstin, place_of_supply, mobile)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![new.name, new.gstin, new.place_of_supply, mobile],
+                    "INSERT INTO customers (name, gstin, place_of_supply, mobile, price_list_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![new.name, new.gstin, new.place_of_supply, mobile, new.price_list_id],
                 )?;
                 Customer {
                     id: tx.last_insert_rowid(),
@@ -467,6 +479,7 @@ impl Db {
                     gstin: new.gstin.clone(),
                     place_of_supply: new.place_of_supply.clone(),
                     mobile,
+                    price_list_id: new.price_list_id,
                 }
             }
         };
@@ -481,11 +494,265 @@ impl Db {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, name, gstin, place_of_supply, mobile FROM customers WHERE id = ?1",
+                "SELECT id, name, gstin, place_of_supply, mobile, price_list_id
+                   FROM customers WHERE id = ?1",
                 [id],
                 customer_from_row,
             )
             .optional()?)
+    }
+
+    // -------------------------------------------------------------- price lists
+
+    /// Every price list, default first and then alphabetical.
+    pub fn price_lists(&self) -> Result<Vec<PriceList>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, is_default, created_at
+               FROM price_lists
+              ORDER BY is_default DESC, name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], price_list_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_price_list(&self, id: i64) -> Result<Option<PriceList>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, name, is_default, created_at FROM price_lists WHERE id = ?1",
+                [id],
+                price_list_from_row,
+            )
+            .optional()?)
+    }
+
+    /// The list a customer with no list of their own is billed from.
+    ///
+    /// There is always exactly one: the migration creates it, nothing can delete the last
+    /// one, and the only way to move the flag is [`Db::set_default_price_list`], which
+    /// moves it rather than clearing it. A missing default is therefore a corrupt
+    /// database, not a state to paper over with a guess.
+    pub fn default_price_list(&self) -> Result<PriceList> {
+        self.conn
+            .query_row(
+                "SELECT id, name, is_default, created_at FROM price_lists WHERE is_default = 1",
+                [],
+                price_list_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| CoreError::NotFound("no default price list".into()))
+    }
+
+    /// The list a customer is billed from: their own, or the default.
+    ///
+    /// Falls back to the default for a customer whose assigned list has since been
+    /// deleted, for the same reason `price_list_id` is nullable — a buyer must always
+    /// have a price, and the default is the honest one to charge.
+    pub fn price_list_for_customer(&self, customer_id: i64) -> Result<PriceList> {
+        let assigned: Option<i64> = self
+            .conn
+            .query_row("SELECT price_list_id FROM customers WHERE id = ?1", [customer_id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten();
+
+        match assigned {
+            Some(id) => match self.get_price_list(id)? {
+                Some(list) => Ok(list),
+                None => self.default_price_list(),
+            },
+            None => self.default_price_list(),
+        }
+    }
+
+    /// Creates a price list. The first one ever created is the default by necessity.
+    pub fn create_price_list(&mut self, name: &str) -> Result<PriceList> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(CoreError::Invalid("a price list needs a name".into()));
+        }
+        if self.price_list_named(&name)?.is_some() {
+            return Err(CoreError::Invalid(format!("a price list called {name} already exists")));
+        }
+
+        let first = self.default_price_list().is_err();
+
+        self.conn.execute(
+            "INSERT INTO price_lists (name, is_default) VALUES (?1, ?2)",
+            params![name, first],
+        )?;
+        let id = self.conn.last_insert_rowid();
+
+        self.get_price_list(id)?
+            .ok_or_else(|| CoreError::NotFound(format!("price list {id} after insert")))
+    }
+
+    /// Renames a list. The rates on it are untouched — a list is renamed because the shop
+    /// calls it something else, not because its prices changed.
+    pub fn rename_price_list(&mut self, id: i64, name: &str) -> Result<PriceList> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(CoreError::Invalid("a price list needs a name".into()));
+        }
+        self.require_price_list(id)?;
+
+        if let Some(clash) = self.price_list_named(&name)? {
+            if clash.id != id {
+                return Err(CoreError::Invalid(format!(
+                    "a price list called {name} already exists"
+                )));
+            }
+        }
+
+        self.conn.execute("UPDATE price_lists SET name = ?1 WHERE id = ?2", params![name, id])?;
+        self.get_price_list(id)?.ok_or_else(|| CoreError::NotFound(format!("price list {id}")))
+    }
+
+    /// Moves the default flag.
+    ///
+    /// The old default is cleared and the new one set inside one transaction, in that
+    /// order: the partial unique index permits at most one row flagged, so setting before
+    /// clearing would be rejected by the database. There is no way to clear the flag
+    /// without naming a replacement, which is what keeps "exactly one" from decaying into
+    /// "at most one".
+    pub fn set_default_price_list(&mut self, id: i64) -> Result<PriceList> {
+        self.require_price_list(id)?;
+
+        let tx = self.conn.transaction()?;
+        tx.execute("UPDATE price_lists SET is_default = 0 WHERE is_default = 1", [])?;
+        tx.execute("UPDATE price_lists SET is_default = 1 WHERE id = ?1", [id])?;
+        tx.commit()?;
+
+        self.get_price_list(id)?.ok_or_else(|| CoreError::NotFound(format!("price list {id}")))
+    }
+
+    /// Points a customer at a price list, or back at the default with `None`.
+    pub fn set_customer_price_list(
+        &mut self,
+        customer_id: i64,
+        price_list_id: Option<i64>,
+    ) -> Result<Customer> {
+        if let Some(id) = price_list_id {
+            self.require_price_list(id)?;
+        }
+        let customer = self
+            .get_customer(customer_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("customer {customer_id}")))?;
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE customers SET price_list_id = ?1 WHERE id = ?2",
+            params![price_list_id, customer_id],
+        )?;
+        let updated = Customer { price_list_id, ..customer };
+        // Queued like every other customer change: the back office prices from the same
+        // lists, so it needs to know which one this buyer is on.
+        enqueue(&tx, "customers", updated.id, SyncOp::Update, &updated)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    // ------------------------------------------------------------- item prices
+
+    /// What one customer pays for one item.
+    ///
+    /// **This is the only thing billing should ask.** `items.rate` is the base price and
+    /// the fallback, not the answer: a list with no entry for an item prices it at the
+    /// base rate, which is what lets a shop create a Wholesale list and set rates for the
+    /// twenty items it actually discounts rather than all nine hundred.
+    pub fn resolve_rate(&self, item_id: i64, price_list_id: i64) -> Result<ResolvedRate> {
+        let item = self
+            .get_item(item_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("item {item_id}")))?;
+
+        let listed: Option<f64> = self
+            .conn
+            .query_row(
+                "SELECT rate FROM item_prices WHERE item_id = ?1 AND price_list_id = ?2",
+                params![item_id, price_list_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        Ok(ResolvedRate {
+            item_id,
+            price_list_id,
+            rate: listed.unwrap_or(item.rate),
+            from_price_list: listed.is_some(),
+        })
+    }
+
+    /// [`Db::resolve_rate`] for several items at once, for repricing a bill in one call.
+    pub fn resolve_rates(&self, item_ids: &[i64], price_list_id: i64) -> Result<Vec<ResolvedRate>> {
+        item_ids.iter().map(|id| self.resolve_rate(*id, price_list_id)).collect()
+    }
+
+    /// Every list with this item's rate on it, for the item edit form. Lists with no entry
+    /// come back with `None` rather than the base rate, so the form can show an empty box
+    /// that means "falls back" instead of a number that looks set.
+    pub fn item_prices(&self, item_id: i64) -> Result<Vec<ItemPriceRow>> {
+        let lists = self.price_lists()?;
+        let mut out = Vec::with_capacity(lists.len());
+        for price_list in lists {
+            let rate: Option<f64> = self
+                .conn
+                .query_row(
+                    "SELECT rate FROM item_prices WHERE item_id = ?1 AND price_list_id = ?2",
+                    params![item_id, price_list.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            out.push(ItemPriceRow { price_list, rate });
+        }
+        Ok(out)
+    }
+
+    /// Replaces this item's prices with exactly what was passed.
+    ///
+    /// A list absent from `prices` has its entry removed rather than left behind, so
+    /// clearing a box on the form means "fall back to the base rate" and not "keep
+    /// whatever was there before". All of it in one transaction: a half-applied price
+    /// table is a shop billing the wrong number for however long it takes to notice.
+    pub fn set_item_prices(&mut self, item_id: i64, prices: &[ItemPrice]) -> Result<()> {
+        self.get_item(item_id)?.ok_or_else(|| CoreError::NotFound(format!("item {item_id}")))?;
+
+        for price in prices {
+            if !price.rate.is_finite() || price.rate < 0.0 {
+                return Err(CoreError::Invalid(format!(
+                    "rate must be 0 or more, got {}",
+                    price.rate
+                )));
+            }
+            self.require_price_list(price.price_list_id)?;
+        }
+
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM item_prices WHERE item_id = ?1", [item_id])?;
+        for price in prices {
+            tx.execute(
+                "INSERT INTO item_prices (item_id, price_list_id, rate) VALUES (?1, ?2, ?3)",
+                params![item_id, price.price_list_id, gst::round_money(price.rate)],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn price_list_named(&self, name: &str) -> Result<Option<PriceList>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, name, is_default, created_at
+                   FROM price_lists WHERE name = ?1 COLLATE NOCASE",
+                [name],
+                price_list_from_row,
+            )
+            .optional()?)
+    }
+
+    fn require_price_list(&self, id: i64) -> Result<PriceList> {
+        self.get_price_list(id)?.ok_or_else(|| CoreError::NotFound(format!("price list {id}")))
     }
 
     // -------------------------------------------------------------------- items
@@ -505,6 +772,25 @@ impl Db {
         )?;
         let rows = stmt.query_map([pattern], item_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// [`Db::search_item`] with every rate already resolved for one price list.
+    ///
+    /// The picker shows these rather than bare items, so the number a cashier reads off
+    /// the list is the number that will be billed. Showing the base rate and then billing
+    /// a different one is how a counter loses an argument with a customer.
+    pub fn search_item_priced(&self, query: &str, price_list_id: i64) -> Result<Vec<PricedItem>> {
+        self.search_item(query)?
+            .into_iter()
+            .map(|item| {
+                let resolved = self.resolve_rate(item.id, price_list_id)?;
+                Ok(PricedItem {
+                    item,
+                    rate: resolved.rate,
+                    from_price_list: resolved.from_price_list,
+                })
+            })
+            .collect()
     }
 
     /// Inserts an item, or updates the existing one with that item code.
@@ -719,10 +1005,15 @@ impl Db {
             None => Local::now().date_naive(),
         };
 
+        // Which prices apply, decided here from the stored customer rather than from
+        // anything the caller sent: a screen that thinks this buyer is on Retail cannot
+        // talk the database into billing them at Retail.
+        let price_list = self.price_list_for_customer(customer.id)?;
+
         // Price the lines before opening the transaction.
         let mut priced = Vec::with_capacity(new.lines.len());
         for line in &new.lines {
-            priced.push(self.price_line(line)?);
+            priced.push(self.price_line(line, price_list.id)?);
         }
 
         let taxables: Vec<TaxableLine> =
@@ -802,7 +1093,9 @@ impl Db {
             .get_customer(invoice.customer_id)?
             .ok_or_else(|| CoreError::NotFound(format!("customer {}", invoice.customer_id)))?;
 
-        let (item_id, taxable) = self.price_line(line)?;
+        // The buyer's list, the same one the invoice itself was priced from.
+        let price_list = self.price_list_for_customer(customer.id)?;
+        let (item_id, taxable) = self.price_line(line, price_list.id)?;
         let mut taxables: Vec<TaxableLine> = self
             .invoice_lines(invoice_id)?
             .iter()
@@ -1346,22 +1639,37 @@ impl Db {
 
     // ---------------------------------------------------------------- internals
 
-    /// Resolves a caller's line against the item master, applying rate and tax overrides.
-    fn price_line(&self, line: &NewInvoiceLine) -> Result<(i64, TaxableLine)> {
+    /// Resolves a caller's line against the item master and a price list.
+    ///
+    /// An explicit `rate` still wins — that is the override path, and it is what a future
+    /// per-line discount will use. With no override the rate comes from the price list,
+    /// **never** from `items.rate` directly: the base rate is the fallback inside
+    /// [`Db::resolve_rate`], not a second source of truth here.
+    fn price_line(&self, line: &NewInvoiceLine, price_list_id: i64) -> Result<(i64, TaxableLine)> {
         let item = self
             .get_item(line.item_id)?
             .ok_or_else(|| CoreError::NotFound(format!("item {}", line.item_id)))?;
         if line.qty <= 0.0 {
             return Err(CoreError::Invalid(format!("qty must be positive, got {}", line.qty)));
         }
+        let rate = match line.rate {
+            Some(rate) => rate,
+            None => self.resolve_rate(item.id, price_list_id)?.rate,
+        };
         Ok((
             item.id,
-            TaxableLine {
-                qty: line.qty,
-                rate: line.rate.unwrap_or(item.rate),
-                tax_rate: line.tax_rate.unwrap_or(item.tax_rate),
-            },
+            TaxableLine { qty: line.qty, rate, tax_rate: line.tax_rate.unwrap_or(item.tax_rate) },
         ))
+    }
+
+    /// Prices a whole invoice the way [`Db::create_invoice`] would, without saving it.
+    ///
+    /// The desktop calls this before saving so the totals it checks against the screen are
+    /// core's own, resolved through the customer's price list, rather than a restatement
+    /// of the rates the screen sent back.
+    pub fn price_invoice_lines(&self, new: &NewInvoice) -> Result<Vec<TaxableLine>> {
+        let price_list = self.price_list_for_customer(new.customer_id)?;
+        new.lines.iter().map(|l| Ok(self.price_line(l, price_list.id)?.1)).collect()
     }
 
     // ------------------------------------------------------------------ analytics
@@ -1696,6 +2004,15 @@ fn user_from_row(row: &Row<'_>) -> rusqlite::Result<User> {
     })
 }
 
+fn price_list_from_row(row: &Row<'_>) -> rusqlite::Result<PriceList> {
+    Ok(PriceList {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        is_default: row.get::<_, i64>(2)? != 0,
+        created_at: row.get(3)?,
+    })
+}
+
 fn customer_from_row(row: &Row<'_>) -> rusqlite::Result<Customer> {
     Ok(Customer {
         id: row.get(0)?,
@@ -1703,6 +2020,7 @@ fn customer_from_row(row: &Row<'_>) -> rusqlite::Result<Customer> {
         gstin: row.get(2)?,
         place_of_supply: row.get(3)?,
         mobile: row.get(4)?,
+        price_list_id: row.get(5)?,
     })
 }
 

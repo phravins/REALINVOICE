@@ -9,9 +9,10 @@ use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use realinvoice_core::{
     auth, gst, sync, CreditNote, CreditNoteDetail, CreditableLine, Customer, DailyTotal, DateRange,
     DemoDataCleared, Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine, InvoiceNet,
-    InvoiceSummary, Item, ItemFilter, Lockout, LoginOutcome, NewCreditNote, NewCreditNoteLine,
-    NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser, PaymentMix, Role, SalesSummary,
-    SyncStatus, TopItem, User, LOGIN_WINDOW_MINUTES, MAX_FAILED_LOGINS,
+    InvoiceSummary, Item, ItemFilter, ItemPrice, ItemPriceRow, Lockout, LoginOutcome,
+    NewCreditNote, NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser,
+    PaymentMix, PriceList, PricedItem, ResolvedRate, Role, SalesSummary, SyncStatus, TopItem, User,
+    LOGIN_WINDOW_MINUTES, MAX_FAILED_LOGINS,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -334,6 +335,10 @@ pub struct NewCustomerPayload {
     pub gstin: Option<String>,
     pub place_of_supply: String,
     pub mobile: String,
+    /// Absent or null means the default list, which is what the form sends when nobody
+    /// picks one.
+    #[serde(default)]
+    pub price_list_id: Option<i64>,
 }
 
 impl From<NewCustomerPayload> for NewCustomer {
@@ -343,6 +348,7 @@ impl From<NewCustomerPayload> for NewCustomer {
             gstin: payload.gstin,
             place_of_supply: payload.place_of_supply,
             mobile: payload.mobile,
+            price_list_id: payload.price_list_id,
         }
     }
 }
@@ -586,9 +592,124 @@ pub fn search_customer(
 
 /// Substring search over item code and description.
 #[tauri::command]
-pub fn search_item(query: String, state: State<'_, AppState>) -> Result<Vec<Item>, String> {
+pub fn search_item(
+    query: String,
+    price_list_id: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<Vec<PricedItem>, String> {
     require_session(&state)?;
-    state.db().search_item(&query).map_err(|e| e.to_string())
+    let db = state.db();
+    // No list named means nobody is attached yet, so the picker shows what a walk-in
+    // would pay. Attaching a customer re-prices the bill rather than leaving those
+    // numbers standing.
+    let list_id = match price_list_id {
+        Some(id) => id,
+        None => db.default_price_list().map_err(|e| e.to_string())?.id,
+    };
+    db.search_item_priced(&query, list_id).map_err(|e| e.to_string())
+}
+
+// ------------------------------------------------------------- price lists
+
+/// Every price list, default first. Open to any signed-in user: a cashier cannot change
+/// them, but the billing screen has to be able to say which one is being applied.
+#[tauri::command]
+pub fn price_lists(state: State<'_, AppState>) -> Result<Vec<PriceList>, String> {
+    require_session(&state)?;
+    state.db().price_lists().map_err(|e| e.to_string())
+}
+
+/// Which list a customer is billed from — theirs, or the default.
+#[tauri::command]
+pub fn price_list_for_customer(
+    customer_id: i64,
+    state: State<'_, AppState>,
+) -> Result<PriceList, String> {
+    require_session(&state)?;
+    state.db().price_list_for_customer(customer_id).map_err(|e| e.to_string())
+}
+
+/// The list to price against before anyone is attached.
+#[tauri::command]
+pub fn default_price_list(state: State<'_, AppState>) -> Result<PriceList, String> {
+    require_session(&state)?;
+    state.db().default_price_list().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_price_list(name: String, state: State<'_, AppState>) -> Result<PriceList, String> {
+    require_owner(&state)?;
+    state.db().create_price_list(&name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn rename_price_list(
+    id: i64,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<PriceList, String> {
+    require_owner(&state)?;
+    state.db().rename_price_list(id, &name).map_err(|e| e.to_string())
+}
+
+/// Moves the default flag. Un-defaulting the previous list is core's job, in the same
+/// transaction, so the two can never both be set or both be clear.
+#[tauri::command]
+pub fn set_default_price_list(id: i64, state: State<'_, AppState>) -> Result<PriceList, String> {
+    require_owner(&state)?;
+    state.db().set_default_price_list(id).map_err(|e| e.to_string())
+}
+
+/// Puts a customer on a list, or back on the default with `null`.
+///
+/// Owner-only. What a buyer pays is a commercial decision, not a counter one: a cashier
+/// who could move a customer to Wholesale mid-sale could discount any bill at will.
+#[tauri::command]
+pub fn set_customer_price_list(
+    customer_id: i64,
+    price_list_id: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<Customer, String> {
+    require_owner(&state)?;
+    state.db().set_customer_price_list(customer_id, price_list_id).map_err(|e| e.to_string())
+}
+
+/// Every list with this item's rate on it, for the item edit form.
+#[tauri::command]
+pub fn item_prices(item_id: i64, state: State<'_, AppState>) -> Result<Vec<ItemPriceRow>, String> {
+    require_session(&state)?;
+    state.db().item_prices(item_id).map_err(|e| e.to_string())
+}
+
+/// Replaces an item's price table with exactly what the form holds.
+///
+/// A list left blank on the form is simply absent here, and core removes its row — which
+/// is what makes an empty box mean "falls back to the base rate" rather than "unchanged".
+#[tauri::command]
+pub fn set_item_prices(
+    item_id: i64,
+    prices: Vec<ItemPrice>,
+    state: State<'_, AppState>,
+) -> Result<Vec<ItemPriceRow>, String> {
+    require_owner(&state)?;
+    let mut db = state.db();
+    db.set_item_prices(item_id, &prices).map_err(|e| e.to_string())?;
+    db.item_prices(item_id).map_err(|e| e.to_string())
+}
+
+/// What these items cost on this list, for repricing a bill in one call.
+///
+/// The billing screen calls this when a customer is attached after items are already on
+/// the bill: the rates it assumed were the default list's, and this is what they should
+/// have been.
+#[tauri::command]
+pub fn resolve_rates(
+    item_ids: Vec<i64>,
+    price_list_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<ResolvedRate>, String> {
+    require_session(&state)?;
+    state.db().resolve_rates(&item_ids, price_list_id).map_err(|e| e.to_string())
 }
 
 // ------------------------------------------------------------- credit notes
@@ -838,7 +959,13 @@ pub fn create_invoice(
         .ok_or_else(|| format!("customer {} no longer exists", new_invoice.customer_id))?;
 
     if let Some(expected) = expected {
-        check_expected_totals(&expected, &new_invoice, &customer.place_of_supply, db.home_state())?;
+        // Priced by core, through this customer's price list, and only then compared with
+        // what the screen showed. Before price lists the frontend sent the rates and this
+        // check could only confirm core agreed with itself; now it catches the case that
+        // matters — a bill totalled at retail for a customer the database has on
+        // wholesale.
+        let priced = db.price_invoice_lines(&new_invoice).map_err(|e| e.to_string())?;
+        check_expected_totals(&expected, &priced, &customer.place_of_supply, db.home_state())?;
     }
 
     let invoice = db.create_invoice(&new_invoice).map_err(|e| e.to_string())?;
@@ -848,29 +975,20 @@ pub fn create_invoice(
     Ok(SavedInvoice { invoice, lines, customer, queued_sync_rows })
 }
 
-/// Re-prices the rows and compares against what the panel displayed.
+/// Compares what the panel displayed against lines core has already priced.
 ///
-/// Only meaningful when every row carries its own rate and tax rate; a row that defers to
-/// the item master is priced inside core during the save, and re-deriving that here would
-/// mean a second copy of core's pricing rules. Those rows skip the check rather than get
-/// a guess.
+/// The rates are not re-derived here — they are handed in from
+/// [`realinvoice_core::Db::price_invoice_lines`], so there is exactly one copy of the
+/// pricing rules and this function's only job is the comparison. A disagreement means the
+/// screen is stale, most often because the customer's price list changed under it, and
+/// the save is refused rather than quietly billing one of the two numbers.
 pub(crate) fn check_expected_totals(
     expected: &ExpectedTotals,
-    new_invoice: &NewInvoice,
+    priced: &[gst::TaxableLine],
     place_of_supply: &str,
     home_state: &str,
 ) -> Result<(), String> {
-    let mut priced = Vec::with_capacity(new_invoice.lines.len());
-    for line in &new_invoice.lines {
-        match (line.rate, line.tax_rate) {
-            (Some(rate), Some(tax_rate)) => {
-                priced.push(gst::TaxableLine { qty: line.qty, rate, tax_rate })
-            }
-            _ => return Ok(()),
-        }
-    }
-
-    let actual = gst::compute_totals(&priced, home_state, place_of_supply);
+    let actual = gst::compute_totals(priced, home_state, place_of_supply);
     let differs = [
         ("subtotal", expected.subtotal, actual.subtotal),
         ("CGST", expected.cgst, actual.cgst),
@@ -1005,9 +1123,9 @@ pub fn quote(place_of_supply: &str, lines: &[QuoteLinePayload]) -> InvoiceQuote 
 #[doc(hidden)]
 pub fn check_expected_totals_for_test(
     expected: &ExpectedTotals,
-    new_invoice: &NewInvoice,
+    priced: &[gst::TaxableLine],
     place_of_supply: &str,
     home_state: &str,
 ) -> Result<(), String> {
-    check_expected_totals(expected, new_invoice, place_of_supply, home_state)
+    check_expected_totals(expected, priced, place_of_supply, home_state)
 }

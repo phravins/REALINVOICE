@@ -50,7 +50,7 @@ only whether one is set and its last four characters.
 | `node_id` | Which till. Also in the header. |
 | `sent_at` | When this request was built, ISO 8601 with offset. |
 | `rows[].id` | The queue row's id **on that node**. Unique per node, never reused. |
-| `rows[].table_name` | `customers`, `items`, `invoices` or `invoice_lines`. |
+| `rows[].table_name` | `customers`, `items`, `invoices`, `invoice_lines`, `credit_notes` or `credit_note_lines`. **`price_lists` and `item_prices` are not sent yet** — see the note under `customers` below. |
 | `rows[].row_id` | The record's primary key on that node. |
 | `rows[].op` | `insert` or `update`. |
 | `rows[].recorded_at` | When the write happened locally, `YYYY-MM-DD HH:MM:SS`, local time. |
@@ -80,7 +80,17 @@ Keys are the column names. Money is a JSON number in rupees; `id` fields are int
 // customers
 { "id": 1, "name": "Sri Balaji Traders", "mobile": "9840012345",
   "gstin": "33AABCS1429B1ZP",        // null when unregistered
-  "place_of_supply": "TN" }
+  "place_of_supply": "TN",
+  "price_list_id": null }             // which price list this buyer is billed from;
+                                      // null means whichever list is default, rather
+                                      // than "no pricing". Absent on rows queued before
+                                      // this field existed, and read as null.
+                                      //
+                                      // NOTE: a non-null value names a `price_lists` row
+                                      // the far end has not been sent — those tables are
+                                      // not queued yet. Treat it as opaque, or as null,
+                                      // until the lists themselves are part of this
+                                      // protocol.
 
 // items
 { "id": 7, "item_code": "SAND-M-UNIT", "description": "M-Sand per unit",

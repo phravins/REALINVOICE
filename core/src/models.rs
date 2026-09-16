@@ -64,6 +64,12 @@ pub struct Customer {
     pub gstin: Option<String>,
     pub place_of_supply: String,
     pub mobile: String,
+    /// Which price list this buyer is billed from. `None` means whichever list is
+    /// currently default — not "no pricing", and deliberately not a copy of today's
+    /// default id, so a shop that renames or re-points its default does not leave every
+    /// existing customer pinned to the old one.
+    #[serde(default)]
+    pub price_list_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,6 +78,8 @@ pub struct NewCustomer {
     pub gstin: Option<String>,
     pub place_of_supply: String,
     pub mobile: String,
+    #[serde(default)]
+    pub price_list_id: Option<i64>,
 }
 
 /// A sellable line item. `tax_rate` is the total GST percentage (e.g. 18.0), which the
@@ -81,6 +89,9 @@ pub struct Item {
     pub id: i64,
     pub item_code: String,
     pub description: String,
+    /// The item's **base** rate, and the fallback for any price list with no entry for
+    /// it. This is not necessarily what a given customer is billed — see
+    /// [`crate::Db::resolve_rate`], which is the only thing billing should ask.
     pub rate: f64,
     pub tax_rate: f64,
     pub uom: String,
@@ -100,6 +111,62 @@ pub struct NewItem {
     pub uom: String,
     #[serde(default)]
     pub custom: bool,
+}
+
+/// A named set of prices — "Retail", "Wholesale", "VIP".
+///
+/// Exactly one list is the default at any time, enforced by a partial unique index rather
+/// than by convention. The default is what a customer with no list of their own is billed
+/// from, and what the billing screen assumes before anyone is attached.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PriceList {
+    pub id: i64,
+    pub name: String,
+    pub is_default: bool,
+    pub created_at: String,
+}
+
+/// One item's rate on one list. Absent rather than zero when a list does not price an
+/// item: a missing entry falls back to the item's base rate, where a zero would mean the
+/// shop is giving it away.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ItemPrice {
+    pub item_id: i64,
+    pub price_list_id: i64,
+    pub rate: f64,
+}
+
+/// What the item edit form draws: every list, and this item's rate on it if it has one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ItemPriceRow {
+    pub price_list: PriceList,
+    /// `None` where the list has no entry and the base rate applies.
+    pub rate: Option<f64>,
+}
+
+/// The answer to "what does this customer pay for this item".
+///
+/// Carries where the number came from as well as the number itself, so a screen can say
+/// "this is the Wholesale rate" rather than leaving a cashier to wonder why the total
+/// differs from the sticker price.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedRate {
+    pub item_id: i64,
+    pub price_list_id: i64,
+    pub rate: f64,
+    /// False when the list had no entry for this item and its base rate was used.
+    pub from_price_list: bool,
+}
+
+/// A catalogue item with its rate already resolved for one price list.
+///
+/// The picker shows these rather than bare [`Item`]s so the rate on screen is the rate
+/// that will be billed, not the base rate that may or may not be.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PricedItem {
+    pub item: Item,
+    pub rate: f64,
+    pub from_price_list: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
