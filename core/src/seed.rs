@@ -16,6 +16,7 @@ pub fn demo_customers() -> Vec<NewCustomer> {
             place_of_supply: "TN".into(),
             mobile: "9840012345".into(),
             price_list_id: None,
+            credit_limit: None,
         },
         NewCustomer {
             name: "Kaveri Hardware".into(),
@@ -23,6 +24,7 @@ pub fn demo_customers() -> Vec<NewCustomer> {
             place_of_supply: "TN".into(),
             mobile: "9791045678".into(),
             price_list_id: None,
+            credit_limit: None,
         },
         // Inter-state, so the IGST path is reachable from the UI too.
         NewCustomer {
@@ -31,6 +33,7 @@ pub fn demo_customers() -> Vec<NewCustomer> {
             place_of_supply: "KA".into(),
             mobile: "9845567890".into(),
             price_list_id: None,
+            credit_limit: None,
         },
         NewCustomer {
             name: "Ishta Capital Investments".into(),
@@ -38,6 +41,7 @@ pub fn demo_customers() -> Vec<NewCustomer> {
             place_of_supply: "TN".into(),
             mobile: "9600011223".into(),
             price_list_id: None,
+            credit_limit: None,
         },
         // Unregistered walk-in: no GSTIN.
         NewCustomer {
@@ -46,6 +50,7 @@ pub fn demo_customers() -> Vec<NewCustomer> {
             place_of_supply: "TN".into(),
             mobile: "9000000000".into(),
             price_list_id: None,
+            credit_limit: None,
         },
     ]
 }

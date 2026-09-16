@@ -50,7 +50,7 @@ only whether one is set and its last four characters.
 | `node_id` | Which till. Also in the header. |
 | `sent_at` | When this request was built, ISO 8601 with offset. |
 | `rows[].id` | The queue row's id **on that node**. Unique per node, never reused. |
-| `rows[].table_name` | `customers`, `items`, `invoices`, `invoice_lines`, `credit_notes` or `credit_note_lines`. **`price_lists` and `item_prices` are not sent yet** — see the note under `customers` below. |
+| `rows[].table_name` | `customers`, `items`, `invoices`, `invoice_lines`, `credit_notes`, `credit_note_lines` or `payments`. **`price_lists` and `item_prices` are not sent yet** — see the note under `customers` below. |
 | `rows[].row_id` | The record's primary key on that node. |
 | `rows[].op` | `insert` or `update`. |
 | `rows[].recorded_at` | When the write happened locally, `YYYY-MM-DD HH:MM:SS`, local time. |
@@ -110,10 +110,26 @@ Keys are the column names. Money is a JSON number in rupees; `id` fields are int
   "invoice_discount_amount": 0.0,     // the rupees that came to
   "subtotal": 45000.0,                // the TAXABLE value, after every discount
   "cgst": 4050.0, "sgst": 4050.0, "igst": 0.0,
-  "grand_total": 53100.0, "payment_type": "cash",
+  "grand_total": 53100.0,
+  "payment_type": "cash",             // "cash" | "upi" | "card" | "credit".
+                                      // "credit" means the sale went on the customer's
+                                      // account and no money was received.
+  "amount_paid": 53100.0,             // received against this invoice so far
+  "amount_due": 0.0,                  // grand_total less payments and credit notes
+  "payment_status": "paid",           // "unpaid" | "partially_paid" | "paid"
   "sync_status": "pending",           // this node's own bookkeeping; ignore it
   "created_at": "2026-09-13 16:39:48",
   "created_by_user_id": 1 }           // null on invoices raised before sign-in existed
+
+// payments — money actually received. `invoice_id` is null for a payment against the
+// customer's account rather than one bill; a payment larger than the invoice it was
+// aimed at arrives as two rows, one allocated and one not.
+{ "id": 1, "customer_id": 1, "invoice_id": 2, "amount": 2000.0,
+  "payment_method": "cash", "date": "2026-09-16",
+  "notes": "Part payment by hand",   // null when none was typed
+  "sync_status": "pending",          // this node's own bookkeeping; ignore it
+  "created_at": "2026-09-16 11:36:02",
+  "created_by_user_id": 1 }
 
 // invoice_lines
 { "id": 1, "invoice_id": 1, "item_id": 1,

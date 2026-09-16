@@ -204,7 +204,7 @@ fn discount_amount(kind: DiscountType, value: f64, base: f64, what: &str) -> Res
 
 /// Tolerance for comparing two money figures that should be equal. Half a paisa: closer
 /// than that and the difference cannot survive being rounded onto an invoice.
-const MONEY_EPSILON: f64 = 0.005;
+pub const MONEY_EPSILON: f64 = 0.005;
 
 /// Totals an invoice with discounts, in the order GST requires.
 ///

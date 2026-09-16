@@ -70,6 +70,11 @@ pub struct Customer {
     /// existing customer pinned to the old one.
     #[serde(default)]
     pub price_list_id: Option<i64>,
+    /// How much this buyer may owe at once. `None` means nobody has set one, which is
+    /// not the same as zero — a shop that has never thought about credit limits should
+    /// not have every credit sale refused.
+    #[serde(default)]
+    pub credit_limit: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,6 +85,8 @@ pub struct NewCustomer {
     pub mobile: String,
     #[serde(default)]
     pub price_list_id: Option<i64>,
+    #[serde(default)]
+    pub credit_limit: Option<f64>,
 }
 
 /// A sellable line item. `tax_rate` is the total GST percentage (e.g. 18.0), which the
@@ -157,6 +164,194 @@ impl std::fmt::Display for DiscountType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Where an invoice stands, from its `amount_due`.
+///
+/// Stored as well as derived so the history list can filter and sort on it without
+/// recomputing every row. An invoice settled entirely by credit notes reads as `Paid`:
+/// nothing is owed, which is what this field answers, even though no money arrived.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentStatus {
+    #[default]
+    Unpaid,
+    PartiallyPaid,
+    Paid,
+}
+
+impl PaymentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PaymentStatus::Unpaid => "unpaid",
+            PaymentStatus::PartiallyPaid => "partially_paid",
+            PaymentStatus::Paid => "paid",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "unpaid" => Some(PaymentStatus::Unpaid),
+            "partially_paid" => Some(PaymentStatus::PartiallyPaid),
+            "paid" => Some(PaymentStatus::Paid),
+            _ => None,
+        }
+    }
+
+    /// Serde default for rows that predate the field. Everything billed before the
+    /// ledger existed was settled at the counter.
+    pub fn default_paid() -> Self {
+        PaymentStatus::Paid
+    }
+}
+
+impl std::fmt::Display for PaymentStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Money actually received. Separate from the invoice because it is a separate event:
+/// it can arrive weeks later, in parts, or against no particular bill at all.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Payment {
+    pub id: i64,
+    pub customer_id: i64,
+    /// `None` for a payment against the account rather than one bill.
+    pub invoice_id: Option<i64>,
+    pub amount: f64,
+    pub payment_method: String,
+    /// `YYYY-MM-DD`.
+    pub date: String,
+    pub notes: Option<String>,
+    pub sync_status: String,
+    pub created_at: String,
+    pub created_by_user_id: Option<i64>,
+}
+
+/// A payment as the Record Payment form supplies it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewPayment {
+    pub customer_id: i64,
+    /// The invoice to settle, or `None` to credit the account generally.
+    #[serde(default)]
+    pub invoice_id: Option<i64>,
+    pub amount: f64,
+    pub payment_method: String,
+    /// Defaults to today when absent.
+    #[serde(default)]
+    pub date: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// From the session, never the caller.
+    #[serde(default)]
+    pub created_by_user_id: Option<i64>,
+}
+
+/// What one `record_payment` call actually did.
+///
+/// A payment bigger than the invoice it was aimed at becomes two rows: the part that
+/// settles the bill, and the rest as account credit. Both are returned so the screen can
+/// say so rather than leaving somebody to work out where their money went.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordedPayment {
+    /// The row applied to the invoice, if one was.
+    pub applied: Option<Payment>,
+    /// The row left on account — the overflow, or the whole payment when no invoice was
+    /// named.
+    pub on_account: Option<Payment>,
+    /// The customer's balance after both.
+    pub balance: f64,
+}
+
+/// One line of a customer's ledger. Invoices, payments and credit notes interleaved by
+/// date, oldest first, with the balance after each.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LedgerEntry {
+    pub kind: LedgerEntryKind,
+    /// The row's id in its own table, for linking through to it.
+    pub id: i64,
+    /// `YYYY-MM-DD`.
+    pub date: String,
+    /// `RI-2026-0001`, `CN-2026-0001`, or the payment method.
+    pub reference: String,
+    pub description: String,
+    /// What this added to the balance: positive for an invoice, negative for a payment
+    /// or a credit note.
+    pub change: f64,
+    /// The running balance after this entry.
+    pub balance: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerEntryKind {
+    Invoice,
+    Payment,
+    CreditNote,
+}
+
+/// A customer's ledger: who they are, what they owe, and how they got there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomerLedger {
+    pub customer: Customer,
+    /// Positive means they owe the shop; negative means the shop holds their money.
+    pub balance: f64,
+    pub billed_total: f64,
+    pub paid_total: f64,
+    pub credited_total: f64,
+    pub entries: Vec<LedgerEntry>,
+    /// Invoices with something still owing, oldest first — what a payment can be
+    /// applied to.
+    pub open_invoices: Vec<Invoice>,
+}
+
+/// A customer as the Customers list shows them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomerSummary {
+    pub customer: Customer,
+    pub outstanding: f64,
+    pub invoice_count: i64,
+    /// The most recent invoice date, if they have ever been billed.
+    pub last_billed: Option<String>,
+}
+
+/// What the Customers list is filtered and ordered by.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CustomerFilter {
+    /// Substring matched against name or mobile.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Only customers who owe something.
+    #[serde(default)]
+    pub owing_only: bool,
+    #[serde(default)]
+    pub sort: CustomerSort,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomerSort {
+    #[default]
+    Name,
+    /// Most owed first — the view a shop owner actually opens.
+    OutstandingDesc,
+    OutstandingAsc,
+}
+
+/// Whether a credit sale fits inside a customer's limit.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CreditCheck {
+    /// What they owe before this sale.
+    pub balance: f64,
+    /// What the sale would add.
+    pub amount: f64,
+    /// Their limit, or `None` if nobody has set one.
+    pub credit_limit: Option<f64>,
+    /// True when the sale would take them past it.
+    pub over_limit: bool,
 }
 
 /// A named set of prices — "Retail", "Wholesale", "VIP".
@@ -244,6 +439,15 @@ pub struct Invoice {
     pub igst: f64,
     pub grand_total: f64,
     pub payment_type: String,
+    /// Received against this invoice so far. Maintained by
+    /// [`crate::Db::refresh_invoice_balance`], never written on its own.
+    #[serde(default)]
+    pub amount_paid: f64,
+    /// `grand_total - amount_paid - credit notes`. What is still owed on this bill.
+    #[serde(default)]
+    pub amount_due: f64,
+    #[serde(default = "PaymentStatus::default_paid")]
+    pub payment_status: PaymentStatus,
     pub sync_status: String,
     /// Local wall-clock time the invoice was raised, `YYYY-MM-DD HH:MM:SS`. Local rather
     /// than UTC so it agrees with `date`, which is the counter's own day.

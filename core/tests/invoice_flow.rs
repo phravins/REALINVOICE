@@ -2,9 +2,10 @@
 //! reopened SQLite file with its lines and its `sync_queue` rows intact.
 
 use realinvoice_core::{
-    seed, CoreError, DateRange, Db, DiscountType, InvoiceFilter, ItemFilter, ItemPrice,
-    LoginOutcome, NewCreditNote, NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine,
-    NewItem, NewUser, Role, SyncBatch, User,
+    seed, CoreError, CustomerFilter, CustomerSort, DateRange, Db, DiscountType, InvoiceFilter,
+    ItemFilter, ItemPrice, LedgerEntryKind, LoginOutcome, NewCreditNote, NewCreditNoteLine,
+    NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewPayment, NewUser, PaymentStatus, Role,
+    SyncBatch, User,
 };
 
 fn seeded_db() -> Db {
@@ -84,6 +85,7 @@ fn sync_queue_picks_up_the_invoice_and_every_line() {
             place_of_supply: "TN".into(),
             mobile: "9840012345".into(),
             price_list_id: None,
+            credit_limit: None,
         })
         .unwrap();
     let widget = db
@@ -400,6 +402,7 @@ fn a_new_customer_can_be_registered_from_the_counter() {
             place_of_supply: "tn".into(),
             mobile: " 9884455661 ".into(),
             price_list_id: None,
+            credit_limit: None,
         })
         .expect("register customer");
 
@@ -428,6 +431,7 @@ fn registering_a_duplicate_mobile_is_refused() {
         place_of_supply: "TN".into(),
         mobile: "9840012345".into(),
         price_list_id: None,
+        credit_limit: None,
     });
     assert!(matches!(duplicate, Err(CoreError::Invalid(_))));
 
@@ -446,6 +450,7 @@ fn a_blank_gstin_is_stored_as_unregistered() {
             place_of_supply: "TN".into(),
             mobile: "9112233445".into(),
             price_list_id: None,
+            credit_limit: None,
         })
         .unwrap();
 
@@ -461,6 +466,7 @@ fn incomplete_customers_are_refused() {
         place_of_supply: "TN".into(),
         mobile: "9111111111".into(),
         price_list_id: None,
+        credit_limit: None,
     };
 
     let no_name = db.create_customer(&NewCustomer { name: "  ".into(), ..base.clone() });
@@ -1947,6 +1953,7 @@ fn a_credit_note_reverses_the_tax_that_was_actually_charged() {
             gstin: Some("29AABCS1429B1ZP".into()),
             place_of_supply: "KA".into(),
             price_list_id: None,
+            credit_limit: None,
         })
         .unwrap();
     let rack = item(&db, "RACK-42U-PRO");
@@ -2334,6 +2341,7 @@ fn clearing_demo_data_twice_is_harmless_and_spares_real_rows() {
             gstin: None,
             place_of_supply: "TN".into(),
             price_list_id: None,
+            credit_limit: None,
         })
         .unwrap();
 
@@ -2422,6 +2430,7 @@ fn two_customers_on_different_lists_are_billed_different_rates_for_the_same_item
             gstin: None,
             place_of_supply: "TN".into(),
             price_list_id: Some(wholesale.id),
+            credit_limit: None,
         })
         .unwrap();
     let walk_in = customer(&db, "9840012345"); // left on the default
@@ -2501,6 +2510,7 @@ fn an_item_with_no_entry_on_the_list_falls_back_to_its_base_rate() {
             gstin: None,
             place_of_supply: "TN".into(),
             price_list_id: Some(wholesale.id),
+            credit_limit: None,
         })
         .unwrap();
 
@@ -3117,4 +3127,508 @@ fn an_undiscounted_invoice_reports_no_discount_rather_than_a_blank() {
     assert_eq!(line.taxable_value, line.line_total);
     assert_eq!(line.discount_amount, 0.0);
     assert_eq!(line.invoice_discount_share, 0.0);
+}
+
+// ================================================================== ledger
+
+/// A helper that bills `total` worth to a customer on the given terms.
+fn bill(
+    db: &mut Db,
+    customer_id: i64,
+    qty: f64,
+    payment_type: &str,
+    date: &str,
+) -> realinvoice_core::Invoice {
+    let cement = item(db, "CEM-OPC-53"); // 410.00 at 28%
+    db.create_invoice(&NewInvoice {
+        customer_id,
+        date: Some(date.to_string()),
+        payment_type: payment_type.into(),
+        created_by_user_id: None,
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
+        lines: vec![NewInvoiceLine {
+            item_id: cement.id,
+            qty,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }],
+    })
+    .unwrap()
+}
+
+/// Paying at the counter is now a fact with a receipt behind it, not a label.
+#[test]
+fn a_cash_sale_is_recorded_as_paid_with_a_matching_payment() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+
+    let invoice = bill(&mut db, buyer.id, 10.0, "cash", "2026-09-10");
+    assert_eq!(invoice.grand_total, 5_248.00);
+    assert_eq!(invoice.amount_paid, 5_248.00);
+    assert_eq!(invoice.amount_due, 0.0);
+    assert_eq!(invoice.payment_status, PaymentStatus::Paid);
+
+    // A receipt exists for it, for the amount and by the method that was chosen.
+    let payments = db.payments_for_invoice(invoice.id).unwrap();
+    assert_eq!(payments.len(), 1);
+    assert_eq!(payments[0].amount, 5_248.00);
+    assert_eq!(payments[0].payment_method, "cash");
+    assert_eq!(payments[0].invoice_id, Some(invoice.id));
+
+    assert_eq!(db.customer_balance(buyer.id).unwrap(), 0.0, "nothing owed");
+    assert!(db.open_invoices(buyer.id).unwrap().is_empty());
+}
+
+/// The whole point of the stage: "put it on my account".
+#[test]
+fn a_credit_sale_is_unpaid_and_owed_in_full() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+
+    let invoice = bill(&mut db, buyer.id, 10.0, "credit", "2026-09-10");
+    assert_eq!(invoice.amount_paid, 0.0);
+    assert_eq!(invoice.amount_due, 5_248.00);
+    assert_eq!(invoice.payment_status, PaymentStatus::Unpaid);
+
+    assert!(db.payments_for_invoice(invoice.id).unwrap().is_empty(), "no receipt was issued");
+    assert_eq!(db.customer_balance(buyer.id).unwrap(), 5_248.00);
+    assert_eq!(db.open_invoices(buyer.id).unwrap().len(), 1);
+}
+
+/// Part now, the rest later — the sequence the verification walks through.
+#[test]
+fn partial_payments_move_the_status_and_then_clear_it() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let invoice = bill(&mut db, buyer.id, 10.0, "credit", "2026-09-10");
+
+    let first = db
+        .record_payment(&NewPayment {
+            customer_id: buyer.id,
+            invoice_id: Some(invoice.id),
+            amount: 2_000.0,
+            payment_method: "cash".into(),
+            date: Some("2026-09-12".into()),
+            notes: Some("Part payment".into()),
+            created_by_user_id: None,
+        })
+        .unwrap();
+    assert_eq!(first.applied.as_ref().unwrap().amount, 2_000.00);
+    assert!(first.on_account.is_none(), "it all fitted on the invoice");
+    assert_eq!(first.balance, 3_248.00);
+
+    let after_first = db.get_invoice(invoice.id).unwrap().unwrap();
+    assert_eq!(after_first.amount_paid, 2_000.00);
+    assert_eq!(after_first.amount_due, 3_248.00);
+    assert_eq!(after_first.payment_status, PaymentStatus::PartiallyPaid);
+
+    let second = db
+        .record_payment(&NewPayment {
+            customer_id: buyer.id,
+            invoice_id: Some(invoice.id),
+            amount: 3_248.0,
+            payment_method: "upi".into(),
+            date: Some("2026-09-20".into()),
+            notes: None,
+            created_by_user_id: None,
+        })
+        .unwrap();
+    assert_eq!(second.balance, 0.0);
+
+    let cleared = db.get_invoice(invoice.id).unwrap().unwrap();
+    assert_eq!(cleared.amount_paid, 5_248.00);
+    assert_eq!(cleared.amount_due, 0.0);
+    assert_eq!(cleared.payment_status, PaymentStatus::Paid);
+    assert!(db.open_invoices(buyer.id).unwrap().is_empty());
+}
+
+/// Money handed over is never refused and never lost.
+#[test]
+fn a_payment_bigger_than_the_invoice_leaves_the_rest_on_account() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let invoice = bill(&mut db, buyer.id, 10.0, "credit", "2026-09-10"); // 5,248.00
+
+    let recorded = db
+        .record_payment(&NewPayment {
+            customer_id: buyer.id,
+            invoice_id: Some(invoice.id),
+            amount: 8_000.0,
+            payment_method: "cash".into(),
+            date: None,
+            notes: None,
+            created_by_user_id: None,
+        })
+        .unwrap();
+
+    // Split in two: what the bill could absorb, and the rest.
+    assert_eq!(recorded.applied.as_ref().unwrap().amount, 5_248.00);
+    assert_eq!(recorded.applied.as_ref().unwrap().invoice_id, Some(invoice.id));
+    assert_eq!(recorded.on_account.as_ref().unwrap().amount, 2_752.00);
+    assert_eq!(recorded.on_account.as_ref().unwrap().invoice_id, None);
+
+    assert_eq!(db.get_invoice(invoice.id).unwrap().unwrap().payment_status, PaymentStatus::Paid);
+    // The shop is now holding 2,752.00 of theirs.
+    assert_eq!(recorded.balance, -2_752.00);
+    assert_eq!(db.customer_balance(buyer.id).unwrap(), -2_752.00);
+
+    // And that credit settles the next bill's worth of debt on its own.
+    bill(&mut db, buyer.id, 5.0, "credit", "2026-09-15"); // 2,624.00
+    assert_eq!(db.customer_balance(buyer.id).unwrap(), -128.00);
+}
+
+/// A payment against no particular bill, from somebody clearing a running balance.
+#[test]
+fn an_account_payment_reduces_the_balance_without_touching_any_invoice() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let first = bill(&mut db, buyer.id, 10.0, "credit", "2026-09-10"); // 5,248.00
+    let second = bill(&mut db, buyer.id, 5.0, "credit", "2026-09-11"); // 2,624.00
+    assert_eq!(db.customer_balance(buyer.id).unwrap(), 7_872.00);
+
+    let recorded = db
+        .record_payment(&NewPayment {
+            customer_id: buyer.id,
+            invoice_id: None,
+            amount: 3_000.0,
+            payment_method: "bank transfer".into(),
+            date: Some("2026-09-14".into()),
+            notes: Some("Towards the account".into()),
+            created_by_user_id: None,
+        })
+        .unwrap();
+
+    assert!(recorded.applied.is_none());
+    assert_eq!(recorded.on_account.as_ref().unwrap().amount, 3_000.00);
+    assert_eq!(recorded.balance, 4_872.00);
+
+    // Neither invoice moved: the money was not put against either of them.
+    assert_eq!(db.get_invoice(first.id).unwrap().unwrap().amount_due, 5_248.00);
+    assert_eq!(db.get_invoice(second.id).unwrap().unwrap().amount_due, 2_624.00);
+    assert_eq!(db.open_invoices(buyer.id).unwrap().len(), 2);
+}
+
+/// A credit note reduces what is owed exactly as a payment does, and is counted apart.
+#[test]
+fn a_credit_note_reduces_what_is_owed_without_being_a_payment() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let invoice = bill(&mut db, buyer.id, 10.0, "credit", "2026-09-10"); // 5,248.00
+
+    let line = db.creditable_lines(invoice.id).unwrap().remove(0);
+    db.create_credit_note(&NewCreditNote {
+        original_invoice_id: invoice.id,
+        date: Some("2026-09-13".into()),
+        reason: "Two bags returned".into(),
+        created_by_user_id: None,
+        lines: vec![NewCreditNoteLine { invoice_line_id: line.invoice_line_id, qty: 2.0 }],
+    })
+    .unwrap();
+
+    // 2 x 410 = 820 plus 28% = 1,049.60 off what is owed.
+    let after = db.get_invoice(invoice.id).unwrap().unwrap();
+    assert_eq!(after.amount_due, 4_198.40);
+    assert_eq!(after.amount_paid, 0.0, "a credit note is not money received");
+    assert_eq!(after.payment_status, PaymentStatus::PartiallyPaid);
+    assert_eq!(db.customer_balance(buyer.id).unwrap(), 4_198.40);
+
+    let ledger = db.customer_ledger(buyer.id).unwrap();
+    assert_eq!(ledger.credited_total, 1_049.60);
+    assert_eq!(ledger.paid_total, 0.0);
+}
+
+/// The passbook: everything in date order with the balance after each line.
+#[test]
+fn the_ledger_interleaves_invoices_payments_and_credit_notes_by_date() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+
+    let first = bill(&mut db, buyer.id, 10.0, "credit", "2026-09-10"); // 5,248.00
+    db.record_payment(&NewPayment {
+        customer_id: buyer.id,
+        invoice_id: Some(first.id),
+        amount: 2_000.0,
+        payment_method: "cash".into(),
+        date: Some("2026-09-12".into()),
+        notes: None,
+        created_by_user_id: None,
+    })
+    .unwrap();
+
+    let second = bill(&mut db, buyer.id, 5.0, "credit", "2026-09-14"); // 2,624.00
+    let line = db.creditable_lines(second.id).unwrap().remove(0);
+    db.create_credit_note(&NewCreditNote {
+        original_invoice_id: second.id,
+        date: Some("2026-09-16".into()),
+        reason: "One bag short".into(),
+        created_by_user_id: None,
+        lines: vec![NewCreditNoteLine { invoice_line_id: line.invoice_line_id, qty: 1.0 }],
+    })
+    .unwrap();
+
+    let ledger = db.customer_ledger(buyer.id).unwrap();
+    let shape: Vec<(&str, f64, f64)> = ledger
+        .entries
+        .iter()
+        .map(|e| {
+            let kind = match e.kind {
+                LedgerEntryKind::Invoice => "invoice",
+                LedgerEntryKind::Payment => "payment",
+                LedgerEntryKind::CreditNote => "credit note",
+            };
+            (kind, e.change, e.balance)
+        })
+        .collect();
+
+    assert_eq!(
+        shape,
+        vec![
+            ("invoice", 5_248.00, 5_248.00),
+            ("payment", -2_000.00, 3_248.00),
+            ("invoice", 2_624.00, 5_872.00),
+            ("credit note", -524.80, 5_347.20),
+        ]
+    );
+
+    // The running balance ends where the balance query says it does.
+    assert_eq!(ledger.entries.last().unwrap().balance, ledger.balance);
+    assert_eq!(ledger.balance, 5_347.20);
+    assert_eq!(ledger.billed_total, 7_872.00);
+    assert_eq!(ledger.paid_total, 2_000.00);
+    assert_eq!(ledger.credited_total, 524.80);
+    assert_eq!(ledger.open_invoices.len(), 2);
+}
+
+/// A bill raised and settled on the same day reads the way it happened.
+#[test]
+fn same_day_entries_show_the_invoice_before_what_came_off_it() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+
+    // A cash sale writes both rows with today's date.
+    let invoice = bill(&mut db, buyer.id, 10.0, "cash", "2026-09-10");
+    let ledger = db.customer_ledger(buyer.id).unwrap();
+
+    assert_eq!(ledger.entries.len(), 2);
+    assert_eq!(ledger.entries[0].kind, LedgerEntryKind::Invoice);
+    assert_eq!(ledger.entries[0].balance, 5_248.00, "billed first");
+    assert_eq!(ledger.entries[1].kind, LedgerEntryKind::Payment);
+    assert_eq!(ledger.entries[1].balance, 0.0, "then settled");
+    assert_eq!(ledger.entries[0].reference, invoice.invoice_no);
+}
+
+/// The view a shop owner actually opens.
+#[test]
+fn the_customers_list_shows_and_sorts_by_what_is_owed() {
+    let mut db = seeded_db();
+    let balaji = customer(&db, "9840012345");
+    let kaveri = customer(&db, "9791045678");
+
+    bill(&mut db, balaji.id, 10.0, "credit", "2026-09-10"); // 5,248.00 owed
+    bill(&mut db, kaveri.id, 30.0, "credit", "2026-09-10"); // 15,744.00 owed
+    bill(&mut db, balaji.id, 5.0, "cash", "2026-09-11"); // settled, owes nothing more
+
+    let by_owed = db
+        .list_customers(&CustomerFilter {
+            sort: CustomerSort::OutstandingDesc,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(by_owed[0].customer.id, kaveri.id);
+    assert_eq!(by_owed[0].outstanding, 15_744.00);
+    assert_eq!(by_owed[1].customer.id, balaji.id);
+    assert_eq!(by_owed[1].outstanding, 5_248.00);
+    assert_eq!(by_owed[2].outstanding, 0.0, "and everyone else owes nothing");
+
+    // The figure matches what that customer's own ledger says, which is the property
+    // that stops the list and the detail page telling two different stories.
+    for summary in &by_owed {
+        let ledger = db.customer_ledger(summary.customer.id).unwrap();
+        assert_eq!(summary.outstanding, ledger.balance, "{}", summary.customer.name);
+    }
+
+    // Only the two who owe something.
+    let owing =
+        db.list_customers(&CustomerFilter { owing_only: true, ..Default::default() }).unwrap();
+    assert_eq!(owing.len(), 2);
+
+    // Ascending puts them the other way up.
+    let ascending = db
+        .list_customers(&CustomerFilter {
+            sort: CustomerSort::OutstandingAsc,
+            owing_only: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(ascending[0].customer.id, balaji.id);
+
+    // And searching narrows it.
+    let found = db
+        .list_customers(&CustomerFilter { text: Some("kaveri".into()), ..Default::default() })
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].customer.id, kaveri.id);
+    assert_eq!(found[0].invoice_count, 1);
+    assert_eq!(found[0].last_billed.as_deref(), Some("2026-09-10"));
+}
+
+#[test]
+fn a_credit_limit_is_checked_against_what_is_already_owed() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+
+    // Nobody has set a limit, so nothing is over it.
+    let unlimited = db.check_credit_limit(buyer.id, 1_000_000.0).unwrap();
+    assert_eq!(unlimited.credit_limit, None);
+    assert!(!unlimited.over_limit, "no limit set is not a limit of zero");
+
+    db.set_credit_limit(buyer.id, Some(10_000.0)).unwrap();
+    assert_eq!(db.get_customer(buyer.id).unwrap().unwrap().credit_limit, Some(10_000.0));
+
+    bill(&mut db, buyer.id, 10.0, "credit", "2026-09-10"); // 5,248.00 owed
+
+    let inside = db.check_credit_limit(buyer.id, 4_000.0).unwrap();
+    assert_eq!(inside.balance, 5_248.00);
+    assert!(!inside.over_limit, "9,248 is inside 10,000");
+
+    let outside = db.check_credit_limit(buyer.id, 5_000.0).unwrap();
+    assert!(outside.over_limit, "10,248 is not");
+
+    // Paying some off makes room again.
+    db.record_payment(&NewPayment {
+        customer_id: buyer.id,
+        invoice_id: None,
+        amount: 3_000.0,
+        payment_method: "cash".into(),
+        date: None,
+        notes: None,
+        created_by_user_id: None,
+    })
+    .unwrap();
+    assert!(!db.check_credit_limit(buyer.id, 5_000.0).unwrap().over_limit);
+
+    // Clearing the limit removes the ceiling entirely.
+    db.set_credit_limit(buyer.id, None).unwrap();
+    assert!(!db.check_credit_limit(buyer.id, 999_999.0).unwrap().over_limit);
+    assert!(db.set_credit_limit(buyer.id, Some(-1.0)).is_err());
+}
+
+#[test]
+fn a_payment_is_refused_when_it_makes_no_sense() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let other = customer(&db, "9791045678");
+    let invoice = bill(&mut db, buyer.id, 10.0, "credit", "2026-09-10");
+
+    let mut bad = |p: NewPayment| db.record_payment(&p).is_err();
+
+    let base = NewPayment {
+        customer_id: buyer.id,
+        invoice_id: None,
+        amount: 100.0,
+        payment_method: "cash".into(),
+        date: None,
+        notes: None,
+        created_by_user_id: None,
+    };
+
+    assert!(bad(NewPayment { amount: 0.0, ..base.clone() }), "zero is not a payment");
+    assert!(bad(NewPayment { amount: -50.0, ..base.clone() }), "nor is a negative one");
+    assert!(bad(NewPayment { payment_method: "  ".into(), ..base.clone() }));
+    assert!(bad(NewPayment { date: Some("not-a-date".into()), ..base.clone() }));
+    assert!(bad(NewPayment { customer_id: 9_999, ..base.clone() }));
+    assert!(bad(NewPayment { invoice_id: Some(9_999), ..base.clone() }));
+
+    // And a payment aimed at somebody else's invoice.
+    assert!(bad(NewPayment {
+        customer_id: other.id,
+        invoice_id: Some(invoice.id),
+        ..base.clone()
+    }));
+
+    // None of that wrote anything.
+    assert!(db.payments_for_customer(buyer.id).unwrap().is_empty());
+    assert_eq!(db.customer_balance(buyer.id).unwrap(), 5_248.00);
+}
+
+/// Payments are business data, so the back office hears about them.
+#[test]
+fn payments_are_queued_for_sync_and_re_queue_their_invoice() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let invoice = bill(&mut db, buyer.id, 10.0, "credit", "2026-09-10");
+
+    // A credit sale queues its invoice and lines, and no payment.
+    assert_eq!(db.pending_sync_rows_for("payments").unwrap().len(), 0);
+    assert_eq!(db.pending_sync_rows_for("invoices").unwrap().len(), 1);
+
+    db.record_payment(&NewPayment {
+        customer_id: buyer.id,
+        invoice_id: Some(invoice.id),
+        amount: 2_000.0,
+        payment_method: "cash".into(),
+        date: None,
+        notes: None,
+        created_by_user_id: None,
+    })
+    .unwrap();
+
+    let queued = db.pending_sync_rows_for("payments").unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].op, "insert");
+
+    // The invoice went out again carrying its new balance, rather than leaving the far
+    // end holding a row that says the bill is still unpaid in full.
+    let invoice_rows = db.pending_sync_rows_for("invoices").unwrap();
+    assert_eq!(invoice_rows.len(), 2);
+    assert_eq!(invoice_rows[1].op, "update");
+    assert!(
+        invoice_rows[1].payload_json.contains("partially_paid"),
+        "{}",
+        invoice_rows[1].payload_json
+    );
+}
+
+/// Everything billed before the ledger existed is settled, not a sudden pile of debt.
+#[test]
+fn invoices_from_before_the_ledger_are_treated_as_paid() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pre-ledger.sqlite");
+
+    // A database at the previous stage's schema, with one invoice in it.
+    {
+        let mut conn = rusqlite::Connection::open(&path).unwrap();
+        realinvoice_core::schema::migrate_through(&mut conn, "008_discounts").unwrap();
+        conn.execute(
+            "INSERT INTO customers (name, gstin, place_of_supply, mobile)
+             VALUES ('Old Buyer', NULL, 'TN', '9000000001')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO invoices
+                 (invoice_no, date, customer_id, subtotal, cgst, sgst, igst, grand_total,
+                  payment_type, sync_status, created_at, pre_discount_subtotal)
+             VALUES ('RI-2025-0001', '2025-04-01', 1, 1000.0, 90.0, 90.0, 0.0, 1180.0,
+                     'cash', 'synced', '2025-04-01 10:00:00', 1000.0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Opening it runs 009 and everything settles.
+    let db = Db::open(&path).unwrap();
+    let invoice = db.get_invoice(1).unwrap().unwrap();
+    assert_eq!(invoice.grand_total, 1_180.00);
+    assert_eq!(invoice.amount_paid, 1_180.00);
+    assert_eq!(invoice.amount_due, 0.0);
+    assert_eq!(invoice.payment_status, PaymentStatus::Paid);
+    assert_eq!(db.customer_balance(1).unwrap(), 0.0);
+
+    // And no receipt was invented for it: the migration marks it settled without
+    // pretending a payment was taken that nobody recorded.
+    assert!(db.payments_for_invoice(1).unwrap().is_empty());
 }

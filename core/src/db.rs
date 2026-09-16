@@ -14,11 +14,31 @@ use serde::Serialize;
 
 use crate::auth;
 use crate::error::{CoreError, Result};
+/// Every column of `invoices`, in the order [`invoice_from_row`] reads them. Written
+/// once so a new column cannot be added to some queries and forgotten in others.
+const INVOICE_COLUMNS: &str = "id, invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
+     grand_total, payment_type, sync_status, created_at, created_by_user_id,
+     pre_discount_subtotal, discount_amount, invoice_discount_type,
+     invoice_discount_value, invoice_discount_amount,
+     amount_paid, amount_due, payment_status";
+
+/// The payment type that means "not paid yet".
+///
+/// Everything else on the selector — cash, UPI, card — means the money arrived at the
+/// counter. This one means it did not, and the invoice goes onto the customer's account.
+pub const CREDIT_PAYMENT_TYPE: &str = "credit";
+
+/// Whether a payment type means the sale was put on the account rather than settled.
+pub fn is_credit_sale(payment_type: &str) -> bool {
+    payment_type.trim().eq_ignore_ascii_case(CREDIT_PAYMENT_TYPE)
+}
+
 /// The ceiling a cashier can discount to unaided, until a shop sets its own.
 pub const DEFAULT_DISCOUNT_APPROVAL_PCT: f64 = 15.0;
 
 use crate::gst::{
     self, DiscountedLine, DiscountedTotals, PricedLine, TaxableLine, DEFAULT_HOME_STATE,
+    MONEY_EPSILON,
 };
 use crate::models::*;
 use crate::numbering::{financial_year, next_credit_note_no, next_invoice_no};
@@ -382,7 +402,7 @@ impl Db {
         let found = self
             .conn
             .query_row(
-                "SELECT id, name, gstin, place_of_supply, mobile, price_list_id
+                "SELECT id, name, gstin, place_of_supply, mobile, price_list_id, credit_limit
                    FROM customers
                   WHERE mobile = ?1",
                 [mobile],
@@ -421,11 +441,25 @@ impl Db {
             self.require_price_list(id)?;
         }
 
+        if let Some(limit) = new.credit_limit {
+            if !limit.is_finite() || limit < 0.0 {
+                return Err(CoreError::Invalid("a credit limit cannot be negative".into()));
+            }
+        }
+
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO customers (name, gstin, place_of_supply, mobile, price_list_id)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![new.name.trim(), gstin, place_of_supply, mobile, new.price_list_id],
+            "INSERT INTO customers
+                 (name, gstin, place_of_supply, mobile, price_list_id, credit_limit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                new.name.trim(),
+                gstin,
+                place_of_supply,
+                mobile,
+                new.price_list_id,
+                new.credit_limit
+            ],
         )?;
         let customer = Customer {
             id: tx.last_insert_rowid(),
@@ -434,6 +468,7 @@ impl Db {
             place_of_supply,
             mobile,
             price_list_id: new.price_list_id,
+            credit_limit: new.credit_limit,
         };
         enqueue(&tx, "customers", customer.id, SyncOp::Insert, &customer)?;
         tx.commit()?;
@@ -457,11 +492,20 @@ impl Db {
                 // is on. Re-seeding or a sync of a stale record must not quietly move a
                 // wholesale buyer back to retail prices.
                 let price_list_id = new.price_list_id.or(current.price_list_id);
+                let credit_limit = new.credit_limit.or(current.credit_limit);
                 tx.execute(
                     "UPDATE customers
-                        SET name = ?1, gstin = ?2, place_of_supply = ?3, price_list_id = ?4
-                      WHERE id = ?5",
-                    params![new.name, new.gstin, new.place_of_supply, price_list_id, current.id],
+                        SET name = ?1, gstin = ?2, place_of_supply = ?3, price_list_id = ?4,
+                            credit_limit = ?5
+                      WHERE id = ?6",
+                    params![
+                        new.name,
+                        new.gstin,
+                        new.place_of_supply,
+                        price_list_id,
+                        credit_limit,
+                        current.id
+                    ],
                 )?;
                 Customer {
                     id: current.id,
@@ -470,13 +514,22 @@ impl Db {
                     place_of_supply: new.place_of_supply.clone(),
                     mobile,
                     price_list_id,
+                    credit_limit,
                 }
             }
             None => {
                 tx.execute(
-                    "INSERT INTO customers (name, gstin, place_of_supply, mobile, price_list_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![new.name, new.gstin, new.place_of_supply, mobile, new.price_list_id],
+                    "INSERT INTO customers
+                         (name, gstin, place_of_supply, mobile, price_list_id, credit_limit)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        new.name,
+                        new.gstin,
+                        new.place_of_supply,
+                        mobile,
+                        new.price_list_id,
+                        new.credit_limit
+                    ],
                 )?;
                 Customer {
                     id: tx.last_insert_rowid(),
@@ -485,6 +538,7 @@ impl Db {
                     place_of_supply: new.place_of_supply.clone(),
                     mobile,
                     price_list_id: new.price_list_id,
+                    credit_limit: new.credit_limit,
                 }
             }
         };
@@ -499,7 +553,7 @@ impl Db {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, name, gstin, place_of_supply, mobile, price_list_id
+                "SELECT id, name, gstin, place_of_supply, mobile, price_list_id, credit_limit
                    FROM customers WHERE id = ?1",
                 [id],
                 customer_from_row,
@@ -1050,14 +1104,26 @@ impl Db {
         // the counter's local day, and a time from a different clock beside it misleads.
         let created_at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
+        // What is owed the moment this invoice exists, decided here rather than by a
+        // later refresh: a brand-new invoice has no credit notes and at most the one
+        // payment below, so the answer is already known — and writing the row complete
+        // keeps it to a single `sync_queue` entry instead of an insert chased by an
+        // update that corrects it.
+        let settled = !is_credit_sale(&new.payment_type);
+        let amount_paid = if settled { totals.grand_total } else { 0.0 };
+        let amount_due = gst::round_money(totals.grand_total - amount_paid);
+        let payment_status =
+            if amount_due <= MONEY_EPSILON { PaymentStatus::Paid } else { PaymentStatus::Unpaid };
+
         tx.execute(
             "INSERT INTO invoices
                  (invoice_no, date, customer_id, pre_discount_subtotal, discount_amount,
                   invoice_discount_type, invoice_discount_value, invoice_discount_amount,
                   subtotal, cgst, sgst, igst,
-                  grand_total, payment_type, sync_status, created_at, created_by_user_id)
+                  grand_total, payment_type, amount_paid, amount_due, payment_status,
+                  sync_status, created_at, created_by_user_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                     'pending', ?15, ?16)",
+                     ?15, ?16, ?17, 'pending', ?18, ?19)",
             params![
                 invoice_no,
                 date.to_string(),
@@ -1073,6 +1139,9 @@ impl Db {
                 totals.igst,
                 totals.grand_total,
                 new.payment_type,
+                amount_paid,
+                amount_due,
+                payment_status.as_str(),
                 created_at,
                 new.created_by_user_id,
             ],
@@ -1095,8 +1164,11 @@ impl Db {
             igst: totals.igst,
             grand_total: totals.grand_total,
             payment_type: new.payment_type.clone(),
+            amount_paid,
+            amount_due,
+            payment_status,
             sync_status: "pending".to_string(),
-            created_at,
+            created_at: created_at.clone(),
             created_by_user_id: new.created_by_user_id,
         };
 
@@ -1110,6 +1182,26 @@ impl Db {
         // again: this is the moment the numbers freeze.
         for ((item_id, line), computed) in priced.iter().zip(&totals.lines) {
             insert_line(&tx, invoice_id, *item_id, line, computed)?;
+        }
+
+        // A payment type that is not "credit" means the money changed hands at the
+        // counter, so a receipt for it exists — and now says so. `payment_type` used to
+        // be a label with nothing behind it; this is what turns it into a fact.
+        //
+        // A zero-total invoice, everything discounted away, gets no payments row: there
+        // was nothing to receive, and nothing is owed either.
+        if settled && totals.grand_total > MONEY_EPSILON {
+            insert_payment(
+                &tx,
+                customer.id,
+                Some(invoice_id),
+                totals.grand_total,
+                &new.payment_type,
+                &date.to_string(),
+                None,
+                &created_at,
+                new.created_by_user_id,
+            )?;
         }
 
         tx.commit()?;
@@ -1200,19 +1292,10 @@ impl Db {
             ],
         )?;
 
-        let updated = Invoice {
-            pre_discount_subtotal: totals.pre_discount_subtotal,
-            discount_amount: totals.discount_amount,
-            invoice_discount_amount: totals.invoice_discount_amount,
-            subtotal: totals.subtotal,
-            cgst: totals.cgst,
-            sgst: totals.sgst,
-            igst: totals.igst,
-            grand_total: totals.grand_total,
-            sync_status: "pending".to_string(),
-            ..invoice
-        };
-        enqueue(&tx, "invoices", invoice_id, SyncOp::Update, &updated)?;
+        // The bill grew, so what is owed on it did too — and the refresh is what queues
+        // the changed invoice, so the back office gets one update carrying both the new
+        // totals and the new balance rather than two that disagree in between.
+        Self::refresh_invoice_balance(&tx, invoice_id)?;
         tx.commit()?;
 
         Ok(InvoiceLine {
@@ -1238,15 +1321,12 @@ impl Db {
 
     /// Every invoice on a given date, newest first.
     pub fn list_invoices_for_date(&self, date: NaiveDate) -> Result<Vec<Invoice>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
-                    grand_total, payment_type, sync_status, created_at, created_by_user_id,
-                    pre_discount_subtotal, discount_amount, invoice_discount_type,
-                    invoice_discount_value, invoice_discount_amount
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {INVOICE_COLUMNS}
                FROM invoices
               WHERE date = ?1
-              ORDER BY id DESC",
-        )?;
+              ORDER BY id DESC"
+        ))?;
         let rows = stmt.query_map([date.to_string()], invoice_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -1269,7 +1349,8 @@ impl Db {
                     i.igst, i.grand_total, i.payment_type, i.sync_status, i.created_at,
                     i.created_by_user_id, i.pre_discount_subtotal, i.discount_amount,
                     i.invoice_discount_type, i.invoice_discount_value,
-                    i.invoice_discount_amount, c.name, c.mobile,
+                    i.invoice_discount_amount, i.amount_paid, i.amount_due,
+                    i.payment_status, c.name, c.mobile,
                     (SELECT COUNT(*) FROM invoice_lines l WHERE l.invoice_id = i.id),
                     u.display_name
                FROM invoices i
@@ -1294,10 +1375,10 @@ impl Db {
             |row| {
                 Ok(InvoiceSummary {
                     invoice: invoice_from_row(row)?,
-                    customer_name: row.get(18)?,
-                    customer_mobile: row.get(19)?,
-                    line_count: row.get(20)?,
-                    created_by: row.get(21)?,
+                    customer_name: row.get(21)?,
+                    customer_mobile: row.get(22)?,
+                    line_count: row.get(23)?,
+                    created_by: row.get(24)?,
                 })
             },
         )?;
@@ -1351,12 +1432,7 @@ impl Db {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
-                        grand_total, payment_type, sync_status, created_at,
-                        created_by_user_id, pre_discount_subtotal, discount_amount,
-                        invoice_discount_type, invoice_discount_value,
-                        invoice_discount_amount
-                   FROM invoices WHERE id = ?1",
+                &format!("SELECT {INVOICE_COLUMNS} FROM invoices WHERE id = ?1"),
                 [id],
                 invoice_from_row,
             )
@@ -1592,6 +1668,11 @@ impl Db {
             enqueue(&tx, "credit_note_lines", line.id, SyncOp::Insert, &line)?;
         }
 
+        // A credit note reduces what is owed exactly as a payment does — it is not money
+        // received, it is a bill that should have been smaller — so the invoice's balance
+        // is rewritten through the same one function.
+        Self::refresh_invoice_balance(&tx, invoice.id)?;
+
         tx.commit()?;
         Ok(credit_note)
     }
@@ -1671,6 +1752,427 @@ impl Db {
             credited_tax: gst::round_money(credited_tax),
             net_total: gst::round_money(invoice.grand_total - credited_total),
             note_count,
+        })
+    }
+
+    // -------------------------------------------------------------- the ledger
+
+    /// Rewrites one invoice's `amount_paid`, `amount_due` and `payment_status` from the
+    /// rows that decide them.
+    ///
+    /// **Every write that can move a balance ends here**, inside the same transaction:
+    /// recording a payment, deleting one, issuing a credit note. Three columns that could
+    /// disagree with each other are three columns that eventually will, so nothing sets
+    /// any of them directly.
+    ///
+    /// A credit note reduces what is owed exactly as a payment does, but is counted
+    /// separately: it is not money received, it is a bill that should have been smaller.
+    fn refresh_invoice_balance(tx: &Transaction<'_>, invoice_id: i64) -> Result<()> {
+        let (grand_total, paid, credited): (f64, f64, f64) = tx.query_row(
+            "SELECT i.grand_total,
+                    COALESCE((SELECT SUM(p.amount) FROM payments p
+                               WHERE p.invoice_id = i.id), 0),
+                    COALESCE((SELECT SUM(c.grand_total) FROM credit_notes c
+                               WHERE c.original_invoice_id = i.id), 0)
+               FROM invoices i
+              WHERE i.id = ?1",
+            [invoice_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+        let amount_paid = gst::round_money(paid);
+        // Never negative: an over-credited invoice owes nothing, it does not owe a
+        // negative amount. Money genuinely over-collected lives on the account as a
+        // credit, not as a negative balance hidden on one bill.
+        let amount_due = gst::round_money((grand_total - amount_paid - credited).max(0.0));
+
+        let status = if amount_due <= MONEY_EPSILON {
+            PaymentStatus::Paid
+        } else if amount_paid > MONEY_EPSILON || credited > MONEY_EPSILON {
+            PaymentStatus::PartiallyPaid
+        } else {
+            PaymentStatus::Unpaid
+        };
+
+        tx.execute(
+            "UPDATE invoices SET amount_paid = ?1, amount_due = ?2, payment_status = ?3
+              WHERE id = ?4",
+            params![amount_paid, amount_due, status.as_str(), invoice_id],
+        )?;
+
+        // The back office prices from the same figures, so it needs the new balance.
+        if let Some(invoice) = invoice_by_id(tx, invoice_id)? {
+            enqueue(tx, "invoices", invoice_id, SyncOp::Update, &invoice)?;
+        }
+        Ok(())
+    }
+
+    /// What a customer owes: everything still due on their invoices, less anything they
+    /// have paid against the account rather than against one bill.
+    ///
+    /// Negative means the shop is holding their money — which is a real state after an
+    /// overpayment, and better shown than clamped away.
+    pub fn customer_balance(&self, customer_id: i64) -> Result<f64> {
+        let (due, on_account): (f64, f64) = self.conn.query_row(
+            "SELECT COALESCE((SELECT SUM(amount_due) FROM invoices
+                               WHERE customer_id = ?1), 0),
+                    COALESCE((SELECT SUM(amount) FROM payments
+                               WHERE customer_id = ?1 AND invoice_id IS NULL), 0)",
+            [customer_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(gst::round_money(due - on_account))
+    }
+
+    /// Records money received.
+    ///
+    /// A payment aimed at an invoice that is larger than that invoice still owes becomes
+    /// **two rows**: one settling the bill and one left on the account. The alternative —
+    /// refusing it, or quietly keeping the difference — would either send a customer away
+    /// holding cash the shop would not take, or lose money somebody handed over. Two rows
+    /// because each one then means exactly one thing, and the ledger shows both.
+    pub fn record_payment(&mut self, new: &NewPayment) -> Result<RecordedPayment> {
+        let customer = self
+            .get_customer(new.customer_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("customer {}", new.customer_id)))?;
+
+        if !new.amount.is_finite() || new.amount <= 0.0 {
+            return Err(CoreError::Invalid("a payment must be more than zero".into()));
+        }
+        let method = new.payment_method.trim().to_string();
+        if method.is_empty() {
+            return Err(CoreError::Invalid("a payment needs a method".into()));
+        }
+
+        let date = match &new.date {
+            Some(d) => NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                .map_err(|_| CoreError::Invalid(format!("date must be YYYY-MM-DD, got {d}")))?,
+            None => Local::now().date_naive(),
+        };
+        let notes = new.notes.as_ref().map(|n| n.trim()).filter(|n| !n.is_empty());
+
+        // How much of it the named invoice can absorb, decided before anything is written.
+        let (invoice_id, to_invoice) = match new.invoice_id {
+            None => (None, 0.0),
+            Some(id) => {
+                let invoice = self
+                    .get_invoice(id)?
+                    .ok_or_else(|| CoreError::NotFound(format!("invoice {id}")))?;
+                if invoice.customer_id != customer.id {
+                    return Err(CoreError::Invalid(format!(
+                        "invoice {} was billed to someone else",
+                        invoice.invoice_no
+                    )));
+                }
+                (Some(id), new.amount.min(invoice.amount_due).max(0.0))
+            }
+        };
+        let to_invoice = gst::round_money(to_invoice);
+        let to_account = gst::round_money(new.amount - to_invoice);
+
+        let amount = gst::round_money(new.amount);
+        let created_at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let tx = self.conn.transaction()?;
+
+        let mut applied = None;
+        if to_invoice > 0.0 {
+            applied = Some(insert_payment(
+                &tx,
+                customer.id,
+                invoice_id,
+                to_invoice,
+                &method,
+                &date.to_string(),
+                notes,
+                &created_at,
+                new.created_by_user_id,
+            )?);
+        }
+
+        // The remainder, or the whole thing when no invoice was named.
+        let mut on_account = None;
+        if to_account > 0.0 {
+            on_account = Some(insert_payment(
+                &tx,
+                customer.id,
+                None,
+                to_account,
+                &method,
+                &date.to_string(),
+                notes,
+                &created_at,
+                new.created_by_user_id,
+            )?);
+        }
+
+        if let Some(id) = invoice_id {
+            Self::refresh_invoice_balance(&tx, id)?;
+        }
+        tx.commit()?;
+
+        let _ = amount;
+        Ok(RecordedPayment { applied, on_account, balance: self.customer_balance(customer.id)? })
+    }
+
+    /// Every payment a customer has made, oldest first.
+    pub fn payments_for_customer(&self, customer_id: i64) -> Result<Vec<Payment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, customer_id, invoice_id, amount, payment_method, date, notes,
+                    sync_status, created_at, created_by_user_id
+               FROM payments
+              WHERE customer_id = ?1
+              ORDER BY date, id",
+        )?;
+        let rows = stmt.query_map([customer_id], payment_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The payments allocated to one invoice, oldest first.
+    pub fn payments_for_invoice(&self, invoice_id: i64) -> Result<Vec<Payment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, customer_id, invoice_id, amount, payment_method, date, notes,
+                    sync_status, created_at, created_by_user_id
+               FROM payments
+              WHERE invoice_id = ?1
+              ORDER BY date, id",
+        )?;
+        let rows = stmt.query_map([invoice_id], payment_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Invoices with something still owing, oldest first — what a payment can be put
+    /// against.
+    pub fn open_invoices(&self, customer_id: i64) -> Result<Vec<Invoice>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {INVOICE_COLUMNS}
+               FROM invoices
+              WHERE customer_id = ?1 AND amount_due > 0
+              ORDER BY date, id"
+        ))?;
+        let rows = stmt.query_map([customer_id], invoice_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// A customer's passbook: invoices, payments and credit notes in date order with the
+    /// balance after each.
+    ///
+    /// The running balance is built here rather than in SQL because the three kinds live
+    /// in three tables and the order matters more than the query does. Entries on the
+    /// same date are ordered invoice, then credit note, then payment — what was billed
+    /// before what came off it — so a bill settled the day it was raised reads the way it
+    /// happened rather than showing a payment against a balance that does not exist yet.
+    pub fn customer_ledger(&self, customer_id: i64) -> Result<CustomerLedger> {
+        let customer = self
+            .get_customer(customer_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("customer {customer_id}")))?;
+
+        let mut rows: Vec<(String, u8, LedgerEntry)> = Vec::new();
+        let mut billed_total = 0.0;
+        let mut paid_total = 0.0;
+        let mut credited_total = 0.0;
+
+        for invoice in self.invoices_for_customer(customer_id)? {
+            billed_total += invoice.grand_total;
+            rows.push((
+                invoice.date.clone(),
+                0,
+                LedgerEntry {
+                    kind: LedgerEntryKind::Invoice,
+                    id: invoice.id,
+                    date: invoice.date.clone(),
+                    reference: invoice.invoice_no.clone(),
+                    description: format!("Invoice · {}", invoice.payment_type),
+                    change: invoice.grand_total,
+                    balance: 0.0,
+                },
+            ));
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.credit_note_no, c.date, c.grand_total, c.reason, i.invoice_no
+               FROM credit_notes c
+               JOIN invoices i ON i.id = c.original_invoice_id
+              WHERE i.customer_id = ?1
+              ORDER BY c.date, c.id",
+        )?;
+        let notes = stmt.query_map([customer_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        for note in notes {
+            let (id, no, date, total, reason, invoice_no) = note?;
+            credited_total += total;
+            rows.push((
+                date.clone(),
+                1,
+                LedgerEntry {
+                    kind: LedgerEntryKind::CreditNote,
+                    id,
+                    date,
+                    reference: no,
+                    description: format!("Credit note against {invoice_no} · {reason}"),
+                    change: -total,
+                    balance: 0.0,
+                },
+            ));
+        }
+
+        for payment in self.payments_for_customer(customer_id)? {
+            paid_total += payment.amount;
+            let against = match payment.invoice_id {
+                Some(id) => self
+                    .get_invoice(id)?
+                    .map(|i| format!("against {}", i.invoice_no))
+                    .unwrap_or_else(|| "against an invoice".to_string()),
+                None => "on account".to_string(),
+            };
+            rows.push((
+                payment.date.clone(),
+                2,
+                LedgerEntry {
+                    kind: LedgerEntryKind::Payment,
+                    id: payment.id,
+                    date: payment.date.clone(),
+                    reference: payment.payment_method.clone(),
+                    description: match &payment.notes {
+                        Some(note) => format!("Payment {against} · {note}"),
+                        None => format!("Payment {against}"),
+                    },
+                    change: -payment.amount,
+                    balance: 0.0,
+                },
+            ));
+        }
+
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.id.cmp(&b.2.id)));
+
+        let mut balance = 0.0;
+        let entries: Vec<LedgerEntry> = rows
+            .into_iter()
+            .map(|(_, _, mut entry)| {
+                balance = gst::round_money(balance + entry.change);
+                entry.balance = balance;
+                entry
+            })
+            .collect();
+
+        Ok(CustomerLedger {
+            balance: self.customer_balance(customer_id)?,
+            billed_total: gst::round_money(billed_total),
+            paid_total: gst::round_money(paid_total),
+            credited_total: gst::round_money(credited_total),
+            entries,
+            open_invoices: self.open_invoices(customer_id)?,
+            customer,
+        })
+    }
+
+    /// Every invoice billed to one customer, oldest first.
+    pub fn invoices_for_customer(&self, customer_id: i64) -> Result<Vec<Invoice>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {INVOICE_COLUMNS}
+               FROM invoices
+              WHERE customer_id = ?1
+              ORDER BY date, id"
+        ))?;
+        let rows = stmt.query_map([customer_id], invoice_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// The Customers list: everyone, with what they owe.
+    ///
+    /// The outstanding figure is the same one [`Db::customer_balance`] computes, worked
+    /// out in SQL here so a shop with two thousand customers does not do two thousand
+    /// round trips to sort by it.
+    pub fn list_customers(&self, filter: &CustomerFilter) -> Result<Vec<CustomerSummary>> {
+        let text = filter.text.as_deref().unwrap_or("").trim().to_string();
+        let pattern = format!("%{text}%");
+        let limit = filter.limit.unwrap_or(1000) as i64;
+
+        let order = match filter.sort {
+            CustomerSort::Name => "c.name COLLATE NOCASE",
+            CustomerSort::OutstandingDesc => "outstanding DESC, c.name COLLATE NOCASE",
+            CustomerSort::OutstandingAsc => "outstanding ASC, c.name COLLATE NOCASE",
+        };
+
+        let sql = format!(
+            "SELECT c.id, c.name, c.gstin, c.place_of_supply, c.mobile, c.price_list_id,
+                    c.credit_limit,
+                    ROUND(COALESCE((SELECT SUM(i.amount_due) FROM invoices i
+                                     WHERE i.customer_id = c.id), 0)
+                        - COALESCE((SELECT SUM(p.amount) FROM payments p
+                                     WHERE p.customer_id = c.id
+                                       AND p.invoice_id IS NULL), 0), 2) AS outstanding,
+                    (SELECT COUNT(*) FROM invoices i WHERE i.customer_id = c.id),
+                    (SELECT MAX(i.date) FROM invoices i WHERE i.customer_id = c.id)
+               FROM customers c
+              WHERE (?1 = ''
+                     OR c.name LIKE ?2 COLLATE NOCASE
+                     OR c.mobile LIKE ?2)
+                AND (?3 = 0 OR outstanding > 0)
+              ORDER BY {order}
+              LIMIT ?4"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows =
+            stmt.query_map(params![text, pattern, filter.owing_only as i64, limit], |row| {
+                Ok(CustomerSummary {
+                    customer: customer_from_row(row)?,
+                    outstanding: row.get(7)?,
+                    invoice_count: row.get(8)?,
+                    last_billed: row.get(9)?,
+                })
+            })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Sets a customer's credit limit, or clears it with `None`.
+    pub fn set_credit_limit(&mut self, customer_id: i64, limit: Option<f64>) -> Result<Customer> {
+        if let Some(limit) = limit {
+            if !limit.is_finite() || limit < 0.0 {
+                return Err(CoreError::Invalid("a credit limit cannot be negative".into()));
+            }
+        }
+        let customer = self
+            .get_customer(customer_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("customer {customer_id}")))?;
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE customers SET credit_limit = ?1 WHERE id = ?2",
+            params![limit, customer_id],
+        )?;
+        let updated = Customer { credit_limit: limit, ..customer };
+        enqueue(&tx, "customers", updated.id, SyncOp::Update, &updated)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    /// Whether a credit sale of `amount` fits inside this customer's limit.
+    ///
+    /// No limit set means no limit — see [`Customer::credit_limit`]. A shop that has
+    /// never configured one should not find every credit sale blocked.
+    pub fn check_credit_limit(&self, customer_id: i64, amount: f64) -> Result<CreditCheck> {
+        let customer = self
+            .get_customer(customer_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("customer {customer_id}")))?;
+        let balance = self.customer_balance(customer_id)?;
+
+        Ok(CreditCheck {
+            balance,
+            amount: gst::round_money(amount),
+            credit_limit: customer.credit_limit,
+            over_limit: match customer.credit_limit {
+                Some(limit) => balance + amount > limit + MONEY_EPSILON,
+                None => false,
+            },
         })
     }
 
@@ -2248,6 +2750,22 @@ fn customer_from_row(row: &Row<'_>) -> rusqlite::Result<Customer> {
         place_of_supply: row.get(3)?,
         mobile: row.get(4)?,
         price_list_id: row.get(5)?,
+        credit_limit: row.get(6)?,
+    })
+}
+
+fn payment_from_row(row: &Row<'_>) -> rusqlite::Result<Payment> {
+    Ok(Payment {
+        id: row.get(0)?,
+        customer_id: row.get(1)?,
+        invoice_id: row.get(2)?,
+        amount: row.get(3)?,
+        payment_method: row.get(4)?,
+        date: row.get(5)?,
+        notes: row.get(6)?,
+        sync_status: row.get(7)?,
+        created_at: row.get(8)?,
+        created_by_user_id: row.get(9)?,
     })
 }
 
@@ -2283,7 +2801,69 @@ fn invoice_from_row(row: &Row<'_>) -> rusqlite::Result<Invoice> {
         invoice_discount_type: discount_type_from(row.get::<_, String>(15)?),
         invoice_discount_value: row.get(16)?,
         invoice_discount_amount: row.get(17)?,
+        amount_paid: row.get(18)?,
+        amount_due: row.get(19)?,
+        payment_status: PaymentStatus::parse(&row.get::<_, String>(20)?)
+            .unwrap_or(PaymentStatus::Unpaid),
     })
+}
+
+/// One invoice, read inside a transaction. Used by the balance refresh so the row it
+/// queues for sync is the row it just wrote.
+fn invoice_by_id(tx: &Transaction<'_>, id: i64) -> Result<Option<Invoice>> {
+    Ok(tx
+        .query_row(
+            &format!("SELECT {INVOICE_COLUMNS} FROM invoices WHERE id = ?1"),
+            [id],
+            invoice_from_row,
+        )
+        .optional()?)
+}
+
+/// Writes one payment row and queues it. Both halves of a split payment come through
+/// here, so neither can be recorded differently from the other.
+#[allow(clippy::too_many_arguments)]
+fn insert_payment(
+    tx: &Transaction<'_>,
+    customer_id: i64,
+    invoice_id: Option<i64>,
+    amount: f64,
+    method: &str,
+    date: &str,
+    notes: Option<&str>,
+    created_at: &str,
+    created_by_user_id: Option<i64>,
+) -> Result<Payment> {
+    tx.execute(
+        "INSERT INTO payments
+             (customer_id, invoice_id, amount, payment_method, date, notes, sync_status,
+              created_at, created_by_user_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8)",
+        params![
+            customer_id,
+            invoice_id,
+            amount,
+            method,
+            date,
+            notes,
+            created_at,
+            created_by_user_id
+        ],
+    )?;
+    let payment = Payment {
+        id: tx.last_insert_rowid(),
+        customer_id,
+        invoice_id,
+        amount,
+        payment_method: method.to_string(),
+        date: date.to_string(),
+        notes: notes.map(String::from),
+        sync_status: "pending".to_string(),
+        created_at: created_at.to_string(),
+        created_by_user_id,
+    };
+    enqueue(tx, "payments", payment.id, SyncOp::Insert, &payment)?;
+    Ok(payment)
 }
 
 fn line_from_row(row: &Row<'_>) -> rusqlite::Result<InvoiceLine> {
