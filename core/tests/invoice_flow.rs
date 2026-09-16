@@ -2,9 +2,9 @@
 //! reopened SQLite file with its lines and its `sync_queue` rows intact.
 
 use realinvoice_core::{
-    seed, CoreError, DateRange, Db, InvoiceFilter, ItemFilter, LoginOutcome, NewCreditNote,
-    NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewUser, Role, SyncBatch,
-    User,
+    seed, CoreError, DateRange, Db, DiscountType, InvoiceFilter, ItemFilter, ItemPrice,
+    LoginOutcome, NewCreditNote, NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine,
+    NewItem, NewUser, Role, SyncBatch, User,
 };
 
 fn seeded_db() -> Db {
@@ -35,9 +35,25 @@ fn an_invoice_can_be_created_end_to_end() {
             payment_type: "cash".into(),
             created_by_user_id: None,
             lines: vec![
-                NewInvoiceLine { item_id: cement.id, qty: 10.0, rate: None, tax_rate: None },
-                NewInvoiceLine { item_id: steel.id, qty: 5.0, rate: None, tax_rate: None },
+                NewInvoiceLine {
+                    item_id: cement.id,
+                    qty: 10.0,
+                    rate: None,
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
+                NewInvoiceLine {
+                    item_id: steel.id,
+                    qty: 5.0,
+                    rate: None,
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
             ],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .expect("create invoice");
 
@@ -67,6 +83,7 @@ fn sync_queue_picks_up_the_invoice_and_every_line() {
             gstin: Some("33AABCS1429B1ZP".into()),
             place_of_supply: "TN".into(),
             mobile: "9840012345".into(),
+            price_list_id: None,
         })
         .unwrap();
     let widget = db
@@ -91,9 +108,25 @@ fn sync_queue_picks_up_the_invoice_and_every_line() {
             payment_type: "upi".into(),
             created_by_user_id: None,
             lines: vec![
-                NewInvoiceLine { item_id: widget.id, qty: 2.0, rate: None, tax_rate: None },
-                NewInvoiceLine { item_id: widget.id, qty: 3.0, rate: Some(90.0), tax_rate: None },
+                NewInvoiceLine {
+                    item_id: widget.id,
+                    qty: 2.0,
+                    rate: None,
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
+                NewInvoiceLine {
+                    item_id: widget.id,
+                    qty: 3.0,
+                    rate: Some(90.0),
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
             ],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap();
 
@@ -135,7 +168,11 @@ fn an_invoice_survives_closing_and_reopening_the_file() {
                     qty: 4.0,
                     rate: None,
                     tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
                 }],
+                invoice_discount_type: DiscountType::None,
+                invoice_discount_value: 0.0,
             })
             .unwrap();
         (invoice.id, invoice.invoice_no)
@@ -163,7 +200,16 @@ fn adding_a_line_retotals_the_invoice_and_queues_an_update() {
             date: None,
             payment_type: "cash".into(),
             created_by_user_id: None,
-            lines: vec![NewInvoiceLine { item_id: steel.id, qty: 1.0, rate: None, tax_rate: None }],
+            lines: vec![NewInvoiceLine {
+                item_id: steel.id,
+                qty: 1.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap();
     assert_eq!(invoice.subtotal, 620.00);
@@ -171,7 +217,14 @@ fn adding_a_line_retotals_the_invoice_and_queues_an_update() {
     let line = db
         .add_line_item(
             invoice.id,
-            &NewInvoiceLine { item_id: steel.id, qty: 2.0, rate: None, tax_rate: None },
+            &NewInvoiceLine {
+                item_id: steel.id,
+                qty: 2.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            },
         )
         .unwrap();
     assert_eq!(line.line_total, 1_240.00);
@@ -205,7 +258,11 @@ fn an_inter_state_customer_is_billed_igst() {
                 qty: 10.0,
                 rate: None,
                 tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
             }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap();
 
@@ -228,7 +285,16 @@ fn invoice_numbers_run_in_sequence_within_a_financial_year() {
             date: Some(date.into()),
             payment_type: "cash".into(),
             created_by_user_id: None,
-            lines: vec![NewInvoiceLine { item_id: steel.id, qty: 1.0, rate: None, tax_rate: None }],
+            lines: vec![NewInvoiceLine {
+                item_id: steel.id,
+                qty: 1.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap()
         .invoice_no
@@ -269,6 +335,8 @@ fn bad_references_and_quantities_are_rejected() {
         payment_type: "cash".into(),
         created_by_user_id: None,
         lines: vec![],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     });
     assert!(matches!(missing_customer, Err(CoreError::NotFound(_))));
 
@@ -277,7 +345,16 @@ fn bad_references_and_quantities_are_rejected() {
         date: None,
         payment_type: "cash".into(),
         created_by_user_id: None,
-        lines: vec![NewInvoiceLine { item_id: steel.id, qty: 0.0, rate: None, tax_rate: None }],
+        lines: vec![NewInvoiceLine {
+            item_id: steel.id,
+            qty: 0.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     });
     assert!(matches!(bad_qty, Err(CoreError::Invalid(_))));
 
@@ -287,6 +364,8 @@ fn bad_references_and_quantities_are_rejected() {
         payment_type: "cash".into(),
         created_by_user_id: None,
         lines: vec![],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     });
     assert!(matches!(bad_date, Err(CoreError::Invalid(_))));
 
@@ -320,6 +399,7 @@ fn a_new_customer_can_be_registered_from_the_counter() {
             gstin: Some("  33AAFCA1234M1Z9  ".into()),
             place_of_supply: "tn".into(),
             mobile: " 9884455661 ".into(),
+            price_list_id: None,
         })
         .expect("register customer");
 
@@ -347,6 +427,7 @@ fn registering_a_duplicate_mobile_is_refused() {
         gstin: None,
         place_of_supply: "TN".into(),
         mobile: "9840012345".into(),
+        price_list_id: None,
     });
     assert!(matches!(duplicate, Err(CoreError::Invalid(_))));
 
@@ -364,6 +445,7 @@ fn a_blank_gstin_is_stored_as_unregistered() {
             gstin: Some("   ".into()),
             place_of_supply: "TN".into(),
             mobile: "9112233445".into(),
+            price_list_id: None,
         })
         .unwrap();
 
@@ -378,6 +460,7 @@ fn incomplete_customers_are_refused() {
         gstin: None,
         place_of_supply: "TN".into(),
         mobile: "9111111111".into(),
+        price_list_id: None,
     };
 
     let no_name = db.create_customer(&NewCustomer { name: "  ".into(), ..base.clone() });
@@ -414,9 +497,25 @@ fn the_worked_example_totals_to_one_lakh_twentythree_thousand_nine_hundred() {
             payment_type: "credit".into(),
             created_by_user_id: None,
             lines: vec![
-                NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None },
-                NewInvoiceLine { item_id: license.id, qty: 5.0, rate: None, tax_rate: None },
+                NewInvoiceLine {
+                    item_id: rack.id,
+                    qty: 1.0,
+                    rate: None,
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
+                NewInvoiceLine {
+                    item_id: license.id,
+                    qty: 5.0,
+                    rate: None,
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
             ],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap();
 
@@ -460,7 +559,16 @@ fn concurrent_saves_never_collide_on_an_invoice_number() {
                 date: Some("2026-09-11".into()),
                 payment_type: "cash".into(),
                 created_by_user_id: None,
-                lines: vec![NewInvoiceLine { item_id, qty: 1.0, rate: None, tax_rate: None }],
+                lines: vec![NewInvoiceLine {
+                    item_id,
+                    qty: 1.0,
+                    rate: None,
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                }],
+                invoice_discount_type: DiscountType::None,
+                invoice_discount_value: 0.0,
             })
             .expect("save under contention")
             .invoice_no
@@ -499,6 +607,8 @@ fn history_fixture(db: &mut Db) -> Vec<realinvoice_core::Invoice> {
             payment_type: pay.into(),
             created_by_user_id: None,
             lines,
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap()
     };
@@ -508,28 +618,63 @@ fn history_fixture(db: &mut Db) -> Vec<realinvoice_core::Invoice> {
             kaveri,
             "2026-08-20",
             "upi",
-            vec![NewInvoiceLine { item_id: cement, qty: 20.0, rate: None, tax_rate: None }],
+            vec![NewInvoiceLine {
+                item_id: cement,
+                qty: 20.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
         ),
         raise(
             deccan,
             "2026-09-09",
             "credit",
-            vec![NewInvoiceLine { item_id: license, qty: 2.0, rate: None, tax_rate: None }],
+            vec![NewInvoiceLine {
+                item_id: license,
+                qty: 2.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
         ),
         raise(
             ishta,
             "2026-09-11",
             "cash",
             vec![
-                NewInvoiceLine { item_id: rack, qty: 1.0, rate: None, tax_rate: None },
-                NewInvoiceLine { item_id: license, qty: 5.0, rate: None, tax_rate: None },
+                NewInvoiceLine {
+                    item_id: rack,
+                    qty: 1.0,
+                    rate: None,
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
+                NewInvoiceLine {
+                    item_id: license,
+                    qty: 5.0,
+                    rate: None,
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
             ],
         ),
         raise(
             kaveri,
             "2026-09-11",
             "card",
-            vec![NewInvoiceLine { item_id: rack, qty: 2.0, rate: None, tax_rate: None }],
+            vec![NewInvoiceLine {
+                item_id: rack,
+                qty: 2.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
         ),
     ]
 }
@@ -858,7 +1003,16 @@ fn an_invoice_records_who_billed_it() {
             date: None,
             payment_type: "upi".into(),
             created_by_user_id: Some(biller.id),
-            lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+            lines: vec![NewInvoiceLine {
+                item_id: rack.id,
+                qty: 1.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap();
 
@@ -890,7 +1044,16 @@ fn an_unattributed_invoice_is_still_valid() {
             date: None,
             payment_type: "cash".into(),
             created_by_user_id: None,
-            lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+            lines: vec![NewInvoiceLine {
+                item_id: rack.id,
+                qty: 1.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap();
 
@@ -918,7 +1081,11 @@ fn payment_type_is_stored_as_chosen() {
                     qty: 1.0,
                     rate: None,
                     tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
                 }],
+                invoice_discount_type: DiscountType::None,
+                invoice_discount_value: 0.0,
             })
             .unwrap();
         assert_eq!(invoice.payment_type, chosen);
@@ -1046,7 +1213,16 @@ fn billed_days(db: &mut Db) {
             date: Some(date.to_string()),
             payment_type: pay.into(),
             created_by_user_id: None,
-            lines: vec![NewInvoiceLine { item_id, qty, rate: None, tax_rate: None }],
+            lines: vec![NewInvoiceLine {
+                item_id,
+                qty,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap()
     };
@@ -1162,7 +1338,16 @@ fn a_batch_is_taken_oldest_first_and_capped() {
         date: None,
         payment_type: "cash".into(),
         created_by_user_id: None,
-        lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+        lines: vec![NewInvoiceLine {
+            item_id: rack.id,
+            qty: 1.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     })
     .unwrap();
 
@@ -1235,7 +1420,16 @@ fn a_failed_push_loses_nothing() {
         date: None,
         payment_type: "cash".into(),
         created_by_user_id: None,
-        lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+        lines: vec![NewInvoiceLine {
+            item_id: rack.id,
+            qty: 1.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     })
     .unwrap();
     assert!(db.pending_sync_count().unwrap() > before, "an offline till keeps billing");
@@ -1252,7 +1446,16 @@ fn the_wire_format_carries_each_record_as_an_object() {
             date: None,
             payment_type: "upi".into(),
             created_by_user_id: None,
-            lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+            lines: vec![NewInvoiceLine {
+                item_id: rack.id,
+                qty: 1.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap();
 
@@ -1490,9 +1693,25 @@ fn billed_invoice(db: &mut Db) -> realinvoice_core::Invoice {
         payment_type: "cash".into(),
         created_by_user_id: None,
         lines: vec![
-            NewInvoiceLine { item_id: rack.id, qty: 2.0, rate: None, tax_rate: None },
-            NewInvoiceLine { item_id: cement.id, qty: 40.0, rate: None, tax_rate: None },
+            NewInvoiceLine {
+                item_id: rack.id,
+                qty: 2.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            },
+            NewInvoiceLine {
+                item_id: cement.id,
+                qty: 40.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            },
         ],
+        invoice_discount_type: DiscountType::None,
+        invoice_discount_value: 0.0,
     })
     .unwrap()
 }
@@ -1727,6 +1946,7 @@ fn a_credit_note_reverses_the_tax_that_was_actually_charged() {
             mobile: "9000012345".into(),
             gstin: Some("29AABCS1429B1ZP".into()),
             place_of_supply: "KA".into(),
+            price_list_id: None,
         })
         .unwrap();
     let rack = item(&db, "RACK-42U-PRO");
@@ -1737,7 +1957,16 @@ fn a_credit_note_reverses_the_tax_that_was_actually_charged() {
             date: None,
             payment_type: "upi".into(),
             created_by_user_id: None,
-            lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+            lines: vec![NewInvoiceLine {
+                item_id: rack.id,
+                qty: 1.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap();
     assert!(invoice.igst > 0.0 && invoice.cgst == 0.0, "inter-state");
@@ -1987,7 +2216,11 @@ fn a_one_off_item_bills_without_joining_the_catalogue() {
                 qty: 2.0,
                 rate: None,
                 tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
             }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap();
 
@@ -2042,7 +2275,16 @@ fn clearing_demo_data_removes_untouched_samples_only() {
             date: None,
             payment_type: "cash".into(),
             created_by_user_id: None,
-            lines: vec![NewInvoiceLine { item_id: rack.id, qty: 1.0, rate: None, tax_rate: None }],
+            lines: vec![NewInvoiceLine {
+                item_id: rack.id,
+                qty: 1.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
         })
         .unwrap();
 
@@ -2091,6 +2333,7 @@ fn clearing_demo_data_twice_is_harmless_and_spares_real_rows() {
             mobile: "9000012345".into(),
             gstin: None,
             place_of_supply: "TN".into(),
+            price_list_id: None,
         })
         .unwrap();
 
@@ -2108,4 +2351,770 @@ fn clearing_demo_data_twice_is_harmless_and_spares_real_rows() {
     assert!(db.get_item(real.id).unwrap().is_some());
     assert!(db.search_customer(&real_customer.mobile).unwrap().is_some());
     assert_eq!(db.count_items().unwrap(), 1);
+}
+
+// ============================================================== price lists
+
+/// The migration leaves a database that prices exactly as it did before it ran.
+#[test]
+fn an_existing_database_lands_on_a_default_list_at_its_existing_prices() {
+    let db = seeded_db();
+
+    let lists = db.price_lists().unwrap();
+    assert_eq!(lists.len(), 1, "one list to start with");
+    assert_eq!(lists[0].name, "Retail");
+    assert!(lists[0].is_default);
+    assert_eq!(db.default_price_list().unwrap().id, lists[0].id);
+
+    // Every seeded item now has that price stated rather than assumed, and it is the
+    // same number `items.rate` always held.
+    for item in db.search_item("").unwrap() {
+        let resolved = db.resolve_rate(item.id, lists[0].id).unwrap();
+        assert_eq!(resolved.rate, item.rate, "{} priced differently", item.item_code);
+        assert!(resolved.from_price_list, "{} should have a Retail entry", item.item_code);
+    }
+
+    // And a customer nobody has assigned is billed from it.
+    let buyer = customer(&db, "9840012345");
+    assert_eq!(buyer.price_list_id, None);
+    assert_eq!(db.price_list_for_customer(buyer.id).unwrap().id, lists[0].id);
+}
+
+/// A one-off is not a price list entry. It is one line on one bill.
+#[test]
+fn a_one_off_item_gets_no_price_list_entry_and_keeps_its_typed_rate() {
+    let mut db = seeded_db();
+    let retail = db.default_price_list().unwrap();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+
+    let one_off =
+        db.create_custom_item("Shutter spring replacement", 1_450.0, 18.0, "NOS").unwrap();
+
+    for list in [&retail, &wholesale] {
+        let resolved = db.resolve_rate(one_off.id, list.id).unwrap();
+        assert_eq!(resolved.rate, 1_450.0);
+        assert!(!resolved.from_price_list, "a one-off falls back on every list");
+    }
+    assert!(db.item_prices(one_off.id).unwrap().iter().all(|row| row.rate.is_none()));
+}
+
+/// The headline case: same item, two customers, two rates.
+#[test]
+fn two_customers_on_different_lists_are_billed_different_rates_for_the_same_item() {
+    let mut db = seeded_db();
+    let retail = db.default_price_list().unwrap();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+
+    let cement = item(&db, "CEM-OPC-53"); // 410.00 at 28%
+    db.set_item_prices(
+        cement.id,
+        &[
+            ItemPrice { item_id: cement.id, price_list_id: retail.id, rate: 410.0 },
+            ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 },
+        ],
+    )
+    .unwrap();
+
+    let builder = db
+        .create_customer(&NewCustomer {
+            name: "Kavi Constructions".into(),
+            mobile: "9111122233".into(),
+            gstin: None,
+            place_of_supply: "TN".into(),
+            price_list_id: Some(wholesale.id),
+        })
+        .unwrap();
+    let walk_in = customer(&db, "9840012345"); // left on the default
+
+    // Neither invoice states a rate. That is the point: the rate is the database's to
+    // decide from who is being billed, not the caller's to assert.
+    let line = |item_id| NewInvoiceLine {
+        item_id,
+        qty: 100.0,
+        rate: None,
+        tax_rate: None,
+        discount_type: DiscountType::None,
+        discount_value: 0.0,
+    };
+
+    let trade = db
+        .create_invoice(&NewInvoice {
+            customer_id: builder.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![line(cement.id)],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
+        })
+        .unwrap();
+    let counter = db
+        .create_invoice(&NewInvoice {
+            customer_id: walk_in.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![line(cement.id)],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
+        })
+        .unwrap();
+
+    assert_eq!(trade.subtotal, 36_500.00, "100 bags at the wholesale 365.00");
+    assert_eq!(counter.subtotal, 41_000.00, "100 bags at the retail 410.00");
+
+    // Taxed on what was actually charged, not on a single sticker price.
+    assert_eq!(trade.grand_total, 46_720.00); // 36,500 + 28%
+    assert_eq!(counter.grand_total, 52_480.00); // 41,000 + 28%
+
+    // The rate is on the line, so each invoice stays readable on its own terms.
+    assert_eq!(db.invoice_lines(trade.id).unwrap()[0].rate, 365.0);
+    assert_eq!(db.invoice_lines(counter.id).unwrap()[0].rate, 410.0);
+}
+
+/// A list only has to price what the shop actually discounts.
+#[test]
+fn an_item_with_no_entry_on_the_list_falls_back_to_its_base_rate() {
+    let mut db = seeded_db();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+
+    let cement = item(&db, "CEM-OPC-53");
+    let steel = item(&db, "TMT-12MM"); // deliberately left unpriced on Wholesale
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 }],
+    )
+    .unwrap();
+
+    let priced = db.resolve_rate(cement.id, wholesale.id).unwrap();
+    assert_eq!(priced.rate, 365.0);
+    assert!(priced.from_price_list);
+
+    let fell_back = db.resolve_rate(steel.id, wholesale.id).unwrap();
+    assert_eq!(fell_back.rate, steel.rate, "620.00, the base rate");
+    assert!(!fell_back.from_price_list, "and the screen can say so");
+
+    let builder = db
+        .create_customer(&NewCustomer {
+            name: "Kavi Constructions".into(),
+            mobile: "9111122233".into(),
+            gstin: None,
+            place_of_supply: "TN".into(),
+            price_list_id: Some(wholesale.id),
+        })
+        .unwrap();
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: builder.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![
+                NewInvoiceLine {
+                    item_id: cement.id,
+                    qty: 10.0,
+                    rate: None,
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
+                NewInvoiceLine {
+                    item_id: steel.id,
+                    qty: 10.0,
+                    rate: None,
+                    tax_rate: None,
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
+            ],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
+        })
+        .unwrap();
+
+    let lines = db.invoice_lines(invoice.id).unwrap();
+    assert_eq!(lines[0].rate, 365.0, "the wholesale rate");
+    assert_eq!(lines[1].rate, 620.0, "and the base rate beside it on the same bill");
+}
+
+/// "Exactly one default" is the database's rule, not a convention.
+#[test]
+fn the_default_flag_moves_and_never_splits_or_disappears() {
+    let mut db = seeded_db();
+    let retail = db.default_price_list().unwrap();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    assert!(!wholesale.is_default, "a new list does not seize the default");
+
+    let now_default = db.set_default_price_list(wholesale.id).unwrap();
+    assert!(now_default.is_default);
+
+    let flagged: Vec<_> = db.price_lists().unwrap().into_iter().filter(|l| l.is_default).collect();
+    assert_eq!(flagged.len(), 1, "one default, always");
+    assert_eq!(flagged[0].id, wholesale.id);
+    assert!(!db.get_price_list(retail.id).unwrap().unwrap().is_default, "the old one stood down");
+
+    // And an unassigned customer follows the flag rather than being pinned to the list
+    // that happened to be default when they were registered.
+    let walk_in = customer(&db, "9840012345");
+    assert_eq!(walk_in.price_list_id, None);
+    assert_eq!(db.price_list_for_customer(walk_in.id).unwrap().id, wholesale.id);
+}
+
+#[test]
+fn price_lists_are_named_once_and_renamed_without_touching_their_rates() {
+    let mut db = seeded_db();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    let cement = item(&db, "CEM-OPC-53");
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 }],
+    )
+    .unwrap();
+
+    assert!(db.create_price_list("  ").is_err(), "a list needs a name");
+    assert!(db.create_price_list("wholesale").is_err(), "and names are unique, case aside");
+
+    let renamed = db.rename_price_list(wholesale.id, "Trade").unwrap();
+    assert_eq!(renamed.name, "Trade");
+    assert_eq!(renamed.id, wholesale.id);
+    assert_eq!(
+        db.resolve_rate(cement.id, wholesale.id).unwrap().rate,
+        365.0,
+        "renaming a list is not repricing it"
+    );
+    assert!(db.rename_price_list(wholesale.id, "Retail").is_err(), "onto another list's name");
+    assert!(db.rename_price_list(9_999, "Anything").is_err(), "or a list that does not exist");
+}
+
+/// Clearing a box on the form means "fall back", not "leave it alone".
+#[test]
+fn setting_prices_replaces_the_whole_table_for_that_item() {
+    let mut db = seeded_db();
+    let retail = db.default_price_list().unwrap();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    let cement = item(&db, "CEM-OPC-53");
+
+    db.set_item_prices(
+        cement.id,
+        &[
+            ItemPrice { item_id: cement.id, price_list_id: retail.id, rate: 410.0 },
+            ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 },
+        ],
+    )
+    .unwrap();
+
+    // Submitting the form with Wholesale blanked removes that entry.
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: retail.id, rate: 415.0 }],
+    )
+    .unwrap();
+
+    let rows = db.item_prices(cement.id).unwrap();
+    let retail_row = rows.iter().find(|r| r.price_list.id == retail.id).unwrap();
+    let wholesale_row = rows.iter().find(|r| r.price_list.id == wholesale.id).unwrap();
+    assert_eq!(retail_row.rate, Some(415.0));
+    assert_eq!(wholesale_row.rate, None, "blanked, so it falls back");
+    assert_eq!(db.resolve_rate(cement.id, wholesale.id).unwrap().rate, cement.rate);
+
+    assert!(
+        db.set_item_prices(
+            cement.id,
+            &[ItemPrice { item_id: cement.id, price_list_id: retail.id, rate: -1.0 }]
+        )
+        .is_err(),
+        "a negative price is a typo"
+    );
+    assert!(
+        db.set_item_prices(
+            cement.id,
+            &[ItemPrice { item_id: cement.id, price_list_id: 9_999, rate: 1.0 }]
+        )
+        .is_err(),
+        "and so is a list that does not exist"
+    );
+}
+
+/// Moving a customer between lists changes what they pay next, never what they paid.
+#[test]
+fn reassigning_a_customer_leaves_their_old_invoices_exactly_as_billed() {
+    let mut db = seeded_db();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    let cement = item(&db, "CEM-OPC-53");
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 }],
+    )
+    .unwrap();
+
+    let buyer = customer(&db, "9840012345");
+    let before = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine {
+                item_id: cement.id,
+                qty: 10.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
+        })
+        .unwrap();
+    assert_eq!(before.subtotal, 4_100.00);
+
+    let moved = db.set_customer_price_list(buyer.id, Some(wholesale.id)).unwrap();
+    assert_eq!(moved.price_list_id, Some(wholesale.id));
+    assert_eq!(db.price_list_for_customer(buyer.id).unwrap().id, wholesale.id);
+
+    // The invoice already raised is untouched, in the row and in its lines.
+    assert_eq!(db.get_invoice(before.id).unwrap().unwrap(), before);
+    assert_eq!(db.invoice_lines(before.id).unwrap()[0].rate, 410.0);
+
+    // The next one is billed at the new list.
+    let after = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine {
+                item_id: cement.id,
+                qty: 10.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
+        })
+        .unwrap();
+    assert_eq!(after.subtotal, 3_650.00);
+
+    // And back to the default with None.
+    let reset = db.set_customer_price_list(buyer.id, None).unwrap();
+    assert_eq!(reset.price_list_id, None);
+    assert!(db.set_customer_price_list(buyer.id, Some(9_999)).is_err());
+}
+
+/// An explicit rate still wins, which is the hook a per-line discount will use.
+#[test]
+fn an_explicit_rate_overrides_the_price_list() {
+    let mut db = seeded_db();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    let cement = item(&db, "CEM-OPC-53");
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 }],
+    )
+    .unwrap();
+    let buyer =
+        db.set_customer_price_list(customer(&db, "9840012345").id, Some(wholesale.id)).unwrap();
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            lines: vec![NewInvoiceLine {
+                item_id: cement.id,
+                qty: 10.0,
+                rate: Some(350.0),
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
+        })
+        .unwrap();
+
+    assert_eq!(invoice.subtotal, 3_500.00);
+    assert_eq!(db.invoice_lines(invoice.id).unwrap()[0].rate, 350.0);
+}
+
+/// The picker shows the rate that will be billed, not the one on the sticker.
+#[test]
+fn the_priced_search_resolves_every_row_for_the_list_it_is_given() {
+    let mut db = seeded_db();
+    let retail = db.default_price_list().unwrap();
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    let cement = item(&db, "CEM-OPC-53");
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 365.0 }],
+    )
+    .unwrap();
+
+    let on_retail = db.search_item_priced("CEM-OPC-53", retail.id).unwrap();
+    assert_eq!(on_retail.len(), 1);
+    assert_eq!(on_retail[0].rate, 410.0);
+    assert!(!on_retail[0].from_price_list, "the Retail entry went when the table was replaced");
+
+    let on_wholesale = db.search_item_priced("CEM-OPC-53", wholesale.id).unwrap();
+    assert_eq!(on_wholesale[0].rate, 365.0);
+    assert!(on_wholesale[0].from_price_list);
+    assert_eq!(on_wholesale[0].item.rate, 410.0, "the base rate is still reported as itself");
+
+    // One-offs stay out of the picker whichever list is being priced.
+    let one_off = db.create_custom_item("Crane hire", 9_000.0, 18.0, "DAY").unwrap();
+    assert!(db
+        .search_item_priced("", wholesale.id)
+        .unwrap()
+        .iter()
+        .all(|p| p.item.id != one_off.id));
+}
+
+// ================================================================ discounts
+
+/// The stage's worked example, billed end to end, against the same hand calculation the
+/// GST unit test asserts — but through `create_invoice`, so what is *stored* is checked
+/// as well as what is computed.
+///
+/// 1 x 45,000 @18% and 5 x 12,000 @18% with 10% off the second line, then a flat 1,000
+/// off the invoice, comes to 98,000.00 taxable and 115,640.00 all in.
+#[test]
+fn an_invoice_with_line_and_invoice_discounts_stores_the_hand_calculated_figures() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let rack = item(&db, "RACK-42U-PRO");
+    let license = item(&db, "ABCOS-ENT-LIC");
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            invoice_discount_type: DiscountType::Flat,
+            invoice_discount_value: 1_000.0,
+            lines: vec![
+                NewInvoiceLine {
+                    item_id: rack.id,
+                    qty: 1.0,
+                    rate: Some(45_000.0),
+                    tax_rate: Some(18.0),
+                    discount_type: DiscountType::None,
+                    discount_value: 0.0,
+                },
+                NewInvoiceLine {
+                    item_id: license.id,
+                    qty: 5.0,
+                    rate: Some(12_000.0),
+                    tax_rate: Some(18.0),
+                    discount_type: DiscountType::Percentage,
+                    discount_value: 10.0,
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(invoice.pre_discount_subtotal, 105_000.00, "what it would have cost");
+    assert_eq!(invoice.discount_amount, 7_000.00, "6,000 line + 1,000 invoice");
+    assert_eq!(invoice.invoice_discount_amount, 1_000.00);
+    assert_eq!(invoice.invoice_discount_type, DiscountType::Flat);
+    assert_eq!(invoice.invoice_discount_value, 1_000.0);
+    assert_eq!(invoice.subtotal, 98_000.00, "the taxable value");
+    assert_eq!(invoice.cgst, 8_820.00);
+    assert_eq!(invoice.sgst, 8_820.00);
+    assert_eq!(invoice.igst, 0.0);
+    assert_eq!(invoice.grand_total, 115_640.00);
+
+    // Every figure the tax was worked out from is on the line, not re-derivable-only.
+    let lines = db.invoice_lines(invoice.id).unwrap();
+    assert_eq!(lines[0].line_total, 45_000.00);
+    assert_eq!(lines[0].discount_type, DiscountType::None);
+    assert_eq!(lines[0].discount_amount, 0.0);
+    assert_eq!(lines[0].invoice_discount_share, 454.55);
+    assert_eq!(lines[0].taxable_value, 44_545.45);
+
+    assert_eq!(lines[1].line_total, 60_000.00);
+    assert_eq!(lines[1].discount_type, DiscountType::Percentage);
+    assert_eq!(lines[1].discount_value, 10.0);
+    assert_eq!(lines[1].discount_amount, 6_000.00);
+    assert_eq!(lines[1].invoice_discount_share, 545.45);
+    assert_eq!(lines[1].taxable_value, 53_454.55);
+
+    // The parts add up to the whole, which is the property an auditor checks first.
+    let taxable: f64 = lines.iter().map(|l| l.taxable_value).sum();
+    assert_eq!(taxable, invoice.subtotal);
+    let gross: f64 = lines.iter().map(|l| l.line_total).sum();
+    assert_eq!(gross, invoice.pre_discount_subtotal);
+    let discounts: f64 = lines.iter().map(|l| l.discount_amount + l.invoice_discount_share).sum();
+    assert_eq!(discounts, invoice.discount_amount);
+}
+
+/// The whole point of freezing the figures: a saved invoice must not move when the
+/// catalogue does.
+#[test]
+fn a_discounted_invoice_is_unchanged_by_a_later_price_change() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let cement = item(&db, "CEM-OPC-53"); // 410.00 at 28%
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            invoice_discount_type: DiscountType::Percentage,
+            invoice_discount_value: 5.0,
+            lines: vec![NewInvoiceLine {
+                item_id: cement.id,
+                qty: 100.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::Percentage,
+                discount_value: 10.0,
+            }],
+        })
+        .unwrap();
+
+    // 41,000 less 10% = 36,900; less 5% = 35,055; 28% of that is 9,815.40.
+    assert_eq!(invoice.pre_discount_subtotal, 41_000.00);
+    assert_eq!(invoice.discount_amount, 5_945.00);
+    assert_eq!(invoice.subtotal, 35_055.00);
+    assert_eq!(invoice.grand_total, 44_870.40);
+
+    let before = db.get_invoice_detail(invoice.id).unwrap().unwrap();
+
+    // Now move the catalogue underneath it — a new base rate and a new price list entry.
+    let wholesale = db.create_price_list("Wholesale").unwrap();
+    db.set_item_prices(
+        cement.id,
+        &[ItemPrice { item_id: cement.id, price_list_id: wholesale.id, rate: 200.0 }],
+    )
+    .unwrap();
+    db.upsert_item(&NewItem {
+        item_code: "CEM-OPC-53".into(),
+        description: "OPC 53 Grade Cement".into(),
+        rate: 999.0,
+        tax_rate: 28.0,
+        uom: "BAG".into(),
+        custom: false,
+    })
+    .unwrap();
+    db.set_customer_price_list(buyer.id, Some(wholesale.id)).unwrap();
+
+    let after = db.get_invoice_detail(invoice.id).unwrap().unwrap();
+    assert_eq!(after.invoice, before.invoice, "not one figure moved");
+    assert_eq!(after.lines, before.lines);
+    assert_eq!(after.invoice.grand_total, 44_870.40);
+    assert_eq!(after.lines[0].line.rate, 410.0, "still the rate it was billed at");
+    assert_eq!(after.lines[0].line.taxable_value, 35_055.00);
+}
+
+/// A return on a discounted line refunds what was paid, not the sticker price.
+#[test]
+fn a_credit_note_on_a_discounted_line_credits_the_discounted_price() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let cement = item(&db, "CEM-OPC-53"); // 410.00 at 28%
+
+    // 100 bags at 410 = 41,000, less 20% = 32,800. So each bag really cost 328.00.
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
+            lines: vec![NewInvoiceLine {
+                item_id: cement.id,
+                qty: 100.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::Percentage,
+                discount_value: 20.0,
+            }],
+        })
+        .unwrap();
+    assert_eq!(invoice.subtotal, 32_800.00);
+
+    let creditable = db.creditable_lines(invoice.id).unwrap();
+    assert_eq!(creditable[0].rate, 410.0, "the billed rate, for the customer's copy");
+    assert_eq!(creditable[0].effective_rate, 328.0, "what a bag actually cost");
+
+    // Ten bags come back.
+    let note = db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            date: None,
+            reason: "Ten bags returned, damaged".into(),
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine {
+                invoice_line_id: creditable[0].invoice_line_id,
+                qty: 10.0,
+            }],
+        })
+        .unwrap();
+
+    // 10 x 328.00 = 3,280.00, and 28% of that is 918.40 — not 10 x 410.
+    assert_eq!(note.subtotal, 3_280.00);
+    assert_eq!(note.cgst, 459.20);
+    assert_eq!(note.sgst, 459.20);
+    assert_eq!(note.grand_total, 4_198.40);
+
+    // The whole line credited back comes to exactly what the line was billed.
+    let rest = db
+        .create_credit_note(&NewCreditNote {
+            original_invoice_id: invoice.id,
+            date: None,
+            reason: "The other ninety too".into(),
+            created_by_user_id: None,
+            lines: vec![NewCreditNoteLine {
+                invoice_line_id: creditable[0].invoice_line_id,
+                qty: 90.0,
+            }],
+        })
+        .unwrap();
+    assert_eq!(
+        gst_round(note.grand_total + rest.grand_total),
+        invoice.grand_total,
+        "crediting everything nets the invoice to zero"
+    );
+    assert_eq!(db.invoice_net(invoice.id).unwrap().net_total, 0.0);
+}
+
+fn gst_round(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+/// Core refuses what the screen should never have sent, so a bad discount cannot be
+/// talked past the UI by a hand-made payload.
+#[test]
+fn a_discount_bigger_than_the_bill_is_refused_and_writes_nothing() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let cement = item(&db, "CEM-OPC-53");
+
+    let bad = db.create_invoice(&NewInvoice {
+        customer_id: buyer.id,
+        date: None,
+        payment_type: "cash".into(),
+        created_by_user_id: None,
+        invoice_discount_type: DiscountType::Flat,
+        invoice_discount_value: 999_999.0,
+        lines: vec![NewInvoiceLine {
+            item_id: cement.id,
+            qty: 1.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        }],
+    });
+    assert!(matches!(bad, Err(CoreError::Invalid(_))), "{bad:?}");
+
+    // Nothing was written, and the invoice number was not burnt.
+    assert!(db.list_todays_invoices().unwrap().is_empty());
+    assert!(db.pending_sync_rows_for("invoices").unwrap().is_empty());
+    assert!(db.pending_sync_rows_for("invoice_lines").unwrap().is_empty());
+}
+
+/// Appending to an invoice that carries a discount re-apportions it across every line,
+/// rather than leaving the earlier lines holding shares of a subtotal that has changed.
+#[test]
+fn adding_a_line_reapportions_the_invoice_discount_over_all_of_them() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let rack = item(&db, "RACK-42U-PRO"); // 45,000 @ 18%
+    let steel = item(&db, "TMT-12MM"); // 620 @ 18%
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            invoice_discount_type: DiscountType::Flat,
+            invoice_discount_value: 1_000.0,
+            lines: vec![NewInvoiceLine {
+                item_id: rack.id,
+                qty: 1.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+        })
+        .unwrap();
+
+    // One line, so it carries the whole discount.
+    assert_eq!(db.invoice_lines(invoice.id).unwrap()[0].invoice_discount_share, 1_000.00);
+    assert_eq!(invoice.subtotal, 44_000.00);
+
+    db.add_line_item(
+        invoice.id,
+        &NewInvoiceLine {
+            item_id: steel.id,
+            qty: 10.0,
+            rate: None,
+            tax_rate: None,
+            discount_type: DiscountType::None,
+            discount_value: 0.0,
+        },
+    )
+    .unwrap();
+
+    // 45,000 + 6,200 = 51,200 to share 1,000 across.
+    let lines = db.invoice_lines(invoice.id).unwrap();
+    let shares: Vec<f64> = lines.iter().map(|l| l.invoice_discount_share).collect();
+    assert_eq!(shares, vec![878.91, 121.09], "the first line's share came down");
+    assert_eq!(gst_round(shares.iter().sum::<f64>()), 1_000.00);
+
+    let updated = db.get_invoice(invoice.id).unwrap().unwrap();
+    assert_eq!(updated.pre_discount_subtotal, 51_200.00);
+    assert_eq!(updated.discount_amount, 1_000.00);
+    assert_eq!(updated.subtotal, 50_200.00);
+    assert_eq!(gst_round(lines.iter().map(|l| l.taxable_value).sum::<f64>()), updated.subtotal);
+}
+
+/// An undiscounted invoice states its pre-discount subtotal as its subtotal, so the two
+/// columns the reports will read are always both populated.
+#[test]
+fn an_undiscounted_invoice_reports_no_discount_rather_than_a_blank() {
+    let mut db = seeded_db();
+    let buyer = customer(&db, "9840012345");
+    let cement = item(&db, "CEM-OPC-53");
+
+    let invoice = db
+        .create_invoice(&NewInvoice {
+            customer_id: buyer.id,
+            date: None,
+            payment_type: "cash".into(),
+            created_by_user_id: None,
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
+            lines: vec![NewInvoiceLine {
+                item_id: cement.id,
+                qty: 10.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+        })
+        .unwrap();
+
+    assert_eq!(invoice.pre_discount_subtotal, 4_100.00);
+    assert_eq!(invoice.subtotal, 4_100.00);
+    assert_eq!(invoice.discount_amount, 0.0);
+    assert_eq!(invoice.invoice_discount_amount, 0.0);
+    assert_eq!(invoice.invoice_discount_type, DiscountType::None);
+
+    let line = &db.invoice_lines(invoice.id).unwrap()[0];
+    assert_eq!(line.taxable_value, line.line_total);
+    assert_eq!(line.discount_amount, 0.0);
+    assert_eq!(line.invoice_discount_share, 0.0);
 }

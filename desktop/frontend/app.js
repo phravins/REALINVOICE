@@ -55,6 +55,32 @@
   /** The resolved customer, or null. `place_of_supply` drives the GST split. */
   var customer = null;
 
+  /**
+   * Every price list, and the one the bill on screen is being priced from.
+   *
+   * `activeList` is the attached customer's list, or the default when nobody is
+   * attached — which is what a walk-in would pay, and what the picker quotes before
+   * anyone is resolved. It is a cache of a decision core owns: the save re-resolves from
+   * the stored customer and refuses if the two disagree.
+   */
+  var priceLists = [];
+  var activeList = null;
+
+  /**
+   * The whole-bill discount, and the ceiling a cashier may reach without an owner.
+   *
+   * Both are only ever *displayed* from here. The discount is sent to core with the save
+   * and re-applied there, and the ceiling is enforced in Rust — a gate the frontend can
+   * open is not a gate.
+   */
+  var invoiceDiscount = { type: "none", value: 0 };
+  var discountLimitPct = 15;
+
+  function listName(id) {
+    var match = priceLists.filter(function (l) { return l.id === id; })[0];
+    return match ? match.name : "";
+  }
+
   /** Billing rows: { item_id, item_code, description, qty, rate, tax_rate, total }. */
   var rows = [];
 
@@ -80,30 +106,56 @@
    * live quote from core, the history detail feeds it a saved invoice. Intra-state shows
    * CGST + SGST, inter-state shows IGST — never both.
    */
+  /**
+   * The totals block, on the billing card and on a saved invoice alike.
+   *
+   * When anything was discounted the panel shows the whole working — what it would have
+   * cost, what came off, and what tax was then charged on. Collapsing the discount into
+   * the subtotal would leave a cashier unable to answer "why is this not the shelf
+   * price", and would leave an auditor unable to answer it at all.
+   */
   function renderTotals(el, t) {
-    function row(label, value, grand) {
+    function row(label, value, style) {
+      var grand = style === "grand";
+      var discount = style === "discount";
+      var taxable = style === "taxable";
       return (
         '<div class="flex items-baseline justify-between gap-4 ' +
         (grand
           ? 'mt-2 border-t border-base-300 pt-3"><dt class="text-base font-semibold">'
-          : 'py-1"><dt class="text-sm text-base-content/60">') +
+          : taxable
+            ? 'border-t border-base-300 pt-2 mt-1 py-1"><dt class="text-sm font-medium">'
+            : 'py-1"><dt class="text-sm ' +
+              (discount ? "text-error" : "text-base-content/60") + '">') +
         label +
         "</dt><dd class=" +
         (grand
           ? '"font-mono text-2xl font-semibold tabular-nums">'
-          : '"font-mono text-sm tabular-nums">') +
+          : discount
+            ? '"font-mono text-sm tabular-nums text-error">'
+            : '"font-mono text-sm tabular-nums">') +
+        (discount ? "−" : "") +
         rupees(value) +
         "</dd></div>"
       );
     }
 
-    var html = row("Subtotal", t.subtotal);
+    var discounted = t.discount_amount > 0;
+
+    // With a discount the first line is what it would have cost; without one there is
+    // nothing to distinguish, so it stays the plain "Subtotal" it has always been.
+    var html = row(discounted ? "Subtotal (before discount)" : "Subtotal",
+                   discounted ? t.pre_discount_subtotal : t.subtotal);
+    if (discounted) {
+      html += row("Discount", t.discount_amount, "discount");
+      html += row("Taxable Value", t.subtotal, "taxable");
+    }
     if (t.intra_state) {
       html += row("CGST", t.cgst) + row("SGST", t.sgst);
     } else {
       html += row("IGST", t.igst);
     }
-    el.innerHTML = html + row("Grand Total", t.grand_total, true);
+    el.innerHTML = html + row("Grand Total", t.grand_total, "grand");
   }
 
   /** A saved invoice's totals, in the shape renderTotals expects. */
@@ -111,6 +163,10 @@
     return {
       // A stored invoice carries the split itself: IGST is only ever set inter-state.
       intra_state: !(invoice.igst > 0),
+      // Read from the row as stored, never recomputed — which is what makes reopening a
+      // discounted invoice show the breakdown it was billed with.
+      pre_discount_subtotal: invoice.pre_discount_subtotal,
+      discount_amount: invoice.discount_amount,
       subtotal: invoice.subtotal,
       cgst: invoice.cgst,
       sgst: invoice.sgst,
@@ -144,6 +200,34 @@
             '"><span class="hero-x-mark size-4" aria-hidden="true"></span></button></td>'
           : "";
 
+        // The discount control lives under the Rate, collapsed to a single icon until
+        // the row actually has one. Most rows never do, and a discount box on every line
+        // is a discount box nobody reads.
+        var discounted = line.discount_type && line.discount_type !== "none" &&
+                         line.discount_value > 0;
+        var discountCell = "";
+        if (editable) {
+          discountCell =
+            '<button type="button" data-discount="' + index + '" ' +
+            'title="Discount this line" aria-label="Discount ' +
+            escapeHtml(line.item_code) + '" class="mt-0.5 flex items-center gap-1 ' +
+            'text-2xs ' + (discounted ? "text-error" : "text-base-content/45") +
+            ' transition-colors hover:text-base-content">' +
+            '<span class="hero-receipt-percent size-3.5" aria-hidden="true"></span>' +
+            (discounted ? escapeHtml(discountLabel(line)) : "Discount") +
+            "</button>";
+        } else if (discounted) {
+          // A flat discount's label is the same number as its amount, so it is only
+          // spelled out for a percentage, where the two genuinely differ.
+          discountCell =
+            '<span class="mt-0.5 block text-2xs text-error">−' +
+            money(line.discount_amount) +
+            (line.discount_type === "percentage"
+              ? " (" + escapeHtml(discountLabel(line)) + ")"
+              : "") +
+            "</span>";
+        }
+
         var num = ' class="py-2 text-right font-mono tabular-nums"';
 
         // A one-off's item code is a generated key, not something anyone reads out. The
@@ -159,7 +243,9 @@
           '<td class="py-2">' + code + "</td>" +
           '<td class="py-2">' + escapeHtml(line.description) + "</td>" +
           '<td class="py-2 text-right">' + qty + "</td>" +
-          "<td" + num + ">" + money(line.rate) + "</td>" +
+          '<td class="py-2 text-right font-mono tabular-nums">' + money(line.rate) +
+          (discountCell ? '<span class="block font-sans">' + discountCell + "</span>" : "") +
+          "</td>" +
           "<td" + num + ">" + money(line.tax_rate) + "</td>" +
           '<td class="py-2 text-right font-mono tabular-nums" data-total="' + index +
           '">' + money(line.total) + "</td>" +
@@ -168,6 +254,18 @@
         );
       })
       .join("");
+  }
+
+  /** Paise, the way core rounds. Only ever used to subtract two figures core produced. */
+  function gstRound(value) {
+    return Math.round(value * 100) / 100;
+  }
+
+  /** "10%" or "₹500" — how a line's discount was expressed, not what it came to. */
+  function discountLabel(line) {
+    if (line.discount_type === "percentage") return money(line.discount_value) + "%";
+    if (line.discount_type === "flat") return "₹" + money(line.discount_value);
+    return "";
   }
 
   /** `YYYY-MM-DD HH:MM:SS` -> `YYYY-MM-DD HH:MM`, falling back to the invoice date. */
@@ -232,6 +330,121 @@
       });
   }
 
+  /* --------------------------------------------------------------- price lists */
+
+  /**
+   * Loads the lists once per sign-in, and settles on the default.
+   *
+   * Everything that draws a list dropdown reads `priceLists`, so they cannot disagree
+   * about what exists or what it is called.
+   */
+  function loadPriceLists() {
+    if (!invoke) return Promise.resolve([]);
+
+    return invoke("price_lists")
+      .then(function (lists) {
+        priceLists = lists || [];
+        if (!activeList) {
+          activeList = priceLists.filter(function (l) { return l.is_default; })[0] || null;
+        }
+        renderPriceListOptions();
+        renderPriceListRows();
+        return priceLists;
+      })
+      .catch(function (err) {
+        status("price_lists failed: " + errText(err));
+        return [];
+      });
+  }
+
+  /** Fills every <select> that offers a price list. */
+  function renderPriceListOptions() {
+    var options = priceLists
+      .map(function (list) {
+        return (
+          '<option value="' + list.id + '">' + escapeHtml(list.name) +
+          (list.is_default ? " (default)" : "") + "</option>"
+        );
+      })
+      .join("");
+
+    // "Default" is offered as its own choice rather than pre-selecting today's default:
+    // a customer left on it follows the flag if the shop moves it later.
+    $("nc-pricelist").innerHTML =
+      '<option value="">Default</option>' + options;
+    $("pricing-select").innerHTML = '<option value="">Default</option>' + options;
+  }
+
+  /**
+   * Switches the bill to a different price list and re-rates what is already on it.
+   *
+   * This is the case the toast exists for. Items get added before the customer is
+   * resolved all the time — the bag of cement is on the counter before the phone number
+   * is — and those rows were priced at the default. Attaching a wholesale buyer has to
+   * change them, and a total that changes silently is how a counter ends up arguing
+   * about a printed bill.
+   */
+  function applyPriceList(list, reason) {
+    var previous = activeList;
+    activeList = list || null;
+    renderCustomer();
+
+    var changedList = !previous || !activeList || previous.id !== activeList.id;
+    if (!activeList || !rows.length || !changedList) {
+      renderCustomer();
+      return Promise.resolve(0);
+    }
+    if (!invoke) return Promise.resolve(0);
+
+    return invoke("resolve_rates", {
+      itemIds: rows.map(function (row) { return row.item_id; }),
+      priceListId: activeList.id,
+    })
+      .then(function (resolved) {
+        var moved = 0;
+        resolved.forEach(function (entry, index) {
+          var row = rows[index];
+          if (!row || row.rate === entry.rate) return;
+          row.rate = entry.rate;
+          row.from_price_list = entry.from_price_list;
+          moved += 1;
+        });
+
+        if (moved) {
+          renderRows();
+          requote();
+          UI.toast(
+            "Prices updated for " + (reason || activeList.name) +
+              " — " + activeList.name + " rates on " + moved + " line(s).",
+            "info"
+          );
+        }
+        return moved;
+      })
+      .catch(function (err) {
+        status("resolve_rates failed: " + errText(err));
+        return 0;
+      });
+  }
+
+  /** Follows whoever is attached; falls back to the default when nobody is. */
+  function syncPriceListToCustomer() {
+    if (!invoke) return Promise.resolve(0);
+
+    if (!customer) {
+      var fallback = priceLists.filter(function (l) { return l.is_default; })[0];
+      return applyPriceList(fallback || activeList, "a walk-in");
+    }
+    return invoke("price_list_for_customer", { customerId: customer.id })
+      .then(function (list) {
+        return applyPriceList(list, customer.name);
+      })
+      .catch(function (err) {
+        status("price_list_for_customer failed: " + errText(err));
+        return 0;
+      });
+  }
+
   /* ------------------------------------------------------------------ customer */
 
   /**
@@ -247,6 +460,8 @@
     // Detaching is an edit, and a saved invoice is not editable.
     $("customer-detach").hidden = locked;
     if (attached) $("customer-miss").hidden = true;
+
+    renderPricing();
 
     if (!attached) {
       $("customer-line").innerHTML = "";
@@ -266,12 +481,49 @@
       " · place of supply " + escapeHtml(customer.place_of_supply) + "</span>";
   }
 
+  /**
+   * The "Pricing: Wholesale" marker beside the customer.
+   *
+   * An owner gets a dropdown — the place you notice the wrong list is the place you
+   * should be able to fix it — and everyone else the same thing as plain text. The
+   * command behind it refuses a cashier regardless.
+   */
+  function renderPricing() {
+    var badge = $("pricing-badge");
+    var select = $("pricing-select");
+    var owner = !!user && user.role === "owner";
+    var editable = owner && !!customer && !locked;
+
+    if (!activeList) {
+      badge.hidden = true;
+      select.hidden = true;
+      return;
+    }
+
+    badge.hidden = editable;
+    select.hidden = !editable;
+
+    badge.textContent = "Pricing: " + activeList.name;
+    badge.title = customer
+      ? customer.name + " is billed from the " + activeList.name + " price list."
+      : "No customer attached — pricing from the " + activeList.name + " list.";
+
+    if (editable) {
+      // The customer's own assignment, not the list in force: "Default" has to stay
+      // distinguishable from "assigned to the list that happens to be default".
+      select.value = customer.price_list_id == null ? "" : String(customer.price_list_id);
+      select.title = badge.title;
+    }
+  }
+
   function setCustomer(found) {
     customer = found;
     hideNewCustomer();
     $("customer-miss").hidden = true;
     renderCustomer();
     requote();
+    // Their list may not be the one the rows on screen were priced at.
+    syncPriceListToCustomer();
   }
 
   /** Puts the bill back to nobody attached, ready to search again. */
@@ -283,6 +535,8 @@
     hideNewCustomer();
     renderCustomer();
     requote();
+    // Back to what a walk-in would pay, and the rows follow.
+    syncPriceListToCustomer();
     $("mobile-input").value = "";
     $("mobile-input").focus();
     status(was ? "Detached " + was.name + "." : "Customer detached.");
@@ -350,6 +604,7 @@
     $("nc-mobile").value = mobile || $("mobile-input").value.trim();
     $("nc-gstin").value = "";
     $("nc-pos").value = "TN";
+    $("nc-pricelist").value = "";
     setMsg("nc-msg", "", false);
     $("customer-miss").hidden = true;
     $("new-customer").hidden = false;
@@ -366,6 +621,7 @@
       mobile: $("nc-mobile").value.trim(),
       gstin: $("nc-gstin").value.trim() || null,
       place_of_supply: $("nc-pos").value.trim().toUpperCase(),
+      price_list_id: $("nc-pricelist").value ? Number($("nc-pricelist").value) : null,
     };
 
     if (!payload.name || !payload.mobile || !payload.place_of_supply) {
@@ -395,17 +651,25 @@
     body.innerHTML = rows.length ? lineRowsHtml(rows, !locked) : "";
   }
 
-  function addRow(item) {
+  /**
+   * Puts an item on the bill.
+   *
+   * `rate` is the resolved rate for the active price list, not `item.rate` — the base
+   * rate is a fallback inside core, not something this screen should be reading.
+   */
+  function addRow(item, rate, fromPriceList) {
+    var resolved = rate == null ? item.rate : rate;
     rows.push({
       item_id: item.id,
       item_code: item.item_code,
       description: item.description,
       uom: item.uom,
       qty: 1,
-      rate: item.rate,
+      rate: resolved,
       tax_rate: item.tax_rate,
-      total: item.rate, // provisional; core's quote overwrites it
+      total: resolved, // provisional; core's quote overwrites it
       custom: !!item.custom,
+      from_price_list: !!fromPriceList,
     });
     renderRows();
     requote();
@@ -421,6 +685,11 @@
 
   // Delegated so the handlers survive every re-render.
   $("items-body").addEventListener("click", function (event) {
+    var discount = event.target.closest("[data-discount]");
+    if (discount) {
+      openLineDiscount(Number(discount.dataset.discount));
+      return;
+    }
     var button = event.target.closest("[data-remove]");
     if (button) removeRow(Number(button.dataset.remove));
   });
@@ -462,7 +731,10 @@
       return;
     }
 
-    invoke("search_item", { query: query })
+    invoke("search_item", {
+      query: query,
+      priceListId: activeList ? activeList.id : null,
+    })
       .then(function (items) {
         // The offer is only ever the way out of an empty result. Showing it alongside
         // matches would invite a duplicate one-off of something already in stock.
@@ -475,8 +747,11 @@
             : '<li class="px-3 py-2 text-sm text-base-content/60">No items match.</li>';
           return;
         }
+        // `items` are PricedItems: the rate shown is the rate this customer will be
+        // billed, resolved by core for the active list rather than the sticker price.
         list.innerHTML = items
-          .map(function (item, index) {
+          .map(function (priced, index) {
+            var item = priced.item;
             return (
               '<li><button type="button" data-pick="' + index + '" ' +
               'class="flex w-full items-baseline gap-3 rounded-field px-3 py-2 ' +
@@ -485,8 +760,13 @@
               "</span>" +
               '<span class="min-w-0 flex-1 truncate">' + escapeHtml(item.description) +
               "</span>" +
+              (priced.from_price_list
+                ? '<span class="shrink-0 rounded-field bg-base-300 px-1.5 py-0.5 ' +
+                  'text-2xs font-medium uppercase tracking-wider text-base-content/70">' +
+                  escapeHtml(activeList ? activeList.name : "list") + "</span>"
+                : "") +
               '<span class="shrink-0 font-mono text-xs text-base-content/45">₹' +
-              money(item.rate) + " · " + money(item.tax_rate) + "% · " +
+              money(priced.rate) + " · " + money(item.tax_rate) + "% · " +
               escapeHtml(item.uom) + "</span>" +
               "</button></li>"
             );
@@ -563,7 +843,9 @@
       uom: $("oo-uom").value.trim(),
     })
       .then(function (item) {
-        addRow(item);
+        // A one-off is priced at what was just typed on every list, so its rate is its
+        // own and there is nothing to resolve.
+        addRow(item, item.rate, false);
         // The quantity is part of the same entry, so it is applied rather than left at
         // the 1 that `addRow` assumes.
         rows[rows.length - 1].qty = qty;
@@ -600,7 +882,7 @@
     var items = JSON.parse($("picker-results").dataset.items || "[]");
     var picked = items[Number(button.dataset.pick)];
     if (picked) {
-      addRow(picked);
+      addRow(picked.item, picked.rate, picked.from_price_list);
       closePicker();
     }
   });
@@ -616,6 +898,7 @@
 
   function renderQuote(quote) {
     lastQuote = quote;
+    setMsg("id-msg", "", false);
 
     // Row totals are core's line values, not a number this file worked out.
     quote.line_totals.forEach(function (total, index) {
@@ -623,6 +906,21 @@
       var cell = document.querySelector('#items-body [data-total="' + index + '"]');
       if (cell) cell.textContent = money(total);
     });
+    (quote.line_discounts || []).forEach(function (amount, index) {
+      if (rows[index]) rows[index].discount_amount = amount;
+    });
+
+    // What the shop's limit makes of this bill, before the save says so.
+    var pct = quote.pre_discount_subtotal > 0
+      ? (quote.discount_amount / quote.pre_discount_subtotal) * 100
+      : 0;
+    $("id-limit").textContent =
+      quote.discount_amount > 0
+        ? money(pct) + "% of the bill" + (needsApproval(pct) ? " · needs owner approval" : "")
+        : "Cashiers may discount up to " + money(discountLimitPct) + "%";
+    $("id-limit").className = needsApproval(pct)
+      ? "text-2xs text-error"
+      : "text-2xs text-base-content/45";
 
     renderTotals($("billing-totals"), quote);
 
@@ -672,22 +970,202 @@
     if (!user) return;
 
     // With no customer resolved yet, quote against the home state so the operator still
-    // sees live figures; the split is re-quoted the moment one is attached.
+    // sees live figures; the split is re-quoted the moment one is attached. With one
+    // attached, core uses *their* state and ignores this.
     var placeOfSupply = customer ? customer.place_of_supply : "TN";
+
+    // Item and quantity and discount — no rates and no money. Core resolves the price
+    // from the customer's list and does every sum, here exactly as it does on the save,
+    // so the panel cannot show a figure the save would disagree with.
     var lines = rows.map(function (row) {
-      return { qty: row.qty, rate: row.rate, tax_rate: row.tax_rate };
+      return {
+        item_id: row.item_id,
+        qty: row.qty,
+        rate: null,
+        tax_rate: null,
+        discount_type: row.discount_type || "none",
+        discount_value: row.discount_value || 0,
+      };
     });
 
     var seq = ++quoteSeq;
-    invoke("quote_invoice", { placeOfSupply: placeOfSupply, lines: lines })
+    invoke("quote_invoice", {
+      customerId: customer ? customer.id : null,
+      placeOfSupply: placeOfSupply,
+      lines: lines,
+      invoiceDiscountType: invoiceDiscount.type,
+      invoiceDiscountValue: invoiceDiscount.value,
+    })
       .then(function (quote) {
         if (seq !== quoteSeq) return; // a newer edit already won
         renderQuote(quote);
       })
       .catch(function (err) {
+        // A discount core refuses — bigger than the bill, say — leaves the last good
+        // figures on screen and says why, rather than blanking the panel.
+        setMsg("id-msg", errText(err), true);
         status("quote_invoice failed: " + errText(err));
       });
   }
+
+  /* ---------------------------------------------------------------- discounts */
+
+  /** Whether the shop's limit puts this discount behind an owner, for a cashier. */
+  function needsApproval(percent) {
+    return !!user && user.role !== "owner" && percent > discountLimitPct + 1e-9;
+  }
+
+  /** Which row the discount editor is open on, or null. */
+  var discountRow = null;
+
+  function openLineDiscount(index) {
+    var row = rows[index];
+    if (!row || locked) return;
+
+    discountRow = index;
+    $("ld-item").textContent = row.item_code;
+    $("ld-type").value = row.discount_type || "none";
+    $("ld-value").value = row.discount_value || "";
+    setMsg("ld-msg", "", false);
+    $("line-discount").hidden = false;
+    closePicker();
+    $("ld-value").focus();
+  }
+
+  function closeLineDiscount() {
+    discountRow = null;
+    $("line-discount").hidden = true;
+  }
+
+  function applyLineDiscount(event) {
+    if (event) event.preventDefault();
+    var row = rows[discountRow];
+    if (!row) return closeLineDiscount();
+
+    var kind = $("ld-type").value;
+    if (kind === "none") return clearLineDiscount();
+
+    var value = parseFloat($("ld-value").value);
+    // Shape only — whether it is bigger than the line is core's to say, and it says so
+    // when the re-quote comes back.
+    if (!isFinite(value) || value <= 0) {
+      return setMsg("ld-msg", "Enter a discount above zero.", true);
+    }
+    if (kind === "percentage" && value > 100) {
+      return setMsg("ld-msg", "A percentage cannot be more than 100.", true);
+    }
+
+    row.discount_type = kind;
+    row.discount_value = value;
+    closeLineDiscount();
+    renderRows();
+    requote();
+    status("Discounted " + row.item_code + " by " + discountLabel(row) + ".");
+  }
+
+  function clearLineDiscount() {
+    var row = rows[discountRow];
+    if (row) {
+      row.discount_type = "none";
+      row.discount_value = 0;
+      row.discount_amount = 0;
+    }
+    closeLineDiscount();
+    renderRows();
+    requote();
+    if (row) status("Discount removed from " + row.item_code + ".");
+  }
+
+  $("line-discount").addEventListener("submit", applyLineDiscount);
+  $("ld-clear").addEventListener("click", clearLineDiscount);
+  $("ld-cancel").addEventListener("click", function () {
+    closeLineDiscount();
+    status("Discount unchanged.");
+  });
+
+  /** The whole-bill control. A type of "none" disables the value box rather than hiding
+   *  it, so the row does not jump about as somebody cycles through the options. */
+  function syncInvoiceDiscountControls() {
+    var kind = $("id-type").value;
+    $("id-value").disabled = kind === "none";
+    if (kind === "none") $("id-value").value = "";
+  }
+
+  function applyInvoiceDiscount() {
+    var kind = $("id-type").value;
+    var raw = $("id-value").value.trim();
+    var value = parseFloat(raw);
+
+    if (kind === "none") {
+      invoiceDiscount = { type: "none", value: 0 };
+      setMsg("id-msg", "", false);
+      return requote();
+    }
+    if (!raw) {
+      // Mid-typing: hold the last good discount rather than flickering to zero.
+      return;
+    }
+    if (!isFinite(value) || value < 0) {
+      return setMsg("id-msg", "Enter a discount of zero or more.", true);
+    }
+    if (kind === "percentage" && value > 100) {
+      return setMsg("id-msg", "A percentage cannot be more than 100.", true);
+    }
+
+    invoiceDiscount = { type: kind, value: value };
+    setMsg("id-msg", "", false);
+    requote();
+  }
+
+  $("id-type").addEventListener("change", function () {
+    syncInvoiceDiscountControls();
+    applyInvoiceDiscount();
+  });
+  $("id-value").addEventListener("input", applyInvoiceDiscount);
+
+  /* ---------------------------------------------------------- owner approval */
+
+  /** Resolved with the credentials, or rejected when the prompt is cancelled. */
+  var approvalPending = null;
+
+  function askOwnerApproval(percent) {
+    $("approval-why").textContent =
+      "This bill discounts " + money(percent) + "% of " +
+      money(discountLimitPct) + "% allowed at the counter. An owner has to sign it off.";
+    $("ap-user").value = "";
+    $("ap-pass").value = "";
+    setMsg("ap-msg", "", false);
+    $("approval-overlay").hidden = false;
+    UI.enhancePasswordFields($("approval-form"));
+    $("ap-user").focus();
+
+    return new Promise(function (resolve, reject) {
+      approvalPending = { resolve: resolve, reject: reject };
+    });
+  }
+
+  function closeApproval() {
+    $("approval-overlay").hidden = true;
+    approvalPending = null;
+  }
+
+  $("approval-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    var username = $("ap-user").value.trim();
+    var password = $("ap-pass").value;
+    if (!username || !password) {
+      return setMsg("ap-msg", "Enter the owner's username and password.", true);
+    }
+    var waiting = approvalPending;
+    closeApproval();
+    if (waiting) waiting.resolve({ username: username, password: password });
+  });
+
+  $("ap-cancel").addEventListener("click", function () {
+    var waiting = approvalPending;
+    closeApproval();
+    if (waiting) waiting.reject(new Error("Owner approval cancelled — nothing was saved."));
+  });
 
   /* -------------------------------------------------------------- print & lock */
 
@@ -713,8 +1191,14 @@
       $("customer-miss").hidden = true;
       hideNewCustomer();
     }
+    // A locked card still says which list it was billed from, as a plain label: the
+    // dropdown would imply the saved invoice could be repriced, and it cannot.
+    renderPricing();
     $("add-item").hidden = on;
     $("txn-actions").hidden = on;
+    // A saved invoice's discount is part of the document now, not a control.
+    $("invoice-discount").hidden = on;
+    if (on) closeLineDiscount();
 
     // "Saving…" was the last thing this row said; the banner has superseded it.
     clearMessage();
@@ -741,8 +1225,22 @@
       customer_id: customer.id,
       date: null, // core stamps today
       payment_type: selectedPayment(),
+      invoice_discount_type: invoiceDiscount.type,
+      invoice_discount_value: invoiceDiscount.value,
+      // No rate and no tax rate. Both are core's to resolve, from the price list this
+      // customer is actually on rather than from whatever this screen last displayed —
+      // and the totals the screen *did* display are sent separately as `expected`, so a
+      // stale price is refused rather than billed. The discounts travel as the type and
+      // value they were entered as; core works out the rupees.
       lines: rows.map(function (row) {
-        return { item_id: row.item_id, qty: row.qty, rate: row.rate, tax_rate: row.tax_rate };
+        return {
+          item_id: row.item_id,
+          qty: row.qty,
+          rate: null,
+          tax_rate: null,
+          discount_type: row.discount_type || "none",
+          discount_value: row.discount_value || 0,
+        };
       }),
     };
   }
@@ -784,17 +1282,35 @@
     button.disabled = true;
     actionMsg("Saving…", false);
 
-    invoke("create_invoice", {
-      payload: buildPayload(),
-      // What the panel is showing. Core refuses the save if it prices differently.
-      expected: {
-        subtotal: lastQuote.subtotal,
-        cgst: lastQuote.cgst,
-        sgst: lastQuote.sgst,
-        igst: lastQuote.igst,
-        grand_total: lastQuote.grand_total,
-      },
-    })
+    // What the panel is showing, discounts included. Core refuses the save if it prices
+    // any of it differently.
+    var expected = {
+      subtotal: lastQuote.subtotal,
+      cgst: lastQuote.cgst,
+      sgst: lastQuote.sgst,
+      igst: lastQuote.igst,
+      grand_total: lastQuote.grand_total,
+      pre_discount_subtotal: lastQuote.pre_discount_subtotal,
+      discount_amount: lastQuote.discount_amount,
+    };
+
+    // Asked for here so the password reaches the same call that does the checking. The
+    // prompt is a convenience: a cashier who skipped it is refused by core anyway.
+    var percent = lastQuote.pre_discount_subtotal > 0
+      ? (lastQuote.discount_amount / lastQuote.pre_discount_subtotal) * 100
+      : 0;
+    var approval = needsApproval(percent)
+      ? askOwnerApproval(percent)
+      : Promise.resolve(null);
+
+    approval
+      .then(function (credentials) {
+        return invoke("create_invoice", {
+          payload: buildPayload(),
+          expected: expected,
+          approval: credentials,
+        });
+      })
       .then(function (saved) {
         button.disabled = false;
         showSaved(saved);
@@ -815,11 +1331,17 @@
     badge.textContent = invoice.invoice_no;
     badge.hidden = false;
 
-    // Render what was actually stored, not what was on screen a moment ago.
+    // Render what was actually stored, not what was on screen a moment ago. The Total
+    // column means the same thing locked as it did while editing: the line after its own
+    // discount, with the invoice-level share left to the totals block.
     saved.lines.forEach(function (line, index) {
+      var afterLineDiscount = gstRound(line.line_total - line.discount_amount);
       var cell = document.querySelector('#items-body [data-total="' + index + '"]');
-      if (cell) cell.textContent = money(line.line_total);
-      if (rows[index]) rows[index].total = line.line_total;
+      if (cell) cell.textContent = money(afterLineDiscount);
+      if (rows[index]) {
+        rows[index].total = afterLineDiscount;
+        rows[index].discount_amount = line.discount_amount;
+      }
     });
     renderTotals($("billing-totals"), totalsOf(invoice));
 
@@ -849,6 +1371,12 @@
     $("mobile-input").value = "";
     $("customer-miss").hidden = true;
     hideNewCustomer();
+    invoiceDiscount = { type: "none", value: 0 };
+    $("id-type").value = "none";
+    $("id-value").value = "";
+    syncInvoiceDiscountControls();
+    setMsg("id-msg", "", false);
+    closeLineDiscount();
     setPayment("cash");
     $("inv-no").hidden = true;
     $("inv-no").textContent = "";
@@ -859,6 +1387,8 @@
     renderCustomer();
     renderRows();
     requote();
+    // The next bill starts as a walk-in, at whatever the default list says today.
+    syncPriceListToCustomer();
     $("mobile-input").focus();
     status("Ready for the next customer.");
   }
@@ -1035,7 +1565,12 @@
         qty: entry.line.qty,
         rate: entry.line.rate,
         tax_rate: entry.line.tax_rate,
-        total: entry.line.line_total,
+        // Straight off the stored row. A reprint shows the discount the invoice was
+        // billed with, not one worked out again from today's prices.
+        discount_type: entry.line.discount_type,
+        discount_value: entry.line.discount_value,
+        discount_amount: entry.line.discount_amount,
+        total: gstRound(entry.line.line_total - entry.line.discount_amount),
       };
     });
   }
@@ -1096,6 +1631,15 @@
       : "<tr><th>CGST</th><td>" + rupees(invoice.cgst) + "</td></tr>" +
         "<tr><th>SGST</th><td>" + rupees(invoice.sgst) + "</td></tr>";
 
+    // A Discount column only when there is one, so an ordinary bill keeps its layout.
+    var anyDiscount = invoice.discount_amount > 0;
+    var discountHead = anyDiscount ? '<th class="num">Discount</th>' : "";
+    var discountRows = anyDiscount
+      ? "<tr><th>Subtotal</th><td>" + rupees(invoice.pre_discount_subtotal) + "</td></tr>" +
+        "<tr><th>Discount</th><td>−" + rupees(invoice.discount_amount) + "</td></tr>" +
+        "<tr><th>Taxable Value</th><td>" + rupees(invoice.subtotal) + "</td></tr>"
+      : "<tr><th>Subtotal</th><td>" + rupees(invoice.subtotal) + "</td></tr>";
+
     $("print-sheet").innerHTML =
       '<div class="sheet-head">' +
         "<div><h1>TAX INVOICE</h1>" +
@@ -1110,7 +1654,7 @@
         escapeHtml(buyer.place_of_supply) + "</div></div>" +
       '<table class="sheet-lines"><thead><tr>' +
         "<th>#</th><th>Item</th><th>Description</th><th>UOM</th>" +
-        '<th class="num">Qty</th><th class="num">Rate</th>' +
+        '<th class="num">Qty</th><th class="num">Rate</th>' + discountHead +
         '<th class="num">Tax %</th><th class="num">Amount</th>' +
       "</tr></thead><tbody>" +
       lines
@@ -1124,14 +1668,21 @@
             "<td>" + escapeHtml(line.uom) + "</td>" +
             '<td class="num">' + line.qty + "</td>" +
             '<td class="num">' + money(line.rate) + "</td>" +
+            (anyDiscount
+              ? '<td class="num">' +
+                (line.discount_amount > 0 ? "−" + money(line.discount_amount) : "—") +
+                "</td>"
+              : "") +
             '<td class="num">' + money(line.tax_rate) + "</td>" +
+            // The line after its own discount. The invoice-level share is in the totals
+            // block rather than here, so no rupee is shown coming off twice.
             '<td class="num">' + money(line.total) + "</td></tr>"
           );
         })
         .join("") +
       "</tbody></table>" +
       '<table class="sheet-totals">' +
-        "<tr><th>Subtotal</th><td>" + rupees(invoice.subtotal) + "</td></tr>" +
+        discountRows +
         taxRows +
         '<tr class="grand"><th>Grand Total</th><td>' + rupees(invoice.grand_total) +
         "</td></tr>" +
@@ -1236,6 +1787,11 @@
     $("menu-name").textContent = user.display_name;
     $("menu-role").textContent = user.role + " · " + user.username;
     loadNodeStatus();
+    // Before anything is billed: the picker quotes from the active list, so it has to
+    // exist before the first search, and the panel has to know where the discount
+    // ceiling sits before it can say whether a bill is over it.
+    loadPriceLists();
+    loadDiscountLimit();
     refreshAbout();
     startSyncPolling();
     showPane("billing");
@@ -1726,9 +2282,15 @@
   function refreshAbout() {
     if (!invoke || !user) return;
 
-    // Cashiers do not see it at all; `clear_demo_data` refuses them anyway.
+    // Cashiers do not see either of these; the commands refuse them anyway.
     $("demo-data").hidden = user.role !== "owner";
+    $("price-lists-section").hidden = user.role !== "owner";
+    $("discount-limit-section").hidden = user.role !== "owner";
     setMsg("demo-msg", "", false);
+    setMsg("pl-msg", "", false);
+    setMsg("dl-msg", "", false);
+    $("dl-value").value = discountLimitPct;
+    renderPriceListRows();
 
     invoke("app_info")
       .then(function (info) {
@@ -1757,6 +2319,130 @@
         rowList($("about-rows"), [["Error", errText(err)]]);
       });
   }
+
+  /* ------------------------------------------------ price list management */
+
+  /** The Settings table. Owner-only; the commands behind it refuse anyone else. */
+  function renderPriceListRows() {
+    var body = $("pl-rows");
+    if (!body) return;
+
+    body.innerHTML = priceLists
+      .map(function (list, index) {
+        return (
+          '<tr class="border-b border-base-300 text-sm last:border-0">' +
+          '<td class="py-2 font-medium">' + escapeHtml(list.name) + "</td>" +
+          '<td class="py-2">' +
+          (list.is_default
+            ? '<span class="rounded-field bg-base-300 px-2 py-0.5 text-2xs font-medium ' +
+              'uppercase tracking-wider text-base-content/70">default</span>'
+            : '<button type="button" data-default="' + index +
+              '" class="text-xs text-base-content/60 underline-offset-2 hover:underline ' +
+              'hover:text-base-content">Make default</button>') +
+          "</td>" +
+          '<td class="py-2 text-right"><button type="button" data-rename="' + index +
+          '" class="text-xs text-base-content/60 underline-offset-2 hover:underline ' +
+          'hover:text-base-content">Rename</button></td>' +
+          "</tr>"
+        );
+      })
+      .join("");
+  }
+
+  function addPriceList() {
+    if (!invoke) return bridgeMissing("create_price_list");
+    var name = $("pl-name").value.trim();
+    if (!name) return setMsg("pl-msg", "Name the list first.", true);
+
+    setMsg("pl-msg", "Creating…", false);
+    invoke("create_price_list", { name: name })
+      .then(function (created) {
+        $("pl-name").value = "";
+        setMsg("pl-msg", "Created " + created.name + ".", false);
+        return reloadPriceLists();
+      })
+      .catch(function (err) {
+        setMsg("pl-msg", errText(err), true);
+      });
+  }
+
+  /**
+   * Reloads the lists and re-resolves the bill against them.
+   *
+   * Moving the default changes what a walk-in pays, so a half-built bill on the Billing
+   * pane has to follow rather than sit on rates that no longer exist anywhere.
+   */
+  function reloadPriceLists() {
+    return loadPriceLists().then(function () {
+      return syncPriceListToCustomer();
+    });
+  }
+
+  $("pl-add").addEventListener("click", addPriceList);
+  $("pl-name").addEventListener("keydown", function (event) {
+    if (event.key === "Enter") addPriceList();
+  });
+
+  $("pl-rows").addEventListener("click", function (event) {
+    var makeDefault = event.target.closest("[data-default]");
+    var rename = event.target.closest("[data-rename]");
+    if (!invoke) return;
+
+    if (makeDefault) {
+      var chosen = priceLists[Number(makeDefault.dataset.default)];
+      if (!chosen) return;
+      setMsg("pl-msg", "Updating…", false);
+      invoke("set_default_price_list", { id: chosen.id })
+        .then(function (list) {
+          setMsg("pl-msg", list.name + " is now the default.", false);
+          return reloadPriceLists();
+        })
+        .catch(function (err) {
+          setMsg("pl-msg", errText(err), true);
+        });
+      return;
+    }
+
+    if (rename) {
+      var target = priceLists[Number(rename.dataset.rename)];
+      if (!target) return;
+      var next = window.prompt("Rename this price list:", target.name);
+      if (next == null || !next.trim() || next.trim() === target.name) return;
+      invoke("rename_price_list", { id: target.id, name: next.trim() })
+        .then(function (list) {
+          setMsg("pl-msg", "Renamed to " + list.name + ".", false);
+          return reloadPriceLists();
+        })
+        .catch(function (err) {
+          setMsg("pl-msg", errText(err), true);
+        });
+    }
+  });
+
+  /** The dropdown on the customer chip. Owner-only, and the command enforces that. */
+  $("pricing-select").addEventListener("change", function (event) {
+    if (!invoke || !customer) return;
+    var value = event.target.value;
+    var priceListId = value ? Number(value) : null;
+
+    invoke("set_customer_price_list", {
+      customerId: customer.id,
+      priceListId: priceListId,
+    })
+      .then(function (updated) {
+        customer = updated;
+        renderCustomer();
+        return syncPriceListToCustomer();
+      })
+      .then(function () {
+        status(customer.name + " is billed from " + (activeList ? activeList.name : "—") + ".");
+      })
+      .catch(function (err) {
+        // Put the control back to what the database still says.
+        renderPricing();
+        status(errText(err));
+      });
+  });
 
   /* -------------------------------------------------------------- demo data */
 
@@ -1813,6 +2499,43 @@
   }
 
   $("demo-clear").addEventListener("click", clearDemoData);
+
+  /**
+   * Loads the shop's discount ceiling. Read by everyone — a cashier needs to know where
+   * the line is before they hit it — but only an owner can move it, and only core can
+   * enforce it.
+   */
+  function loadDiscountLimit() {
+    if (!invoke) return Promise.resolve();
+    return invoke("discount_approval_threshold")
+      .then(function (percent) {
+        discountLimitPct = percent;
+        $("dl-value").value = percent;
+      })
+      .catch(function (err) {
+        status("discount_approval_threshold failed: " + errText(err));
+      });
+  }
+
+  $("dl-save").addEventListener("click", function () {
+    if (!invoke) return bridgeMissing("set_discount_approval_threshold");
+    var percent = parseFloat($("dl-value").value);
+    if (!isFinite(percent) || percent < 0 || percent > 100) {
+      return setMsg("dl-msg", "Enter a percentage between 0 and 100.", true);
+    }
+
+    setMsg("dl-msg", "Saving…", false);
+    invoke("set_discount_approval_threshold", { percent: percent })
+      .then(function (saved) {
+        discountLimitPct = saved;
+        $("dl-value").value = saved;
+        setMsg("dl-msg", "Cashiers may now discount up to " + money(saved) + "%.", false);
+        requote();
+      })
+      .catch(function (err) {
+        setMsg("dl-msg", errText(err), true);
+      });
+  });
 
   /** Label-left / value-right rows, separated by dividers — no boxes. */
   function rowList(el, rows) {
@@ -1892,7 +2615,6 @@
     $("item-form-head").textContent = existing ? "Edit item" : "Add item";
     $("it-code").value = existing ? existing.item_code : "";
     $("it-desc").value = existing ? existing.description : "";
-    $("it-rate").value = existing ? existing.rate : "";
     $("it-tax").value = existing ? String(existing.tax_rate) : "18";
     $("it-uom").value = existing ? existing.uom : "";
     // The code is the key core matches on, so changing it while editing would quietly
@@ -1900,7 +2622,90 @@
     $("it-code").readOnly = !!existing;
     $("it-code").classList.toggle("bg-base-200", !!existing);
     setMsg("it-msg", "", false);
+
+    // Drawn empty first so the form is never showing the previous item's prices while
+    // this one's are still in flight.
+    renderItemPrices(existing ? existing.rate : null, []);
+    if (existing && invoke) {
+      invoke("item_prices", { itemId: existing.id })
+        .then(function (rowsForItem) {
+          renderItemPrices(existing.rate, rowsForItem);
+        })
+        .catch(function (err) {
+          setMsg("it-msg", errText(err), true);
+        });
+    }
+
     (existing ? $("it-desc") : $("it-code")).focus();
+  }
+
+  /**
+   * The item's prices: the base rate, then one row per list.
+   *
+   * The base rate is required and is the fallback; a list row left blank has no entry at
+   * all, which is what makes it fall back rather than bill zero. That distinction is why
+   * the boxes are empty rather than pre-filled with the base rate — a number in the box
+   * would read as "set", and saving would pin the list to today's base rate forever.
+   */
+  function renderItemPrices(baseRate, priceRows) {
+    var box =
+      "h-8 w-full max-w-36 rounded-field border border-base-300 bg-base-100 px-2 " +
+      "text-right font-mono text-sm tabular-nums focus:border-base-content/30 " +
+      "focus:outline-none focus:ring-2 focus:ring-base-content/10";
+
+    var base =
+      '<tr class="border-b border-base-300 text-sm">' +
+      '<td class="py-2"><span class="font-medium">Base rate</span>' +
+      '<span class="block text-xs text-base-content/45">Billed by any list with no rate ' +
+      "of its own</span></td>" +
+      '<td class="py-2 text-right"><input id="it-rate" type="number" min="0" step="0.01" ' +
+      'required aria-label="Base rate" value="' +
+      (baseRate == null ? "" : baseRate) + '" class="' + box + ' ml-auto" /></td>' +
+      "</tr>";
+
+    var lists = priceLists
+      .map(function (list) {
+        var match = (priceRows || []).filter(function (r) {
+          return r.price_list.id === list.id;
+        })[0];
+        var value = match && match.rate != null ? match.rate : "";
+        return (
+          '<tr class="border-b border-base-300 text-sm last:border-0">' +
+          '<td class="py-2">' + escapeHtml(list.name) +
+          (list.is_default
+            ? ' <span class="text-xs text-base-content/45">· default</span>'
+            : "") +
+          "</td>" +
+          '<td class="py-2 text-right"><input type="number" min="0" step="0.01" ' +
+          'data-price-list="' + list.id + '" placeholder="base" aria-label="' +
+          escapeHtml(list.name) + ' rate" value="' + value + '" class="' + box +
+          ' ml-auto" /></td>' +
+          "</tr>"
+        );
+      })
+      .join("");
+
+    $("it-prices").innerHTML = base + lists;
+  }
+
+  /** The list rows of the price table, as core wants them. Blank rows are simply absent. */
+  function itemPricePayload(itemId) {
+    var out = [];
+    Array.prototype.forEach.call(
+      $("it-prices").querySelectorAll("input[data-price-list]"),
+      function (input) {
+        var text = input.value.trim();
+        if (!text) return;
+        var rate = parseFloat(text);
+        if (!isFinite(rate) || rate < 0) return;
+        out.push({
+          item_id: itemId,
+          price_list_id: Number(input.dataset.priceList),
+          rate: rate,
+        });
+      }
+    );
+    return out;
   }
 
   function saveItem(event) {
@@ -1913,7 +2718,23 @@
 
     if (!code) return setMsg("it-msg", "Enter an item code.", true);
     if (!description) return setMsg("it-msg", "Enter a description.", true);
-    if (!isFinite(rate) || rate < 0) return setMsg("it-msg", "Enter a rate of 0 or more.", true);
+    if (!isFinite(rate) || rate < 0) {
+      return setMsg("it-msg", "Enter a base rate of 0 or more.", true);
+    }
+
+    var badList = null;
+    Array.prototype.forEach.call(
+      $("it-prices").querySelectorAll("input[data-price-list]"),
+      function (input) {
+        var text = input.value.trim();
+        if (!text) return;
+        var listRate = parseFloat(text);
+        if (!isFinite(listRate) || listRate < 0) {
+          badList = input.getAttribute("aria-label") || "A price list";
+        }
+      }
+    );
+    if (badList) return setMsg("it-msg", badList + " must be 0 or more, or blank.", true);
 
     var button = $("it-save");
     button.disabled = true;
@@ -1929,10 +2750,21 @@
       },
     })
       .then(function (saved) {
+        // The prices go in a second call because a new item has no id until the first
+        // one returns. Core replaces the whole table for this item, so a list the form
+        // left blank has its entry removed rather than quietly kept.
+        return invoke("set_item_prices", {
+          itemId: saved.id,
+          prices: itemPricePayload(saved.id),
+        }).then(function () {
+          return saved;
+        });
+      })
+      .then(function (saved) {
         button.disabled = false;
         showItemForm(false);
         loadCatalogue();
-        status("Saved " + saved.item_code + ".");
+        status("Saved " + saved.item_code + " and its prices.");
       })
       .catch(function (err) {
         button.disabled = false;

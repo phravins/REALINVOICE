@@ -265,6 +265,19 @@
                  id="customer-chip" hidden>
               <span class="hero-user-circle size-5 shrink-0 text-base-content/45" aria-hidden="true"></span>
               <p class="min-w-0 flex-1 text-sm" id="customer-line" aria-live="polite"></p>
+
+              <!-- Which rates are being applied, next to who is being billed. A cashier
+                   comparing a total against the sticker price on the shelf needs to be
+                   able to see the answer without opening another screen. For an owner it
+                   is also the control: the place you notice the wrong list is the place
+                   you should be able to fix it. -->
+              <label class="sr-only" for="pricing-select">Price list for this customer</label>
+              <select id="pricing-select" hidden
+                      class="h-7 w-auto shrink-0 appearance-none rounded-field border border-base-300 bg-base-100 py-0 pl-2 pr-6 text-xs text-base-content focus:border-base-content/30 focus:outline-none focus:ring-2 focus:ring-base-content/10"></select>
+              <span id="pricing-badge"
+                    class="shrink-0 rounded-field bg-base-300 px-2 py-0.5 text-2xs font-medium uppercase tracking-wider text-base-content/70"
+                    hidden></span>
+
               <button id="customer-detach" type="button" title="Detach this customer"
                       aria-label="Detach this customer"
                       class="flex size-7 shrink-0 items-center justify-center rounded-field text-base-content/45 transition-colors hover:bg-base-200 hover:text-error">
@@ -296,6 +309,8 @@
                   <input id="nc-gstin" type="text" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
                 <label class="flex flex-col gap-1 text-xs text-base-content/60">Place of supply
                   <input id="nc-pos" type="text" maxlength="2" placeholder="TN" autocomplete="off" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+                <label class="flex flex-col gap-1 text-xs text-base-content/60">Price list
+                  <select id="nc-pricelist" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8 mt-auto"></select></label>
               </div>
               <div class="flex flex-wrap items-center gap-3">
                 <button id="nc-save" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Save &amp; attach</button>
@@ -335,6 +350,36 @@
               <span class="hero-plus size-4" aria-hidden="true"></span> Add Item
             </button>
           </div>
+
+          <!-- Opened by a row's discount button. One editor reused by every row rather
+               than an input per line: a bill of thirty items would otherwise carry thirty
+               discount boxes nobody is looking at. -->
+          <form class="flex flex-col gap-3 rounded-field border border-base-300 bg-base-200/60 p-3"
+                id="line-discount" hidden>
+            <div class="flex flex-wrap items-baseline justify-between gap-2">
+              <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45">
+                Discount on <span id="ld-item" class="font-mono normal-case"></span>
+              </p>
+              <p class="text-2xs text-base-content/45">Comes off before GST is charged</p>
+            </div>
+            <div class="flex flex-wrap items-end gap-3">
+              <label class="flex min-w-36 flex-col gap-1 text-xs text-base-content/60">Type
+                <select id="ld-type" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8 mt-auto">
+                  <option value="none">No discount</option>
+                  <option value="percentage">Percentage</option>
+                  <option value="flat">Flat (₹)</option>
+                </select>
+              </label>
+              <label class="flex min-w-32 flex-col gap-1 text-xs text-base-content/60">Value
+                <input id="ld-value" type="number" min="0" step="any"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto text-right font-mono tabular-nums" />
+              </label>
+              <button type="submit" id="ld-apply" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Apply</button>
+              <button type="button" id="ld-clear" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Remove</button>
+              <button type="button" id="ld-cancel" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+              <span class="text-xs text-base-content/60" id="ld-msg" aria-live="polite"></span>
+            </div>
+          </form>
 
           <!-- Item picker: opened by Add Item, closed on pick or Escape. -->
           <div class="flex flex-col gap-2 rounded-field border border-base-300 bg-base-200/60 p-3"
@@ -412,8 +457,32 @@
             <span class="font-mono text-xs text-base-content/45" id="gst-mode"></span>
           </div>
 
-          <!-- Filled by renderTotals(), the same function the history detail uses. -->
-          <dl class="rounded-box border border-base-300 bg-base-100 shadow-sm w-full max-w-sm p-4" id="billing-totals"></dl>
+          <div class="flex w-full max-w-sm flex-col gap-3">
+            <!-- The whole-bill discount, next to the figures it changes. Applied to what
+                 the lines already came down to, never to the original subtotal. -->
+            <div class="rounded-box border border-base-300 bg-base-100 shadow-sm p-4"
+                 id="invoice-discount">
+              <div class="flex flex-wrap items-baseline justify-between gap-2">
+                <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45">Invoice discount</p>
+                <p class="text-2xs text-base-content/45" id="id-limit"></p>
+              </div>
+              <div class="mt-2 flex flex-wrap items-end gap-2">
+                <label class="sr-only" for="id-type">Invoice discount type</label>
+                <select id="id-type" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8 w-36 shrink-0">
+                  <option value="none">No discount</option>
+                  <option value="percentage">Percentage</option>
+                  <option value="flat">Flat (₹)</option>
+                </select>
+                <label class="sr-only" for="id-value">Invoice discount value</label>
+                <input id="id-value" type="number" min="0" step="any" disabled
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 min-w-24 flex-1 text-right font-mono tabular-nums" />
+              </div>
+              <p class="mt-2 text-xs text-base-content/60" id="id-msg" aria-live="polite"></p>
+            </div>
+
+            <!-- Filled by renderTotals(), the same function the history detail uses. -->
+            <dl class="rounded-box border border-base-300 bg-base-100 shadow-sm w-full p-4" id="billing-totals"></dl>
+          </div>
         </div>
 
         <div class="flex flex-wrap items-center justify-end gap-3" id="txn-actions">
@@ -602,10 +671,6 @@
                 <input id="it-desc" type="text" required placeholder="What it is called on the bill"
                        class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
               </label>
-              <label class="flex flex-col gap-1 text-xs text-base-content/60">Rate (₹)
-                <input id="it-rate" type="number" min="0" step="0.01" required
-                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto text-right font-mono tabular-nums" />
-              </label>
               <label class="flex flex-col gap-1 text-xs text-base-content/60">Tax %
                 <select id="it-tax" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8 mt-auto">
                   <option value="0">0</option>
@@ -619,6 +684,29 @@
                 <input id="it-uom" type="text" maxlength="8" placeholder="NOS"
                        class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
               </label>
+            </div>
+
+            <!-- The prices, in one place. The single Rate box that used to live in the
+                 grid above is the first row here — it is the base rate, the fallback for
+                 any list that does not price this item, so it is still required and now
+                 sits beside the lists that may override it. Rows are drawn by
+                 renderItemPrices(); leaving one blank means "use the base rate". -->
+            <div class="flex flex-col gap-2">
+              <div class="flex flex-wrap items-baseline justify-between gap-2">
+                <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45">Pricing</p>
+                <p class="text-2xs text-base-content/45">Leave a list blank to bill it at the base rate</p>
+              </div>
+              <div class="overflow-x-auto">
+                <table class="w-full text-left" id="it-prices-table">
+                  <thead>
+                    <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                      <th>Price list</th>
+                      <th class="w-40 text-right">Rate (₹)</th>
+                    </tr>
+                  </thead>
+                  <tbody id="it-prices"></tbody>
+                </table>
+              </div>
             </div>
             <div class="flex flex-wrap items-center gap-3">
               <button type="submit" id="it-save" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Save item</button>
@@ -795,6 +883,64 @@
           </header>
           <dl class="grid grid-cols-[minmax(140px,220px)_1fr]" id="about-app-rows"></dl>
 
+          <!-- Owner-only. Different shops draw this line in different places, so it is a
+               setting rather than a number in the source. -->
+          <section class="mt-6 flex flex-col gap-3" id="discount-limit-section" hidden>
+            <header>
+              <h2 class="text-lg font-semibold tracking-tight">Discount Limit</h2>
+              <p class="mt-1 max-w-prose text-sm text-base-content/60">How much of a bill a
+                cashier may discount on their own, counting line and invoice discounts
+                together. Anything above this needs an owner's username and password
+                before the invoice will save. Owners are never asked.</p>
+            </header>
+            <div class="flex flex-wrap items-end gap-2">
+              <label class="flex w-40 flex-col gap-1 text-xs text-base-content/60">
+                Threshold (%)
+                <input id="dl-value" type="number" min="0" max="100" step="0.5"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 text-right font-mono tabular-nums" />
+              </label>
+              <button id="dl-save" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Save limit</button>
+              <span class="text-xs text-base-content/60" id="dl-msg" aria-live="polite"></span>
+            </div>
+          </section>
+
+          <!-- Owner-only. What a customer pays is a commercial decision, so the lists
+               themselves are managed here rather than at the counter. -->
+          <section class="mt-6 flex flex-col gap-3" id="price-lists-section" hidden>
+            <header>
+              <h2 class="text-lg font-semibold tracking-tight">Price Lists</h2>
+              <p class="mt-1 max-w-prose text-sm text-base-content/60">A customer is billed
+                from the list they are assigned to, or from the default if they have none.
+                An item with no rate on a list is billed at its base rate, so a list only
+                has to price what it actually changes.</p>
+            </header>
+
+            <div class="overflow-x-auto">
+              <table class="w-full text-left">
+                <thead>
+                  <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                    <th>Name</th>
+                    <th class="w-32">Default</th>
+                    <th class="w-24"><span class="sr-only">Rename</span></th>
+                  </tr>
+                </thead>
+                <tbody id="pl-rows"></tbody>
+              </table>
+            </div>
+
+            <div class="flex flex-wrap items-end gap-2">
+              <label class="flex min-w-56 flex-1 flex-col gap-1 text-xs text-base-content/60">
+                New price list
+                <input id="pl-name" type="text" autocomplete="off" placeholder="e.g. Wholesale"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
+              </label>
+              <button id="pl-add" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">
+                <span class="hero-plus size-4" aria-hidden="true"></span> Add list
+              </button>
+              <span class="text-xs text-base-content/60" id="pl-msg" aria-live="polite"></span>
+            </div>
+          </section>
+
           <!-- Owner-only, and hidden outright for a cashier. The command behind it
                refuses anyone else regardless. -->
           <section class="mt-6 flex flex-col gap-3" id="demo-data" hidden>
@@ -871,6 +1017,39 @@
         </div>
       </section>
     </main>
+
+    <!-- Asked for when a cashier discounts past the shop's limit. Credentials rather
+         than a flag: the check that matters runs in Rust on the way to the save, and this
+         is only how the password gets there. -->
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-base-300/70 p-4"
+         id="approval-overlay" hidden role="dialog" aria-modal="true"
+         aria-labelledby="approval-title">
+      <form class="flex w-full max-w-sm flex-col gap-4 rounded-box border border-base-300 bg-base-100 p-5 shadow-sm"
+            id="approval-form" autocomplete="off">
+        <div>
+          <h2 class="text-lg font-semibold tracking-tight" id="approval-title">Owner approval</h2>
+          <p class="mt-1 text-sm text-base-content/60" id="approval-why"></p>
+        </div>
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Owner username
+          <input id="ap-user" type="text" autocapitalize="off" spellcheck="false" required
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
+        </label>
+        <label class="flex flex-col gap-1 text-xs text-base-content/60">Owner password
+          <input id="ap-pass" type="password" autocomplete="off" required
+                 class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" />
+        </label>
+        <div class="flex flex-wrap items-center gap-3">
+          <button type="submit" id="ap-ok" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Approve &amp; save</button>
+          <button type="button" id="ap-cancel" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+        </div>
+        <p class="min-h-[18px] text-xs text-base-content/60" id="ap-msg" aria-live="polite"></p>
+      </form>
+    </div>
+
+    <!-- Where UI.toast() puts its notes. Fixed, so it is not in any pane's scroll, and
+         pointer-events-none so it never swallows a click meant for the bill underneath. -->
+    <div class="pointer-events-none fixed right-4 z-50 flex flex-col gap-2"
+         style="bottom: calc(1rem + env(safe-area-inset-bottom, 0px))" id="toast-host"></div>
 
     <!-- The printable document. Rendered from a saved invoice by renderPrintable(),
          whether that comes from Print & Lock or from Reprint. -->

@@ -50,7 +50,7 @@ only whether one is set and its last four characters.
 | `node_id` | Which till. Also in the header. |
 | `sent_at` | When this request was built, ISO 8601 with offset. |
 | `rows[].id` | The queue row's id **on that node**. Unique per node, never reused. |
-| `rows[].table_name` | `customers`, `items`, `invoices` or `invoice_lines`. |
+| `rows[].table_name` | `customers`, `items`, `invoices`, `invoice_lines`, `credit_notes` or `credit_note_lines`. **`price_lists` and `item_prices` are not sent yet** — see the note under `customers` below. |
 | `rows[].row_id` | The record's primary key on that node. |
 | `rows[].op` | `insert` or `update`. |
 | `rows[].recorded_at` | When the write happened locally, `YYYY-MM-DD HH:MM:SS`, local time. |
@@ -80,7 +80,17 @@ Keys are the column names. Money is a JSON number in rupees; `id` fields are int
 // customers
 { "id": 1, "name": "Sri Balaji Traders", "mobile": "9840012345",
   "gstin": "33AABCS1429B1ZP",        // null when unregistered
-  "place_of_supply": "TN" }
+  "place_of_supply": "TN",
+  "price_list_id": null }             // which price list this buyer is billed from;
+                                      // null means whichever list is default, rather
+                                      // than "no pricing". Absent on rows queued before
+                                      // this field existed, and read as null.
+                                      //
+                                      // NOTE: a non-null value names a `price_lists` row
+                                      // the far end has not been sent — those tables are
+                                      // not queued yet. Treat it as opaque, or as null,
+                                      // until the lists themselves are part of this
+                                      // protocol.
 
 // items
 { "id": 7, "item_code": "SAND-M-UNIT", "description": "M-Sand per unit",
@@ -93,7 +103,13 @@ Keys are the column names. Money is a JSON number in rupees; `id` fields are int
 
 // invoices
 { "id": 1, "invoice_no": "RI-2026-0001", "date": "2026-09-13", "customer_id": 1,
-  "subtotal": 45000.0, "cgst": 4050.0, "sgst": 4050.0, "igst": 0.0,
+  "pre_discount_subtotal": 45000.0,   // before any discount
+  "discount_amount": 0.0,             // line discounts plus the invoice discount
+  "invoice_discount_type": "none",    // "none" | "percentage" | "flat"
+  "invoice_discount_value": 0.0,      // 10 for 10%, or 500 for a flat 500 off
+  "invoice_discount_amount": 0.0,     // the rupees that came to
+  "subtotal": 45000.0,                // the TAXABLE value, after every discount
+  "cgst": 4050.0, "sgst": 4050.0, "igst": 0.0,
   "grand_total": 53100.0, "payment_type": "cash",
   "sync_status": "pending",           // this node's own bookkeeping; ignore it
   "created_at": "2026-09-13 16:39:48",
@@ -101,7 +117,15 @@ Keys are the column names. Money is a JSON number in rupees; `id` fields are int
 
 // invoice_lines
 { "id": 1, "invoice_id": 1, "item_id": 1,
-  "qty": 1.0, "rate": 45000.0, "tax_rate": 18.0, "line_total": 45000.0 }
+  "qty": 1.0, "rate": 45000.0, "tax_rate": 18.0,
+  "line_total": 45000.0,              // qty x rate, BEFORE any discount
+  "discount_type": "none",            // this line's own discount
+  "discount_value": 0.0,
+  "discount_amount": 0.0,             // what it came to, in rupees
+  "invoice_discount_share": 0.0,      // this line's share of the invoice-level discount
+  "taxable_value": 45000.0 }          // line_total less both discounts: what tax was
+                                      // charged on. Every one of these is frozen at
+                                      // billing time — recompute none of them.
 ```
 
 `created_by_user_id` refers to a user **on that node**. Accounts are deliberately never

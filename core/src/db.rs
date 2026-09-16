@@ -14,7 +14,12 @@ use serde::Serialize;
 
 use crate::auth;
 use crate::error::{CoreError, Result};
-use crate::gst::{self, TaxableLine, DEFAULT_HOME_STATE};
+/// The ceiling a cashier can discount to unaided, until a shop sets its own.
+pub const DEFAULT_DISCOUNT_APPROVAL_PCT: f64 = 15.0;
+
+use crate::gst::{
+    self, DiscountedLine, DiscountedTotals, PricedLine, TaxableLine, DEFAULT_HOME_STATE,
+};
 use crate::models::*;
 use crate::numbering::{financial_year, next_credit_note_no, next_invoice_no};
 use crate::schema::run_migrations;
@@ -377,7 +382,7 @@ impl Db {
         let found = self
             .conn
             .query_row(
-                "SELECT id, name, gstin, place_of_supply, mobile
+                "SELECT id, name, gstin, place_of_supply, mobile, price_list_id
                    FROM customers
                   WHERE mobile = ?1",
                 [mobile],
@@ -410,11 +415,17 @@ impl Db {
             new.gstin.as_ref().map(|g| g.trim()).filter(|g| !g.is_empty()).map(String::from);
         let place_of_supply = new.place_of_supply.trim().to_uppercase();
 
+        // A list that does not exist would silently become "use the default" on every
+        // later lookup, which is a wrong price rather than an error.
+        if let Some(id) = new.price_list_id {
+            self.require_price_list(id)?;
+        }
+
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO customers (name, gstin, place_of_supply, mobile)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![new.name.trim(), gstin, place_of_supply, mobile],
+            "INSERT INTO customers (name, gstin, place_of_supply, mobile, price_list_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![new.name.trim(), gstin, place_of_supply, mobile, new.price_list_id],
         )?;
         let customer = Customer {
             id: tx.last_insert_rowid(),
@@ -422,6 +433,7 @@ impl Db {
             gstin,
             place_of_supply,
             mobile,
+            price_list_id: new.price_list_id,
         };
         enqueue(&tx, "customers", customer.id, SyncOp::Insert, &customer)?;
         tx.commit()?;
@@ -441,11 +453,15 @@ impl Db {
 
         let customer = match existing {
             Some(current) => {
+                // An upsert that does not mention a price list keeps the one the customer
+                // is on. Re-seeding or a sync of a stale record must not quietly move a
+                // wholesale buyer back to retail prices.
+                let price_list_id = new.price_list_id.or(current.price_list_id);
                 tx.execute(
                     "UPDATE customers
-                        SET name = ?1, gstin = ?2, place_of_supply = ?3
-                      WHERE id = ?4",
-                    params![new.name, new.gstin, new.place_of_supply, current.id],
+                        SET name = ?1, gstin = ?2, place_of_supply = ?3, price_list_id = ?4
+                      WHERE id = ?5",
+                    params![new.name, new.gstin, new.place_of_supply, price_list_id, current.id],
                 )?;
                 Customer {
                     id: current.id,
@@ -453,13 +469,14 @@ impl Db {
                     gstin: new.gstin.clone(),
                     place_of_supply: new.place_of_supply.clone(),
                     mobile,
+                    price_list_id,
                 }
             }
             None => {
                 tx.execute(
-                    "INSERT INTO customers (name, gstin, place_of_supply, mobile)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![new.name, new.gstin, new.place_of_supply, mobile],
+                    "INSERT INTO customers (name, gstin, place_of_supply, mobile, price_list_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![new.name, new.gstin, new.place_of_supply, mobile, new.price_list_id],
                 )?;
                 Customer {
                     id: tx.last_insert_rowid(),
@@ -467,6 +484,7 @@ impl Db {
                     gstin: new.gstin.clone(),
                     place_of_supply: new.place_of_supply.clone(),
                     mobile,
+                    price_list_id: new.price_list_id,
                 }
             }
         };
@@ -481,11 +499,265 @@ impl Db {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, name, gstin, place_of_supply, mobile FROM customers WHERE id = ?1",
+                "SELECT id, name, gstin, place_of_supply, mobile, price_list_id
+                   FROM customers WHERE id = ?1",
                 [id],
                 customer_from_row,
             )
             .optional()?)
+    }
+
+    // -------------------------------------------------------------- price lists
+
+    /// Every price list, default first and then alphabetical.
+    pub fn price_lists(&self) -> Result<Vec<PriceList>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, is_default, created_at
+               FROM price_lists
+              ORDER BY is_default DESC, name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], price_list_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_price_list(&self, id: i64) -> Result<Option<PriceList>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, name, is_default, created_at FROM price_lists WHERE id = ?1",
+                [id],
+                price_list_from_row,
+            )
+            .optional()?)
+    }
+
+    /// The list a customer with no list of their own is billed from.
+    ///
+    /// There is always exactly one: the migration creates it, nothing can delete the last
+    /// one, and the only way to move the flag is [`Db::set_default_price_list`], which
+    /// moves it rather than clearing it. A missing default is therefore a corrupt
+    /// database, not a state to paper over with a guess.
+    pub fn default_price_list(&self) -> Result<PriceList> {
+        self.conn
+            .query_row(
+                "SELECT id, name, is_default, created_at FROM price_lists WHERE is_default = 1",
+                [],
+                price_list_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| CoreError::NotFound("no default price list".into()))
+    }
+
+    /// The list a customer is billed from: their own, or the default.
+    ///
+    /// Falls back to the default for a customer whose assigned list has since been
+    /// deleted, for the same reason `price_list_id` is nullable — a buyer must always
+    /// have a price, and the default is the honest one to charge.
+    pub fn price_list_for_customer(&self, customer_id: i64) -> Result<PriceList> {
+        let assigned: Option<i64> = self
+            .conn
+            .query_row("SELECT price_list_id FROM customers WHERE id = ?1", [customer_id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten();
+
+        match assigned {
+            Some(id) => match self.get_price_list(id)? {
+                Some(list) => Ok(list),
+                None => self.default_price_list(),
+            },
+            None => self.default_price_list(),
+        }
+    }
+
+    /// Creates a price list. The first one ever created is the default by necessity.
+    pub fn create_price_list(&mut self, name: &str) -> Result<PriceList> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(CoreError::Invalid("a price list needs a name".into()));
+        }
+        if self.price_list_named(&name)?.is_some() {
+            return Err(CoreError::Invalid(format!("a price list called {name} already exists")));
+        }
+
+        let first = self.default_price_list().is_err();
+
+        self.conn.execute(
+            "INSERT INTO price_lists (name, is_default) VALUES (?1, ?2)",
+            params![name, first],
+        )?;
+        let id = self.conn.last_insert_rowid();
+
+        self.get_price_list(id)?
+            .ok_or_else(|| CoreError::NotFound(format!("price list {id} after insert")))
+    }
+
+    /// Renames a list. The rates on it are untouched — a list is renamed because the shop
+    /// calls it something else, not because its prices changed.
+    pub fn rename_price_list(&mut self, id: i64, name: &str) -> Result<PriceList> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(CoreError::Invalid("a price list needs a name".into()));
+        }
+        self.require_price_list(id)?;
+
+        if let Some(clash) = self.price_list_named(&name)? {
+            if clash.id != id {
+                return Err(CoreError::Invalid(format!(
+                    "a price list called {name} already exists"
+                )));
+            }
+        }
+
+        self.conn.execute("UPDATE price_lists SET name = ?1 WHERE id = ?2", params![name, id])?;
+        self.get_price_list(id)?.ok_or_else(|| CoreError::NotFound(format!("price list {id}")))
+    }
+
+    /// Moves the default flag.
+    ///
+    /// The old default is cleared and the new one set inside one transaction, in that
+    /// order: the partial unique index permits at most one row flagged, so setting before
+    /// clearing would be rejected by the database. There is no way to clear the flag
+    /// without naming a replacement, which is what keeps "exactly one" from decaying into
+    /// "at most one".
+    pub fn set_default_price_list(&mut self, id: i64) -> Result<PriceList> {
+        self.require_price_list(id)?;
+
+        let tx = self.conn.transaction()?;
+        tx.execute("UPDATE price_lists SET is_default = 0 WHERE is_default = 1", [])?;
+        tx.execute("UPDATE price_lists SET is_default = 1 WHERE id = ?1", [id])?;
+        tx.commit()?;
+
+        self.get_price_list(id)?.ok_or_else(|| CoreError::NotFound(format!("price list {id}")))
+    }
+
+    /// Points a customer at a price list, or back at the default with `None`.
+    pub fn set_customer_price_list(
+        &mut self,
+        customer_id: i64,
+        price_list_id: Option<i64>,
+    ) -> Result<Customer> {
+        if let Some(id) = price_list_id {
+            self.require_price_list(id)?;
+        }
+        let customer = self
+            .get_customer(customer_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("customer {customer_id}")))?;
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE customers SET price_list_id = ?1 WHERE id = ?2",
+            params![price_list_id, customer_id],
+        )?;
+        let updated = Customer { price_list_id, ..customer };
+        // Queued like every other customer change: the back office prices from the same
+        // lists, so it needs to know which one this buyer is on.
+        enqueue(&tx, "customers", updated.id, SyncOp::Update, &updated)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    // ------------------------------------------------------------- item prices
+
+    /// What one customer pays for one item.
+    ///
+    /// **This is the only thing billing should ask.** `items.rate` is the base price and
+    /// the fallback, not the answer: a list with no entry for an item prices it at the
+    /// base rate, which is what lets a shop create a Wholesale list and set rates for the
+    /// twenty items it actually discounts rather than all nine hundred.
+    pub fn resolve_rate(&self, item_id: i64, price_list_id: i64) -> Result<ResolvedRate> {
+        let item = self
+            .get_item(item_id)?
+            .ok_or_else(|| CoreError::NotFound(format!("item {item_id}")))?;
+
+        let listed: Option<f64> = self
+            .conn
+            .query_row(
+                "SELECT rate FROM item_prices WHERE item_id = ?1 AND price_list_id = ?2",
+                params![item_id, price_list_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        Ok(ResolvedRate {
+            item_id,
+            price_list_id,
+            rate: listed.unwrap_or(item.rate),
+            from_price_list: listed.is_some(),
+        })
+    }
+
+    /// [`Db::resolve_rate`] for several items at once, for repricing a bill in one call.
+    pub fn resolve_rates(&self, item_ids: &[i64], price_list_id: i64) -> Result<Vec<ResolvedRate>> {
+        item_ids.iter().map(|id| self.resolve_rate(*id, price_list_id)).collect()
+    }
+
+    /// Every list with this item's rate on it, for the item edit form. Lists with no entry
+    /// come back with `None` rather than the base rate, so the form can show an empty box
+    /// that means "falls back" instead of a number that looks set.
+    pub fn item_prices(&self, item_id: i64) -> Result<Vec<ItemPriceRow>> {
+        let lists = self.price_lists()?;
+        let mut out = Vec::with_capacity(lists.len());
+        for price_list in lists {
+            let rate: Option<f64> = self
+                .conn
+                .query_row(
+                    "SELECT rate FROM item_prices WHERE item_id = ?1 AND price_list_id = ?2",
+                    params![item_id, price_list.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            out.push(ItemPriceRow { price_list, rate });
+        }
+        Ok(out)
+    }
+
+    /// Replaces this item's prices with exactly what was passed.
+    ///
+    /// A list absent from `prices` has its entry removed rather than left behind, so
+    /// clearing a box on the form means "fall back to the base rate" and not "keep
+    /// whatever was there before". All of it in one transaction: a half-applied price
+    /// table is a shop billing the wrong number for however long it takes to notice.
+    pub fn set_item_prices(&mut self, item_id: i64, prices: &[ItemPrice]) -> Result<()> {
+        self.get_item(item_id)?.ok_or_else(|| CoreError::NotFound(format!("item {item_id}")))?;
+
+        for price in prices {
+            if !price.rate.is_finite() || price.rate < 0.0 {
+                return Err(CoreError::Invalid(format!(
+                    "rate must be 0 or more, got {}",
+                    price.rate
+                )));
+            }
+            self.require_price_list(price.price_list_id)?;
+        }
+
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM item_prices WHERE item_id = ?1", [item_id])?;
+        for price in prices {
+            tx.execute(
+                "INSERT INTO item_prices (item_id, price_list_id, rate) VALUES (?1, ?2, ?3)",
+                params![item_id, price.price_list_id, gst::round_money(price.rate)],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn price_list_named(&self, name: &str) -> Result<Option<PriceList>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, name, is_default, created_at
+                   FROM price_lists WHERE name = ?1 COLLATE NOCASE",
+                [name],
+                price_list_from_row,
+            )
+            .optional()?)
+    }
+
+    fn require_price_list(&self, id: i64) -> Result<PriceList> {
+        self.get_price_list(id)?.ok_or_else(|| CoreError::NotFound(format!("price list {id}")))
     }
 
     // -------------------------------------------------------------------- items
@@ -505,6 +777,25 @@ impl Db {
         )?;
         let rows = stmt.query_map([pattern], item_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// [`Db::search_item`] with every rate already resolved for one price list.
+    ///
+    /// The picker shows these rather than bare items, so the number a cashier reads off
+    /// the list is the number that will be billed. Showing the base rate and then billing
+    /// a different one is how a counter loses an argument with a customer.
+    pub fn search_item_priced(&self, query: &str, price_list_id: i64) -> Result<Vec<PricedItem>> {
+        self.search_item(query)?
+            .into_iter()
+            .map(|item| {
+                let resolved = self.resolve_rate(item.id, price_list_id)?;
+                Ok(PricedItem {
+                    item,
+                    rate: resolved.rate,
+                    from_price_list: resolved.from_price_list,
+                })
+            })
+            .collect()
     }
 
     /// Inserts an item, or updates the existing one with that item code.
@@ -719,15 +1010,33 @@ impl Db {
             None => Local::now().date_naive(),
         };
 
-        // Price the lines before opening the transaction.
-        let mut priced = Vec::with_capacity(new.lines.len());
+        // Which prices apply, decided here from the stored customer rather than from
+        // anything the caller sent: a screen that thinks this buyer is on Retail cannot
+        // talk the database into billing them at Retail.
+        let price_list = self.price_list_for_customer(customer.id)?;
+
         for line in &new.lines {
-            priced.push(self.price_line(line)?);
+            if !line.qty.is_finite() || line.qty <= 0.0 {
+                return Err(CoreError::Invalid(format!("qty must be positive, got {}", line.qty)));
+            }
         }
 
-        let taxables: Vec<TaxableLine> =
-            priced.iter().map(|(_, t): &(i64, TaxableLine)| *t).collect();
-        let totals = gst::compute_totals(&taxables, &self.home_state, &customer.place_of_supply);
+        // Price the lines before opening the transaction. Discounts are applied here, in
+        // the order GST requires — line discount, then the line's share of the invoice
+        // discount, and only then tax — so nothing downstream has to know the order.
+        let mut priced = Vec::with_capacity(new.lines.len());
+        for line in &new.lines {
+            priced.push(self.price_line(line, price_list.id)?);
+        }
+
+        let discounted: Vec<DiscountedLine> = priced.iter().map(|(_, l)| *l).collect();
+        let totals = gst::compute_discounted_totals(
+            &discounted,
+            new.invoice_discount_type,
+            new.invoice_discount_value,
+            &self.home_state,
+            &customer.place_of_supply,
+        )?;
 
         // IMMEDIATE takes the write lock up front, so the number is read and used under
         // the same lock that inserts it. Allocating before the transaction would let two
@@ -743,13 +1052,21 @@ impl Db {
 
         tx.execute(
             "INSERT INTO invoices
-                 (invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
+                 (invoice_no, date, customer_id, pre_discount_subtotal, discount_amount,
+                  invoice_discount_type, invoice_discount_value, invoice_discount_amount,
+                  subtotal, cgst, sgst, igst,
                   grand_total, payment_type, sync_status, created_at, created_by_user_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?11)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                     'pending', ?15, ?16)",
             params![
                 invoice_no,
                 date.to_string(),
                 customer.id,
+                totals.pre_discount_subtotal,
+                totals.discount_amount,
+                new.invoice_discount_type.as_str(),
+                new.invoice_discount_value,
+                totals.invoice_discount_amount,
                 totals.subtotal,
                 totals.cgst,
                 totals.sgst,
@@ -767,6 +1084,11 @@ impl Db {
             invoice_no,
             date: date.to_string(),
             customer_id: customer.id,
+            pre_discount_subtotal: totals.pre_discount_subtotal,
+            discount_amount: totals.discount_amount,
+            invoice_discount_type: new.invoice_discount_type,
+            invoice_discount_value: new.invoice_discount_value,
+            invoice_discount_amount: totals.invoice_discount_amount,
             subtotal: totals.subtotal,
             cgst: totals.cgst,
             sgst: totals.sgst,
@@ -784,8 +1106,10 @@ impl Db {
         // transaction, so nothing about the local write changes.
         enqueue(&tx, "invoices", invoice.id, SyncOp::Insert, &invoice)?;
 
-        for (item_id, taxable) in &priced {
-            insert_line(&tx, invoice_id, *item_id, taxable)?;
+        // The per-line working is written exactly as computed above and never derived
+        // again: this is the moment the numbers freeze.
+        for ((item_id, line), computed) in priced.iter().zip(&totals.lines) {
+            insert_line(&tx, invoice_id, *item_id, line, computed)?;
         }
 
         tx.commit()?;
@@ -802,23 +1126,71 @@ impl Db {
             .get_customer(invoice.customer_id)?
             .ok_or_else(|| CoreError::NotFound(format!("customer {}", invoice.customer_id)))?;
 
-        let (item_id, taxable) = self.price_line(line)?;
-        let mut taxables: Vec<TaxableLine> = self
-            .invoice_lines(invoice_id)?
+        if !line.qty.is_finite() || line.qty <= 0.0 {
+            return Err(CoreError::Invalid(format!("qty must be positive, got {}", line.qty)));
+        }
+
+        // The buyer's list, the same one the invoice itself was priced from.
+        let price_list = self.price_list_for_customer(customer.id)?;
+        let (item_id, billed) = self.price_line(line, price_list.id)?;
+
+        // Every line, not just the new one. An invoice-level discount is apportioned
+        // across the lines in proportion to what each contributes, so adding a line moves
+        // every other line's share of it — recomputing only the newcomer would leave the
+        // rest of the invoice holding shares of a subtotal that no longer exists. Each
+        // existing line is rebuilt from what it was billed at, so its own discount and its
+        // own rate survive untouched.
+        let existing = self.invoice_lines(invoice_id)?;
+        let mut all: Vec<DiscountedLine> = existing
             .iter()
-            .map(|l| TaxableLine { qty: l.qty, rate: l.rate, tax_rate: l.tax_rate })
+            .map(|l| DiscountedLine {
+                qty: l.qty,
+                rate: l.rate,
+                tax_rate: l.tax_rate,
+                discount_type: l.discount_type,
+                discount_value: l.discount_value,
+            })
             .collect();
-        taxables.push(taxable);
-        let totals = gst::compute_totals(&taxables, &self.home_state, &customer.place_of_supply);
+        all.push(billed);
+
+        let totals = gst::compute_discounted_totals(
+            &all,
+            invoice.invoice_discount_type,
+            invoice.invoice_discount_value,
+            &self.home_state,
+            &customer.place_of_supply,
+        )?;
+        let computed = *totals.lines.last().expect("the line just pushed");
 
         let tx = self.conn.transaction()?;
-        let line_id = insert_line(&tx, invoice_id, item_id, &taxable)?;
+
+        // Re-freeze the existing lines at their new shares before the new one lands.
+        for (stored, recomputed) in existing.iter().zip(&totals.lines) {
+            tx.execute(
+                "UPDATE invoice_lines
+                    SET invoice_discount_share = ?1, taxable_value = ?2
+                  WHERE id = ?3",
+                params![recomputed.invoice_discount_share, recomputed.taxable_value, stored.id],
+            )?;
+            let moved = InvoiceLine {
+                invoice_discount_share: recomputed.invoice_discount_share,
+                taxable_value: recomputed.taxable_value,
+                ..stored.clone()
+            };
+            enqueue(&tx, "invoice_lines", stored.id, SyncOp::Update, &moved)?;
+        }
+
+        let line_id = insert_line(&tx, invoice_id, item_id, &billed, &computed)?;
         tx.execute(
             "UPDATE invoices
-                SET subtotal = ?1, cgst = ?2, sgst = ?3, igst = ?4,
-                    grand_total = ?5, sync_status = 'pending'
-              WHERE id = ?6",
+                SET pre_discount_subtotal = ?1, discount_amount = ?2,
+                    invoice_discount_amount = ?3, subtotal = ?4, cgst = ?5, sgst = ?6,
+                    igst = ?7, grand_total = ?8, sync_status = 'pending'
+              WHERE id = ?9",
             params![
+                totals.pre_discount_subtotal,
+                totals.discount_amount,
+                totals.invoice_discount_amount,
                 totals.subtotal,
                 totals.cgst,
                 totals.sgst,
@@ -829,6 +1201,9 @@ impl Db {
         )?;
 
         let updated = Invoice {
+            pre_discount_subtotal: totals.pre_discount_subtotal,
+            discount_amount: totals.discount_amount,
+            invoice_discount_amount: totals.invoice_discount_amount,
             subtotal: totals.subtotal,
             cgst: totals.cgst,
             sgst: totals.sgst,
@@ -844,10 +1219,15 @@ impl Db {
             id: line_id,
             invoice_id,
             item_id,
-            qty: taxable.qty,
-            rate: taxable.rate,
-            tax_rate: taxable.tax_rate,
-            line_total: taxable.line_total(),
+            qty: billed.qty,
+            rate: billed.rate,
+            tax_rate: billed.tax_rate,
+            line_total: computed.line_gross,
+            discount_type: billed.discount_type,
+            discount_value: billed.discount_value,
+            discount_amount: computed.discount_amount,
+            invoice_discount_share: computed.invoice_discount_share,
+            taxable_value: computed.taxable_value,
         })
     }
 
@@ -860,7 +1240,9 @@ impl Db {
     pub fn list_invoices_for_date(&self, date: NaiveDate) -> Result<Vec<Invoice>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
-                    grand_total, payment_type, sync_status, created_at, created_by_user_id
+                    grand_total, payment_type, sync_status, created_at, created_by_user_id,
+                    pre_discount_subtotal, discount_amount, invoice_discount_type,
+                    invoice_discount_value, invoice_discount_amount
                FROM invoices
               WHERE date = ?1
               ORDER BY id DESC",
@@ -885,7 +1267,9 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT i.id, i.invoice_no, i.date, i.customer_id, i.subtotal, i.cgst, i.sgst,
                     i.igst, i.grand_total, i.payment_type, i.sync_status, i.created_at,
-                    i.created_by_user_id, c.name, c.mobile,
+                    i.created_by_user_id, i.pre_discount_subtotal, i.discount_amount,
+                    i.invoice_discount_type, i.invoice_discount_value,
+                    i.invoice_discount_amount, c.name, c.mobile,
                     (SELECT COUNT(*) FROM invoice_lines l WHERE l.invoice_id = i.id),
                     u.display_name
                FROM invoices i
@@ -910,10 +1294,10 @@ impl Db {
             |row| {
                 Ok(InvoiceSummary {
                     invoice: invoice_from_row(row)?,
-                    customer_name: row.get(13)?,
-                    customer_mobile: row.get(14)?,
-                    line_count: row.get(15)?,
-                    created_by: row.get(16)?,
+                    customer_name: row.get(18)?,
+                    customer_mobile: row.get(19)?,
+                    line_count: row.get(20)?,
+                    created_by: row.get(21)?,
                 })
             },
         )?;
@@ -932,6 +1316,8 @@ impl Db {
 
         let mut stmt = self.conn.prepare(
             "SELECT l.id, l.invoice_id, l.item_id, l.qty, l.rate, l.tax_rate, l.line_total,
+                    l.discount_type, l.discount_value, l.discount_amount,
+                    l.invoice_discount_share, l.taxable_value,
                     it.item_code, it.description, it.uom, it.custom
                FROM invoice_lines l
                JOIN items it ON it.id = l.item_id
@@ -941,10 +1327,10 @@ impl Db {
         let rows = stmt.query_map([id], |row| {
             Ok(InvoiceDetailLine {
                 line: line_from_row(row)?,
-                item_code: row.get(7)?,
-                description: row.get(8)?,
-                uom: row.get(9)?,
-                custom: row.get::<_, i64>(10)? != 0,
+                item_code: row.get(12)?,
+                description: row.get(13)?,
+                uom: row.get(14)?,
+                custom: row.get::<_, i64>(15)? != 0,
             })
         })?;
 
@@ -967,7 +1353,9 @@ impl Db {
             .query_row(
                 "SELECT id, invoice_no, date, customer_id, subtotal, cgst, sgst, igst,
                         grand_total, payment_type, sync_status, created_at,
-                        created_by_user_id
+                        created_by_user_id, pre_discount_subtotal, discount_amount,
+                        invoice_discount_type, invoice_discount_value,
+                        invoice_discount_amount
                    FROM invoices WHERE id = ?1",
                 [id],
                 invoice_from_row,
@@ -978,7 +1366,9 @@ impl Db {
     /// The lines of an invoice, in entry order.
     pub fn invoice_lines(&self, invoice_id: i64) -> Result<Vec<InvoiceLine>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, invoice_id, item_id, qty, rate, tax_rate, line_total
+            "SELECT id, invoice_id, item_id, qty, rate, tax_rate, line_total,
+                    discount_type, discount_value, discount_amount, invoice_discount_share,
+                    taxable_value
                FROM invoice_lines
               WHERE invoice_id = ?1
               ORDER BY id",
@@ -997,7 +1387,7 @@ impl Db {
     pub fn creditable_lines(&self, invoice_id: i64) -> Result<Vec<CreditableLine>> {
         let mut stmt = self.conn.prepare(
             "SELECT l.id, l.item_id, i.item_code, i.description, l.rate, l.tax_rate, i.uom,
-                    l.qty,
+                    l.qty, l.taxable_value,
                     COALESCE((SELECT SUM(c.qty) FROM credit_note_lines c
                                WHERE c.invoice_line_id = l.id), 0)
                FROM invoice_lines l
@@ -1007,13 +1397,19 @@ impl Db {
         )?;
         let rows = stmt.query_map([invoice_id], |row| {
             let billed_qty: f64 = row.get(7)?;
-            let credited_qty: f64 = row.get(8)?;
+            let taxable_value: f64 = row.get(8)?;
+            let credited_qty: f64 = row.get(9)?;
+            let rate: f64 = row.get(4)?;
             Ok(CreditableLine {
                 invoice_line_id: row.get(0)?,
                 item_id: row.get(1)?,
                 item_code: row.get(2)?,
                 description: row.get(3)?,
-                rate: row.get(4)?,
+                rate,
+                // What each unit really cost, discounts included. On an undiscounted line
+                // this is the billed rate; on a discounted one it is less, and that is
+                // what a return is worth.
+                effective_rate: if billed_qty > 0.0 { taxable_value / billed_qty } else { rate },
                 tax_rate: row.get(5)?,
                 uom: row.get(6)?,
                 billed_qty,
@@ -1088,11 +1484,18 @@ impl Db {
             }
 
             // Priced at what it sold for, from the invoice line, not from today's
-            // catalogue: a price change after the sale must not change the refund.
+            // catalogue: a price change after the sale must not change the refund. And at
+            // the *effective* rate, so a line sold at a discount is credited at the
+            // discounted price — refunding the sticker price would hand back money the
+            // customer never paid, and would reverse more tax than was ever charged.
             priced.push((
                 source.clone(),
                 line.qty,
-                TaxableLine { qty: line.qty, rate: source.rate, tax_rate: source.tax_rate },
+                TaxableLine {
+                    qty: line.qty,
+                    rate: source.effective_rate,
+                    tax_rate: source.tax_rate,
+                },
             ));
         }
 
@@ -1161,7 +1564,7 @@ impl Db {
         enqueue(&tx, "credit_notes", credit_note.id, SyncOp::Insert, &credit_note)?;
 
         for (source, qty, taxable) in &priced {
-            let line_total = gst::round_money(qty * source.rate);
+            let line_total = gst::round_money(qty * taxable.rate);
             tx.execute(
                 "INSERT INTO credit_note_lines
                      (credit_note_id, invoice_line_id, item_id, qty, rate, tax_rate, line_total)
@@ -1171,7 +1574,7 @@ impl Db {
                     source.invoice_line_id,
                     source.item_id,
                     qty,
-                    source.rate,
+                    taxable.rate,
                     taxable.tax_rate,
                     line_total,
                 ],
@@ -1182,7 +1585,7 @@ impl Db {
                 invoice_line_id: source.invoice_line_id,
                 item_id: source.item_id,
                 qty: *qty,
-                rate: source.rate,
+                rate: taxable.rate,
                 tax_rate: taxable.tax_rate,
                 line_total,
             };
@@ -1346,22 +1749,134 @@ impl Db {
 
     // ---------------------------------------------------------------- internals
 
-    /// Resolves a caller's line against the item master, applying rate and tax overrides.
-    fn price_line(&self, line: &NewInvoiceLine) -> Result<(i64, TaxableLine)> {
+    /// Resolves a caller's line against the item master and a price list.
+    ///
+    /// An explicit `rate` still wins — that is the override path, and it is what a future
+    /// per-line discount will use. With no override the rate comes from the price list,
+    /// **never** from `items.rate` directly: the base rate is the fallback inside
+    /// [`Db::resolve_rate`], not a second source of truth here.
+    fn price_line(
+        &self,
+        line: &NewInvoiceLine,
+        price_list_id: i64,
+    ) -> Result<(i64, DiscountedLine)> {
         let item = self
             .get_item(line.item_id)?
             .ok_or_else(|| CoreError::NotFound(format!("item {}", line.item_id)))?;
-        if line.qty <= 0.0 {
-            return Err(CoreError::Invalid(format!("qty must be positive, got {}", line.qty)));
-        }
+        // No quantity check here. A bill being *typed* has half-entered rows in it — a
+        // cleared quantity box has to price as zero rather than throw the summary panel
+        // away — so the "must be positive" rule belongs where a bill is saved, not where
+        // one is priced. `create_invoice` and `add_line_item` enforce it.
+        let rate = match line.rate {
+            Some(rate) => rate,
+            None => self.resolve_rate(item.id, price_list_id)?.rate,
+        };
         Ok((
             item.id,
-            TaxableLine {
+            DiscountedLine {
                 qty: line.qty,
-                rate: line.rate.unwrap_or(item.rate),
+                rate,
                 tax_rate: line.tax_rate.unwrap_or(item.tax_rate),
+                discount_type: line.discount_type,
+                discount_value: line.discount_value,
             },
         ))
+    }
+
+    /// Prices a whole invoice the way [`Db::create_invoice`] would, without saving it.
+    ///
+    /// The desktop calls this before saving, so the totals it compares against the screen
+    /// are core's own — resolved through the customer's price list and discounted in the
+    /// order GST requires — rather than a restatement of whatever the screen sent back.
+    pub fn price_invoice(&self, new: &NewInvoice) -> Result<DiscountedTotals> {
+        self.quote_invoice(
+            Some(new.customer_id),
+            "",
+            &new.lines,
+            new.invoice_discount_type,
+            new.invoice_discount_value,
+        )
+    }
+
+    /// Prices a bill that has not been saved, and may not even have a buyer yet.
+    ///
+    /// This is what the billing screen's summary panel shows, and it is the same code
+    /// path the save runs: rates from the price list, then line discounts, then the
+    /// invoice discount, then tax. Nothing about a total is worked out anywhere else.
+    ///
+    /// With a customer, **their** place of supply decides the GST split — not the one
+    /// passed in. A screen that has the wrong state for a buyer cannot make the quote
+    /// wrong, only its own caption. `place_of_supply` is used only when there is no
+    /// customer yet, where it stands for "assume a local sale".
+    pub fn quote_invoice(
+        &self,
+        customer_id: Option<i64>,
+        place_of_supply: &str,
+        lines: &[NewInvoiceLine],
+        invoice_discount_type: DiscountType,
+        invoice_discount_value: f64,
+    ) -> Result<DiscountedTotals> {
+        let customer = match customer_id {
+            Some(id) => Some(
+                self.get_customer(id)?
+                    .ok_or_else(|| CoreError::NotFound(format!("customer {id}")))?,
+            ),
+            None => None,
+        };
+
+        let price_list_id = match &customer {
+            Some(c) => self.price_list_for_customer(c.id)?.id,
+            None => self.default_price_list()?.id,
+        };
+        let state = match &customer {
+            Some(c) => c.place_of_supply.clone(),
+            None => place_of_supply.to_string(),
+        };
+
+        let priced = lines
+            .iter()
+            .map(|l| {
+                let (_, mut priced) = self.price_line(l, price_list_id)?;
+                // A quantity mid-edit prices as nothing rather than as a credit: the
+                // panel shows zero for that row and the totals stay readable.
+                if !priced.qty.is_finite() || priced.qty < 0.0 {
+                    priced.qty = 0.0;
+                }
+                Ok(priced)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        gst::compute_discounted_totals(
+            &priced,
+            invoice_discount_type,
+            invoice_discount_value,
+            &self.home_state,
+            &state,
+        )
+    }
+
+    // -------------------------------------------------- discount approval limit
+
+    /// Settings key for the ceiling a cashier can discount to without an owner.
+    pub const DISCOUNT_APPROVAL_KEY: &'static str = "discount_approval_threshold_pct";
+
+    /// Total discount, as a percentage of the pre-discount subtotal, that a cashier may
+    /// apply on their own. Different shops want different numbers, so it is a setting.
+    pub fn discount_approval_threshold(&self) -> Result<f64> {
+        Ok(self
+            .get_setting(Self::DISCOUNT_APPROVAL_KEY)?
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
+            .unwrap_or(DEFAULT_DISCOUNT_APPROVAL_PCT))
+    }
+
+    pub fn set_discount_approval_threshold(&mut self, percent: f64) -> Result<()> {
+        if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+            return Err(CoreError::Invalid(
+                "the approval threshold must be between 0 and 100 percent".into(),
+            ));
+        }
+        self.set_setting(Self::DISCOUNT_APPROVAL_KEY, &percent.to_string())
     }
 
     // ------------------------------------------------------------------ analytics
@@ -1620,13 +2135,28 @@ fn insert_line(
     tx: &Transaction<'_>,
     invoice_id: i64,
     item_id: i64,
-    taxable: &TaxableLine,
+    billed: &DiscountedLine,
+    computed: &PricedLine,
 ) -> Result<i64> {
-    let line_total = taxable.line_total();
     tx.execute(
-        "INSERT INTO invoice_lines (invoice_id, item_id, qty, rate, tax_rate, line_total)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![invoice_id, item_id, taxable.qty, taxable.rate, taxable.tax_rate, line_total],
+        "INSERT INTO invoice_lines
+             (invoice_id, item_id, qty, rate, tax_rate, line_total,
+              discount_type, discount_value, discount_amount, invoice_discount_share,
+              taxable_value)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            invoice_id,
+            item_id,
+            billed.qty,
+            billed.rate,
+            billed.tax_rate,
+            computed.line_gross,
+            billed.discount_type.as_str(),
+            billed.discount_value,
+            computed.discount_amount,
+            computed.invoice_discount_share,
+            computed.taxable_value,
+        ],
     )?;
     let id = tx.last_insert_rowid();
 
@@ -1634,10 +2164,15 @@ fn insert_line(
         id,
         invoice_id,
         item_id,
-        qty: taxable.qty,
-        rate: taxable.rate,
-        tax_rate: taxable.tax_rate,
-        line_total,
+        qty: billed.qty,
+        rate: billed.rate,
+        tax_rate: billed.tax_rate,
+        line_total: computed.line_gross,
+        discount_type: billed.discount_type,
+        discount_value: billed.discount_value,
+        discount_amount: computed.discount_amount,
+        invoice_discount_share: computed.invoice_discount_share,
+        taxable_value: computed.taxable_value,
     };
     enqueue(tx, "invoice_lines", id, SyncOp::Insert, &line)?;
     Ok(id)
@@ -1696,6 +2231,15 @@ fn user_from_row(row: &Row<'_>) -> rusqlite::Result<User> {
     })
 }
 
+fn price_list_from_row(row: &Row<'_>) -> rusqlite::Result<PriceList> {
+    Ok(PriceList {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        is_default: row.get::<_, i64>(2)? != 0,
+        created_at: row.get(3)?,
+    })
+}
+
 fn customer_from_row(row: &Row<'_>) -> rusqlite::Result<Customer> {
     Ok(Customer {
         id: row.get(0)?,
@@ -1703,6 +2247,7 @@ fn customer_from_row(row: &Row<'_>) -> rusqlite::Result<Customer> {
         gstin: row.get(2)?,
         place_of_supply: row.get(3)?,
         mobile: row.get(4)?,
+        price_list_id: row.get(5)?,
     })
 }
 
@@ -1733,6 +2278,11 @@ fn invoice_from_row(row: &Row<'_>) -> rusqlite::Result<Invoice> {
         sync_status: row.get(10)?,
         created_at: row.get(11)?,
         created_by_user_id: row.get(12)?,
+        pre_discount_subtotal: row.get(13)?,
+        discount_amount: row.get(14)?,
+        invoice_discount_type: discount_type_from(row.get::<_, String>(15)?),
+        invoice_discount_value: row.get(16)?,
+        invoice_discount_amount: row.get(17)?,
     })
 }
 
@@ -1745,7 +2295,21 @@ fn line_from_row(row: &Row<'_>) -> rusqlite::Result<InvoiceLine> {
         rate: row.get(4)?,
         tax_rate: row.get(5)?,
         line_total: row.get(6)?,
+        discount_type: discount_type_from(row.get::<_, String>(7)?),
+        discount_value: row.get(8)?,
+        discount_amount: row.get(9)?,
+        invoice_discount_share: row.get(10)?,
+        taxable_value: row.get(11)?,
     })
+}
+
+/// A stored discount type, or `None` for anything unrecognised.
+///
+/// A row whose type could not be parsed must read as "not discounted" rather than be
+/// guessed at — and because `discount_amount` and `taxable_value` are stored separately,
+/// the money on such a row is still right even if the label is lost.
+fn discount_type_from(stored: String) -> DiscountType {
+    DiscountType::parse(&stored).unwrap_or(DiscountType::None)
 }
 
 fn sync_row_from_row(row: &Row<'_>) -> rusqlite::Result<SyncQueueRow> {

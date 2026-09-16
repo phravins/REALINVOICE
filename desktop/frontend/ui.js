@@ -415,9 +415,47 @@ var UI = (function () {
     );
   }
 
+  /* ---------------------------------------------------------------------- toast */
+
+  /**
+   * A transient note in the corner.
+   *
+   * For things that happened *to* the screen rather than because somebody pressed a
+   * button — the rates on a half-built bill changing when a customer is attached, say.
+   * A total that changes silently is how a counter argues with a customer about a
+   * printed bill, so the change announces itself and then gets out of the way.
+   */
+  function toast(message, tone) {
+    var host = document.getElementById("toast-host");
+    if (!host) return;
+
+    var tones = {
+      neutral: "border-base-300 bg-base-100 text-base-content",
+      info: "border-info/40 bg-info/10 text-base-content",
+      success: "border-success/40 bg-success/10 text-base-content",
+    };
+
+    var note = document.createElement("div");
+    note.className =
+      "pointer-events-auto flex items-center gap-2 rounded-box border px-3 py-2 " +
+      "text-sm shadow-sm transition-opacity duration-300 " +
+      (tones[tone] || tones.neutral);
+    note.setAttribute("role", "status");
+    note.textContent = message;
+    host.appendChild(note);
+
+    window.setTimeout(function () {
+      note.classList.add("opacity-0");
+      window.setTimeout(function () {
+        if (note.parentNode) note.parentNode.removeChild(note);
+      }, 300);
+    }, 4000);
+  }
+
   return {
     c: C,
     esc: esc,
+    toast: toast,
     badge: badge,
     row: row,
     rows: rows,

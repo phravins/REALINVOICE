@@ -5,7 +5,7 @@
 
 use crate::db::Db;
 use crate::error::Result;
-use crate::models::{NewCustomer, NewItem};
+use crate::models::{ItemPrice, NewCustomer, NewItem};
 
 /// Customers a fresh database starts with.
 pub fn demo_customers() -> Vec<NewCustomer> {
@@ -15,12 +15,14 @@ pub fn demo_customers() -> Vec<NewCustomer> {
             gstin: Some("33AABCS1429B1ZP".into()),
             place_of_supply: "TN".into(),
             mobile: "9840012345".into(),
+            price_list_id: None,
         },
         NewCustomer {
             name: "Kaveri Hardware".into(),
             gstin: Some("33AAGCK9021P1Z4".into()),
             place_of_supply: "TN".into(),
             mobile: "9791045678".into(),
+            price_list_id: None,
         },
         // Inter-state, so the IGST path is reachable from the UI too.
         NewCustomer {
@@ -28,12 +30,14 @@ pub fn demo_customers() -> Vec<NewCustomer> {
             gstin: Some("29AACCD4455K1ZR".into()),
             place_of_supply: "KA".into(),
             mobile: "9845567890".into(),
+            price_list_id: None,
         },
         NewCustomer {
             name: "Ishta Capital Investments".into(),
             gstin: Some("33AAAAA0000A1Z1".into()),
             place_of_supply: "TN".into(),
             mobile: "9600011223".into(),
+            price_list_id: None,
         },
         // Unregistered walk-in: no GSTIN.
         NewCustomer {
@@ -41,6 +45,7 @@ pub fn demo_customers() -> Vec<NewCustomer> {
             gstin: None,
             place_of_supply: "TN".into(),
             mobile: "9000000000".into(),
+            price_list_id: None,
         },
     ]
 }
@@ -114,8 +119,16 @@ pub fn seed_demo_data(db: &mut Db) -> Result<()> {
     for customer in demo_customers() {
         db.upsert_customer(&customer)?;
     }
+    // Priced on the default list as well as carrying a base rate, so a fresh install and
+    // a database that came through the price-list migration look identical — both state
+    // the default list's rates rather than one stating them and the other falling back.
+    let default_list = db.default_price_list()?.id;
     for item in demo_items() {
-        db.upsert_item(&item)?;
+        let saved = db.upsert_item(&item)?;
+        db.set_item_prices(
+            saved.id,
+            &[ItemPrice { item_id: saved.id, price_list_id: default_list, rate: saved.rate }],
+        )?;
     }
     Ok(())
 }
