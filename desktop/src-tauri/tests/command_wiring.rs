@@ -7,14 +7,16 @@
 
 use realinvoice_core::{
     seed, DateRange, DiscountType, InvoiceFilter, ItemPrice, LoginOutcome, NewCreditNote,
-    NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine, NewUser, Role, User,
+    NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine, NewPayment, NewUser, PaymentStatus,
+    Role, User,
 };
 use realinvoice_desktop_lib::commands::{
-    check_discount_approval_for_test, check_expected_totals_for_test as check_expected_totals,
-    check_item_for_test as check_item, describe_wait, describe_window, discount_percent,
-    require_owner_for_test as require_owner, require_session_for_test as require_session,
-    ExpectedTotals, NewCreditNotePayload, NewCustomerPayload, NewInvoicePayload, NewItemPayload,
-    NewLinePayload, OwnerApproval,
+    check_credit_approval_for_test, check_discount_approval_for_test,
+    check_expected_totals_for_test as check_expected_totals, check_item_for_test as check_item,
+    describe_wait, describe_window, discount_percent, require_owner_for_test as require_owner,
+    require_session_for_test as require_session, ExpectedTotals, NewCreditNotePayload,
+    NewCustomerPayload, NewInvoicePayload, NewItemPayload, NewLinePayload, NewPaymentPayload,
+    OwnerApproval,
 };
 use realinvoice_desktop_lib::state::{AppState, Session, DB_FILE_NAME};
 
@@ -552,6 +554,7 @@ fn totals_that_disagree_with_the_screen_are_refused() {
             gstin: None,
             place_of_supply: "KA".into(),
             price_list_id: None,
+            credit_limit: None,
         })
         .unwrap();
     let mut elsewhere = worked_example(&state);
@@ -1512,6 +1515,7 @@ fn the_customer_form_carries_a_price_list_through_to_core() {
         place_of_supply: "TN".into(),
         mobile: "9111122233".into(),
         price_list_id: Some(wholesale.id),
+        credit_limit: None,
     }
     .into();
     assert_eq!(assigned.price_list_id, Some(wholesale.id));
@@ -1525,6 +1529,7 @@ fn the_customer_form_carries_a_price_list_through_to_core() {
         place_of_supply: "TN".into(),
         mobile: "9111122244".into(),
         price_list_id: None,
+        credit_limit: None,
     }
     .into();
     let walk_in = state.db().create_customer(&unassigned).unwrap();
@@ -1763,6 +1768,194 @@ fn only_an_owner_can_move_the_discount_ceiling() {
     assert!(
         require_session(Some(Session { token: "t".into(), user: cashier.clone() })).is_ok(),
         "a cashier can still read the threshold, to know where the line is"
+    );
+    assert!(require_owner(Some(Session { token: "t".into(), user: cashier })).is_err());
+}
+
+// ==================================================== ledger and credit limit
+
+/// The console's own path: a credit sale leaves the money owed, a cash one does not.
+#[test]
+fn the_console_bills_on_credit_and_on_the_counter() {
+    let (_dir, state) = console_state();
+    let customer_id = state.db().search_customer("9600011223").unwrap().unwrap().id;
+
+    let bill = |payment_type: &str| {
+        let rack = state.db().search_item("RACK-42U-PRO").unwrap().remove(0);
+        NewInvoice::from(NewInvoicePayload {
+            customer_id,
+            date: None,
+            payment_type: payment_type.into(),
+            invoice_discount_type: DiscountType::None,
+            invoice_discount_value: 0.0,
+            lines: vec![NewLinePayload {
+                item_id: rack.id,
+                qty: 1.0,
+                rate: None,
+                tax_rate: None,
+                discount_type: DiscountType::None,
+                discount_value: 0.0,
+            }],
+        })
+    };
+
+    let on_credit = bill("credit");
+    let credit_invoice = state.db().create_invoice(&on_credit).unwrap();
+    assert_eq!(credit_invoice.grand_total, 53_100.00);
+    assert_eq!(credit_invoice.amount_due, 53_100.00);
+    assert_eq!(credit_invoice.payment_status, PaymentStatus::Unpaid);
+
+    let at_the_counter = bill("upi");
+    let paid_invoice = state.db().create_invoice(&at_the_counter).unwrap();
+    assert_eq!(paid_invoice.amount_due, 0.0);
+    assert_eq!(paid_invoice.payment_status, PaymentStatus::Paid);
+
+    // Only the credit sale is outstanding.
+    assert_eq!(state.db().customer_balance(customer_id).unwrap(), 53_100.00);
+    assert_eq!(state.db().open_invoices(customer_id).unwrap().len(), 1);
+}
+
+/// The payment form's payload survives the trip into core, attribution excepted.
+#[test]
+fn a_payment_payload_converts_and_is_attributed_by_the_session_not_the_caller() {
+    let payload = NewPaymentPayload {
+        customer_id: 4,
+        invoice_id: Some(7),
+        amount: 2_500.0,
+        payment_method: "bank transfer".into(),
+        date: Some("2026-09-14".into()),
+        notes: Some("  NEFT ref 88123  ".into()),
+    };
+    let new = NewPayment::from(payload);
+
+    assert_eq!(new.customer_id, 4);
+    assert_eq!(new.invoice_id, Some(7));
+    assert_eq!(new.amount, 2_500.0);
+    assert_eq!(new.payment_method, "bank transfer");
+    assert_eq!(new.date.as_deref(), Some("2026-09-14"));
+    assert_eq!(
+        new.created_by_user_id, None,
+        "the form cannot say who took the money; record_payment fills it from the session"
+    );
+
+    // And core trims the note rather than storing the spaces somebody typed.
+    let (_dir, state) = console_state();
+    let customer_id = state.db().search_customer("9600011223").unwrap().unwrap().id;
+    let recorded = state
+        .db()
+        .record_payment(&NewPayment {
+            customer_id,
+            invoice_id: None,
+            amount: 2_500.0,
+            payment_method: "bank transfer".into(),
+            date: None,
+            notes: Some("  NEFT ref 88123  ".into()),
+            // No account has been created on this console yet, and the column is a real
+            // foreign key — an id that names nobody is refused rather than stored.
+            created_by_user_id: None,
+        })
+        .unwrap();
+    assert_eq!(recorded.on_account.unwrap().notes.as_deref(), Some("NEFT ref 88123"));
+}
+
+/// A cashier cannot extend credit past the shop's limit on their own.
+#[test]
+fn only_a_cashier_past_a_credit_limit_is_asked_for_an_owner() {
+    let (_dir, state) = console_state();
+    let owner = set_up_owner(&state);
+    let cashier = state
+        .db()
+        .create_user(
+            &NewUser {
+                username: "meena".into(),
+                display_name: "Meena R".into(),
+                role: Role::Cashier,
+            },
+            "counter-password",
+        )
+        .unwrap();
+
+    let customer_id = state.db().search_customer("9600011223").unwrap().unwrap().id;
+    state.db().set_credit_limit(customer_id, Some(20_000.0)).unwrap();
+
+    let as_owner = Session { token: "t".into(), user: owner };
+    let as_cashier = Session { token: "t".into(), user: cashier };
+    let check = |session: &Session, kind: &str, amount: f64, approval: Option<&OwnerApproval>| {
+        check_credit_approval_for_test(
+            &mut state.db(),
+            session,
+            kind,
+            customer_id,
+            amount,
+            approval,
+        )
+    };
+
+    // Inside the limit, nobody is interrupted.
+    assert!(check(&as_cashier, "credit", 15_000.0, None).is_ok());
+
+    // Past it, a cashier is.
+    let refused = check(&as_cashier, "credit", 25_000.0, None).unwrap_err();
+    assert!(refused.contains("owner"), "{refused}");
+    assert!(refused.contains("20000.00"), "the message names the limit: {refused}");
+
+    // A sale paid at the counter is never checked, however large: it adds nothing to
+    // what they owe.
+    assert!(check(&as_cashier, "cash", 500_000.0, None).is_ok());
+
+    // An owner is not asked to approve their own decision.
+    assert!(check(&as_owner, "credit", 500_000.0, None).is_ok());
+
+    // The owner's password lets the cashier through; a wrong one does not.
+    assert!(check(
+        &as_cashier,
+        "credit",
+        25_000.0,
+        Some(&OwnerApproval { username: "priya".into(), password: "counter-top-2026".into() }),
+    )
+    .is_ok());
+    assert!(check(
+        &as_cashier,
+        "credit",
+        25_000.0,
+        Some(&OwnerApproval { username: "priya".into(), password: "guess".into() }),
+    )
+    .is_err());
+
+    // A customer with no limit set has no ceiling.
+    let unlimited = state.db().search_customer("9840012345").unwrap().unwrap().id;
+    assert!(check_credit_approval_for_test(
+        &mut state.db(),
+        &as_cashier,
+        "credit",
+        unlimited,
+        900_000.0,
+        None
+    )
+    .is_ok());
+}
+
+#[test]
+fn only_an_owner_can_set_a_credit_limit() {
+    // How much credit a buyer gets is the same kind of decision as what they pay.
+    let (_dir, state) = console_state();
+    let owner = set_up_owner(&state);
+    let cashier = state
+        .db()
+        .create_user(
+            &NewUser {
+                username: "meena".into(),
+                display_name: "Meena R".into(),
+                role: Role::Cashier,
+            },
+            "counter-password",
+        )
+        .unwrap();
+
+    assert!(require_owner(Some(Session { token: "t".into(), user: owner })).is_ok());
+    assert!(
+        require_session(Some(Session { token: "t".into(), user: cashier.clone() })).is_ok(),
+        "a cashier can still take payments and read a ledger"
     );
     assert!(require_owner(Some(Session { token: "t".into(), user: cashier })).is_err());
 }

@@ -141,6 +141,11 @@
           <span class="truncate">History</span>
         </button>
         <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
+                role="tab" data-pane="customers" aria-selected="false">
+          <span class="hero-identification size-4.5 shrink-0" aria-hidden="true"></span>
+          <span class="truncate">Customers</span>
+        </button>
+        <button class="nav-item flex w-full min-w-0 items-center gap-2.5 rounded-field px-3 py-2 text-sm transition-colors"
                 role="tab" data-pane="inventory" aria-selected="false">
           <span class="hero-cube size-4.5 shrink-0" aria-hidden="true"></span>
           <span class="truncate">Inventory</span>
@@ -265,6 +270,13 @@
                  id="customer-chip" hidden>
               <span class="hero-user-circle size-5 shrink-0 text-base-content/45" aria-hidden="true"></span>
               <p class="min-w-0 flex-1 text-sm" id="customer-line" aria-live="polite"></p>
+
+              <!-- What they already owe, beside who they are. Somebody deciding whether
+                   to put another bill on this account needs the number before they
+                   decide, not after. -->
+              <span id="customer-outstanding"
+                    class="shrink-0 rounded-field bg-warning/15 px-2 py-0.5 text-2xs font-medium text-warning"
+                    hidden></span>
 
               <!-- Which rates are being applied, next to who is being billed. A cashier
                    comparing a total against the sticker price on the shelf needs to be
@@ -441,6 +453,10 @@
                 <input type="radio" name="payment" value="cash" checked class="accent-primary" /><span>Cash</span></label>
               <label class="inline-flex cursor-pointer items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 py-1.5 text-sm has-[:checked]:border-base-content/30 has-[:checked]:bg-base-200">
                 <input type="radio" name="payment" value="card" class="accent-primary" /><span>Card</span></label>
+              <!-- The one option that does not mean "money changed hands". Picking it
+                   leaves the invoice unpaid and puts it on the customer's account. -->
+              <label class="inline-flex cursor-pointer items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 py-1.5 text-sm has-[:checked]:border-warning/50 has-[:checked]:bg-warning/10">
+                <input type="radio" name="payment" value="credit" class="accent-warning" /><span>Credit / On Account</span></label>
             </div>
 
             <p class="text-sm text-base-content/60" id="pay-static" hidden></p>
@@ -959,6 +975,163 @@
               <span class="text-xs text-base-content/60" id="demo-msg" aria-live="polite"></span>
             </div>
           </section>
+        </div>
+      </section>
+
+
+      <!-- Customers: the list, and one customer's ledger. Promoted from "a form that
+           appears while billing" to a screen of its own, because a running account is
+           something you look at between sales rather than during one. -->
+      <section class="pane" id="pane-customers" role="tabpanel">
+        <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-1 flex-col gap-4 p-4"
+             id="customers-list-card">
+          <header>
+            <h1 class="text-xl font-semibold tracking-tight">Customers</h1>
+            <p class="mt-1 max-w-prose text-sm text-base-content/60">Everyone billed on this
+              console, and what each of them still owes. Sort by Outstanding to see who
+              owes the most.</p>
+          </header>
+
+          <div class="flex flex-wrap items-end gap-3">
+            <label class="flex min-w-56 flex-1 flex-col gap-1 text-xs text-base-content/60">Search
+              <input id="cu-filter" type="text" autocomplete="off"
+                     placeholder="Name or mobile number" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10" />
+            </label>
+            <label class="flex w-48 flex-col gap-1 text-xs text-base-content/60">Sort by
+              <select id="cu-sort" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8">
+                <option value="outstanding_desc">Outstanding — most first</option>
+                <option value="outstanding_asc">Outstanding — least first</option>
+                <option value="name">Name</option>
+              </select>
+            </label>
+            <label class="inline-flex h-9 cursor-pointer items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 has-[:checked]:border-base-content/30 has-[:checked]:bg-base-200 has-[:checked]:text-base-content">
+              <input id="cu-owing" type="checkbox" class="accent-primary" /> Owing only
+            </label>
+          </div>
+
+          <div class="flex flex-1 flex-col overflow-x-auto">
+            <table class="w-full text-left">
+              <thead>
+                <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                  <th>Name</th>
+                  <th class="w-36">Mobile</th>
+                  <th class="w-28 pr-4 text-right">Invoices</th>
+                  <th class="w-32">Last billed</th>
+                  <th class="w-40 text-right">Outstanding (₹)</th>
+                </tr>
+              </thead>
+              <tbody id="customers-body"></tbody>
+            </table>
+            <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center"
+                 id="customers-empty" hidden>
+              <span class="hero-identification size-8 text-base-content/25" aria-hidden="true"></span>
+              <p class="text-sm font-medium text-base-content">No customers match</p>
+            </div>
+          </div>
+          <p class="text-xs text-base-content/60" id="customers-count"></p>
+        </div>
+
+        <!-- One customer's passbook. -->
+        <div class="rounded-box border border-base-300 bg-base-100 shadow-sm flex flex-1 flex-col gap-4 p-4"
+             id="ledger-card" hidden>
+          <header class="flex flex-wrap items-start justify-between gap-4">
+            <div class="min-w-0">
+              <h1 class="text-xl font-semibold tracking-tight" id="lg-name"></h1>
+              <p class="mt-1 text-sm text-base-content/60" id="lg-meta"></p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <button id="lg-pay" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">
+                <span class="hero-banknotes size-4" aria-hidden="true"></span> Record Payment
+              </button>
+              <button id="lg-back" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">
+                <span class="hero-arrow-left size-4" aria-hidden="true"></span> All customers
+              </button>
+            </div>
+          </header>
+
+          <!-- The one number somebody opens this screen for. -->
+          <div class="flex flex-wrap items-end justify-between gap-4 rounded-box border border-base-300 bg-base-200/60 px-4 py-3">
+            <div>
+              <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45"
+                 id="lg-balance-label">Outstanding</p>
+              <p class="font-mono text-3xl font-semibold tabular-nums" id="lg-balance"></p>
+            </div>
+            <dl class="flex flex-wrap gap-6 text-right">
+              <div>
+                <dt class="text-2xs uppercase tracking-wider text-base-content/45">Billed</dt>
+                <dd class="font-mono text-sm tabular-nums" id="lg-billed"></dd>
+              </div>
+              <div>
+                <dt class="text-2xs uppercase tracking-wider text-base-content/45">Received</dt>
+                <dd class="font-mono text-sm tabular-nums" id="lg-paid"></dd>
+              </div>
+              <div>
+                <dt class="text-2xs uppercase tracking-wider text-base-content/45">Credited</dt>
+                <dd class="font-mono text-sm tabular-nums" id="lg-credited"></dd>
+              </div>
+            </dl>
+          </div>
+
+          <!-- Owner-only: what this buyer may owe at once. -->
+          <div class="flex flex-wrap items-end gap-2" id="lg-limit-row" hidden>
+            <label class="flex w-48 flex-col gap-1 text-xs text-base-content/60">Credit limit (₹)
+              <input id="lg-limit" type="number" min="0" step="any" placeholder="No limit"
+                     class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 text-right font-mono tabular-nums" />
+            </label>
+            <button id="lg-limit-save" type="button" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Save limit</button>
+            <span class="text-xs text-base-content/60" id="lg-limit-msg" aria-live="polite"></span>
+          </div>
+
+          <!-- Record Payment, opened from the button above. -->
+          <form class="flex flex-col gap-3 rounded-field border border-base-300 bg-base-200/60 p-4"
+                id="payment-form" hidden autocomplete="off">
+            <p class="text-2xs font-medium uppercase tracking-wider text-base-content/45">Record payment</p>
+            <div class="grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-3">
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Amount (₹)
+                <input id="pm-amount" type="number" min="0" step="any" required
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto text-right font-mono tabular-nums" /></label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Method
+                <select id="pm-method" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8 mt-auto">
+                  <option value="cash">Cash</option>
+                  <option value="upi">UPI</option>
+                  <option value="card">Card</option>
+                  <option value="bank transfer">Bank Transfer</option>
+                </select></label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Date
+                <input id="pm-date" type="date" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60">Against
+                <select id="pm-invoice" class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 appearance-none pr-8 mt-auto"></select></label>
+              <label class="flex flex-col gap-1 text-xs text-base-content/60 sm:col-span-2">Note
+                <span class="text-base-content/45">(optional)</span>
+                <input id="pm-notes" type="text" placeholder="e.g. NEFT ref 88123"
+                       class="h-9 w-full rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content placeholder:text-base-content/40 focus:outline-none focus:border-base-content/30 focus:ring-2 focus:ring-base-content/10 mt-auto" /></label>
+            </div>
+            <div class="flex flex-wrap items-center gap-3">
+              <button type="submit" id="pm-save" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field bg-primary px-3.5 text-sm font-medium text-primary-content transition-colors hover:bg-primary/90">Record payment</button>
+              <button type="button" id="pm-cancel" class="inline-flex h-9 shrink-0 items-center gap-2 rounded-field border border-base-300 bg-base-100 px-3 text-sm text-base-content/60 transition-colors hover:bg-base-200 hover:text-base-content">Cancel</button>
+              <span class="text-xs text-base-content/60" id="pm-msg" aria-live="polite"></span>
+            </div>
+          </form>
+
+          <div class="flex flex-1 flex-col overflow-x-auto">
+            <table class="w-full text-left">
+              <thead>
+                <tr class="border-b border-base-300 text-xs font-semibold uppercase tracking-wider text-base-content/60 [&>th]:py-1.5">
+                  <th class="w-28">Date</th>
+                  <th class="w-32">Reference</th>
+                  <th>Detail</th>
+                  <th class="w-36 text-right">Amount (₹)</th>
+                  <th class="w-36 text-right">Balance (₹)</th>
+                </tr>
+              </thead>
+              <tbody id="ledger-body"></tbody>
+            </table>
+            <div class="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-12 text-center"
+                 id="ledger-empty" hidden>
+              <span class="hero-document-text size-8 text-base-content/25" aria-hidden="true"></span>
+              <p class="text-sm font-medium text-base-content">Nothing billed to them yet</p>
+            </div>
+          </div>
         </div>
       </section>
 

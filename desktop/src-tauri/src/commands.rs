@@ -7,11 +7,12 @@
 
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use realinvoice_core::{
-    auth, gst, sync, CreditNote, CreditNoteDetail, CreditableLine, Customer, DailyTotal, DateRange,
-    DemoDataCleared, DiscountType, DiscountedTotals, Invoice, InvoiceDetail, InvoiceFilter,
-    InvoiceLine, InvoiceNet, InvoiceSummary, Item, ItemFilter, ItemPrice, ItemPriceRow, Lockout,
-    LoginOutcome, NewCreditNote, NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine,
-    NewItem, NewUser, PaymentMix, PriceList, PricedItem, ResolvedRate, Role, SalesSummary,
+    auth, gst, sync, CreditCheck, CreditNote, CreditNoteDetail, CreditableLine, Customer,
+    CustomerFilter, CustomerLedger, CustomerSummary, DailyTotal, DateRange, DemoDataCleared,
+    DiscountType, DiscountedTotals, Invoice, InvoiceDetail, InvoiceFilter, InvoiceLine, InvoiceNet,
+    InvoiceSummary, Item, ItemFilter, ItemPrice, ItemPriceRow, Lockout, LoginOutcome,
+    NewCreditNote, NewCreditNoteLine, NewCustomer, NewInvoice, NewInvoiceLine, NewItem, NewPayment,
+    NewUser, PaymentMix, PriceList, PricedItem, RecordedPayment, ResolvedRate, Role, SalesSummary,
     SyncStatus, TopItem, User, LOGIN_WINDOW_MINUTES, MAX_FAILED_LOGINS,
 };
 use serde::{Deserialize, Serialize};
@@ -275,6 +276,20 @@ pub fn require_owner_for_test(session: Option<Session>) -> Result<Session, Strin
     owner_of(session)
 }
 
+/// Test hook for [`check_credit_approval`].
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn check_credit_approval_for_test(
+    db: &mut realinvoice_core::Db,
+    session: &Session,
+    payment_type: &str,
+    customer_id: i64,
+    amount: f64,
+    approval: Option<&OwnerApproval>,
+) -> Result<(), String> {
+    check_credit_approval(db, session, payment_type, customer_id, amount, approval)
+}
+
 /// Test hook for [`check_discount_approval`], which the command itself reaches only from
 /// inside a running app.
 #[doc(hidden)]
@@ -351,6 +366,9 @@ pub struct NewCustomerPayload {
     /// picks one.
     #[serde(default)]
     pub price_list_id: Option<i64>,
+    /// Absent means nobody set one, which is not a limit of zero.
+    #[serde(default)]
+    pub credit_limit: Option<f64>,
 }
 
 impl From<NewCustomerPayload> for NewCustomer {
@@ -361,6 +379,7 @@ impl From<NewCustomerPayload> for NewCustomer {
             place_of_supply: payload.place_of_supply,
             mobile: payload.mobile,
             price_list_id: payload.price_list_id,
+            credit_limit: payload.credit_limit,
         }
     }
 }
@@ -764,6 +783,107 @@ pub fn set_discount_approval_threshold(
     db.discount_approval_threshold().map_err(|e| e.to_string())
 }
 
+// ------------------------------------------------------------------ ledger
+
+/// The Customers list, with what each of them owes.
+#[tauri::command]
+pub fn list_customers(
+    filter: Option<CustomerFilter>,
+    state: State<'_, AppState>,
+) -> Result<Vec<CustomerSummary>, String> {
+    require_session(&state)?;
+    state.db().list_customers(&filter.unwrap_or_default()).map_err(|e| e.to_string())
+}
+
+/// One customer's passbook: invoices, payments and credit notes with a running balance.
+#[tauri::command]
+pub fn customer_ledger(
+    customer_id: i64,
+    state: State<'_, AppState>,
+) -> Result<CustomerLedger, String> {
+    require_session(&state)?;
+    state.db().customer_ledger(customer_id).map_err(|e| e.to_string())
+}
+
+/// What a customer owes right now. Cheap enough for the billing screen to ask on every
+/// attach, which is the point — a cashier should see it before extending more credit.
+#[tauri::command]
+pub fn customer_balance(customer_id: i64, state: State<'_, AppState>) -> Result<f64, String> {
+    require_session(&state)?;
+    state.db().customer_balance(customer_id).map_err(|e| e.to_string())
+}
+
+/// Records money received.
+///
+/// Open to any signed-in user: taking payment is the counter's job. Attribution comes
+/// from the session rather than the payload, like every other write — a cashier does not
+/// get to record a payment under somebody else's name.
+#[tauri::command]
+pub fn record_payment(
+    payment: NewPaymentPayload,
+    state: State<'_, AppState>,
+) -> Result<RecordedPayment, String> {
+    let session = require_session(&state)?;
+    let mut new = NewPayment::from(payment);
+    new.created_by_user_id = Some(session.user.id);
+    state.db().record_payment(&new).map_err(|e| e.to_string())
+}
+
+/// Sets a customer's credit limit, or clears it with `null`.
+///
+/// Owner-only. How much credit a buyer gets is the same kind of decision as what they
+/// pay — a cashier who could raise a limit could extend any amount of credit.
+#[tauri::command]
+pub fn set_credit_limit(
+    customer_id: i64,
+    credit_limit: Option<f64>,
+    state: State<'_, AppState>,
+) -> Result<Customer, String> {
+    require_owner(&state)?;
+    state.db().set_credit_limit(customer_id, credit_limit).map_err(|e| e.to_string())
+}
+
+/// Whether a credit sale of `amount` would take this customer past their limit. The
+/// billing screen asks before offering the prompt; the save checks again regardless.
+#[tauri::command]
+pub fn check_credit_limit(
+    customer_id: i64,
+    amount: f64,
+    state: State<'_, AppState>,
+) -> Result<CreditCheck, String> {
+    require_session(&state)?;
+    state.db().check_credit_limit(customer_id, amount).map_err(|e| e.to_string())
+}
+
+/// A payment as the Record Payment form sends it. `created_by_user_id` is deliberately
+/// absent: it comes from the session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewPaymentPayload {
+    pub customer_id: i64,
+    #[serde(default)]
+    pub invoice_id: Option<i64>,
+    pub amount: f64,
+    pub payment_method: String,
+    #[serde(default)]
+    pub date: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl From<NewPaymentPayload> for NewPayment {
+    fn from(payload: NewPaymentPayload) -> Self {
+        NewPayment {
+            customer_id: payload.customer_id,
+            invoice_id: payload.invoice_id,
+            amount: payload.amount,
+            payment_method: payload.payment_method,
+            date: payload.date,
+            notes: payload.notes,
+            created_by_user_id: None,
+        }
+    }
+}
+
 // ------------------------------------------------------------- credit notes
 
 /// What is still creditable on an invoice, for drawing the form.
@@ -1016,7 +1136,18 @@ pub fn create_invoice(
     // read these figures rather than the ones the screen sent.
     let totals = db.price_invoice(&new_invoice).map_err(|e| e.to_string())?;
 
+    // Two gates, one approval. An owner standing at the till to sign off a sale signs
+    // off whatever about it needed signing — being asked for the same password twice
+    // because the bill is both heavily discounted and on credit would be theatre.
     check_discount_approval(&mut db, &session, &totals, approval.as_ref())?;
+    check_credit_approval(
+        &mut db,
+        &session,
+        &new_invoice.payment_type,
+        customer.id,
+        totals.grand_total,
+        approval.as_ref(),
+    )?;
 
     if let Some(expected) = expected {
         check_expected_totals(&expected, &totals)?;
@@ -1109,6 +1240,41 @@ fn check_discount_approval(
         return Err(format!(
             "A discount of {percent:.1}% needs an owner's approval — this till allows \
              {threshold:.0}% without it."
+        ));
+    };
+    approve_as_owner(db, approval)
+}
+
+/// Stops a cashier extending credit past what the shop has agreed to carry.
+///
+/// Only credit sales are checked: a bill paid at the counter adds nothing to what anyone
+/// owes, however large it is. A customer with no limit set has no ceiling — see
+/// [`realinvoice_core::Db::check_credit_limit`] — because a shop that has never thought
+/// about credit limits should not find every account sale blocked.
+fn check_credit_approval(
+    db: &mut realinvoice_core::Db,
+    session: &Session,
+    payment_type: &str,
+    customer_id: i64,
+    amount: f64,
+    approval: Option<&OwnerApproval>,
+) -> Result<(), String> {
+    if session.user.role == Role::Owner || !realinvoice_core::is_credit_sale(payment_type) {
+        return Ok(());
+    }
+
+    let check = db.check_credit_limit(customer_id, amount).map_err(|e| e.to_string())?;
+    if !check.over_limit {
+        return Ok(());
+    }
+    let limit = check.credit_limit.unwrap_or_default();
+
+    let Some(approval) = approval else {
+        return Err(format!(
+            "This sale would take them to {:.2} against a {:.2} credit limit — an owner \
+             has to approve it.",
+            check.balance + check.amount,
+            limit
         ));
     };
     approve_as_owner(db, approval)

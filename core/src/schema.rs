@@ -18,10 +18,24 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("006_custom_items", include_str!("../migrations/006_custom_items.sql")),
     ("007_price_lists", include_str!("../migrations/007_price_lists.sql")),
     ("008_discounts", include_str!("../migrations/008_discounts.sql")),
+    ("009_ledger", include_str!("../migrations/009_ledger.sql")),
 ];
 
 /// Applies every migration that hasn't run yet against `conn`.
 pub fn run_migrations(conn: &mut Connection) -> Result<()> {
+    migrate_upto(conn, None)
+}
+
+/// Applies migrations only as far as `last`, inclusive.
+///
+/// For building a database at an older schema so the next migration can be tested
+/// against what it will actually meet — a backfill that is only ever run on a fresh,
+/// empty database has not been tested at all.
+pub fn migrate_through(conn: &mut Connection, last: &str) -> Result<()> {
+    migrate_upto(conn, Some(last))
+}
+
+fn migrate_upto(conn: &mut Connection, last: Option<&str>) -> Result<()> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA foreign_keys = ON;
@@ -48,6 +62,10 @@ pub fn run_migrations(conn: &mut Connection) -> Result<()> {
         tx.execute_batch(sql)?;
         tx.execute("INSERT INTO schema_migrations (name) VALUES (?1)", [name])?;
         tx.commit()?;
+
+        if last == Some(*name) {
+            break;
+        }
     }
 
     Ok(())

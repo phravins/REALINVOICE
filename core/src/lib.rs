@@ -43,7 +43,8 @@ pub mod seed;
 pub mod sync;
 
 pub use db::{
-    normalise_username, Db, DEFAULT_DISCOUNT_APPROVAL_PCT, LOGIN_WINDOW_MINUTES, MAX_FAILED_LOGINS,
+    is_credit_sale, normalise_username, Db, CREDIT_PAYMENT_TYPE, DEFAULT_DISCOUNT_APPROVAL_PCT,
+    LOGIN_WINDOW_MINUTES, MAX_FAILED_LOGINS,
 };
 pub use error::{CoreError, Result};
 pub use gst::{

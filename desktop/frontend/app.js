@@ -76,6 +76,9 @@
   var invoiceDiscount = { type: "none", value: 0 };
   var discountLimitPct = 15;
 
+  /** What the attached customer already owes, for the badge and the credit-limit check. */
+  var customerBalance = 0;
+
   function listName(id) {
     var match = priceLists.filter(function (l) { return l.id === id; })[0];
     return match ? match.name : "";
@@ -261,6 +264,34 @@
     return Math.round(value * 100) / 100;
   }
 
+  /** `partially_paid` -> "Partially paid". */
+  function statusWords(status) {
+    return {
+      unpaid: "Unpaid",
+      partially_paid: "Partially paid",
+      paid: "Paid",
+    }[status] || status;
+  }
+
+  /**
+   * A pill for an invoice's payment status.
+   *
+   * "Paid" gets no pill: it is the ordinary case, and a column of green ticks buries the
+   * two rows somebody is actually looking for.
+   */
+  function paymentStatusBadge(invoice) {
+    if (invoice.payment_status === "paid") return "";
+    var tone =
+      invoice.payment_status === "unpaid"
+        ? "bg-warning/15 text-warning"
+        : "bg-info/15 text-info";
+    return (
+      '<span class="ml-1 rounded-field px-1.5 py-0.5 text-2xs font-medium uppercase ' +
+      'tracking-wider ' + tone + '">' + escapeHtml(statusWords(invoice.payment_status)) +
+      "</span>"
+    );
+  }
+
   /** "10%" or "₹500" — how a line's discount was expressed, not what it came to. */
   function discountLabel(line) {
     if (line.discount_type === "percentage") return money(line.discount_value) + "%";
@@ -293,6 +324,11 @@
     } else if (name === "settings") {
       refreshAbout();
       status("About RealInvoice.");
+    } else if (name === "customers") {
+      // Back to the list on every visit: a ledger left open from last time is somebody
+      // else's account staring at whoever opens the tab next.
+      closeLedger();
+      status("Who owes what.");
     } else if (name === "inventory") {
       loadCatalogue();
       status("The catalogue the billing screen prices from.");
@@ -465,6 +501,7 @@
 
     if (!attached) {
       $("customer-line").innerHTML = "";
+      $("customer-outstanding").hidden = true;
       return;
     }
 
@@ -524,6 +561,44 @@
     requote();
     // Their list may not be the one the rows on screen were priced at.
     syncPriceListToCustomer();
+    loadOutstanding();
+  }
+
+  /** What they already owe, shown beside their name before anyone extends more credit. */
+  function loadOutstanding() {
+    var badge = $("customer-outstanding");
+    if (!invoke || !customer) {
+      badge.hidden = true;
+      customerBalance = 0;
+      return Promise.resolve(0);
+    }
+
+    return invoke("customer_balance", { customerId: customer.id })
+      .then(function (balance) {
+        customerBalance = balance;
+        if (!customer) return balance;
+
+        if (balance > 0) {
+          badge.textContent = "Outstanding: " + rupees(balance);
+          badge.className =
+            "shrink-0 rounded-field bg-warning/15 px-2 py-0.5 text-2xs font-medium text-warning";
+          badge.hidden = false;
+        } else if (balance < 0) {
+          // The shop is holding their money. Worth saying, for the same reason a debt is.
+          badge.textContent = "In credit: " + rupees(-balance);
+          badge.className =
+            "shrink-0 rounded-field bg-success/15 px-2 py-0.5 text-2xs font-medium text-success";
+          badge.hidden = false;
+        } else {
+          badge.hidden = true;
+        }
+        return balance;
+      })
+      .catch(function (err) {
+        badge.hidden = true;
+        status("customer_balance failed: " + errText(err));
+        return 0;
+      });
   }
 
   /** Puts the bill back to nobody attached, ready to search again. */
@@ -537,6 +612,7 @@
     requote();
     // Back to what a walk-in would pay, and the rows follow.
     syncPriceListToCustomer();
+    loadOutstanding();
     $("mobile-input").value = "";
     $("mobile-input").focus();
     status(was ? "Detached " + was.name + "." : "Customer detached.");
@@ -1128,10 +1204,42 @@
   /** Resolved with the credentials, or rejected when the prompt is cancelled. */
   var approvalPending = null;
 
-  function askOwnerApproval(percent) {
-    $("approval-why").textContent =
+  /** Why a discount needs signing off, in words. */
+  function discountReason(percent) {
+    return (
       "This bill discounts " + money(percent) + "% of " +
-      money(discountLimitPct) + "% allowed at the counter. An owner has to sign it off.";
+      money(discountLimitPct) + "% allowed at the counter. An owner has to sign it off."
+    );
+  }
+
+  /**
+   * Why a credit sale needs signing off, or null when it does not.
+   *
+   * Only asked for a sale going on the account: a bill paid at the counter adds nothing
+   * to what anyone owes, however large. Core checks again on the way to the save, so a
+   * stale answer here cannot let one through.
+   */
+  function creditApprovalReason(grandTotal) {
+    if (!invoke || !customer || !user || user.role === "owner") return Promise.resolve(null);
+    if (selectedPayment() !== "credit") return Promise.resolve(null);
+
+    return invoke("check_credit_limit", { customerId: customer.id, amount: grandTotal })
+      .then(function (check) {
+        if (!check.over_limit) return null;
+        return (
+          "This sale would take " + customer.name + " to " +
+          rupees(check.balance + check.amount) + " against a " +
+          rupees(check.credit_limit) + " credit limit. An owner has to approve it."
+        );
+      })
+      .catch(function () {
+        // The save re-checks, so a failure here costs a prompt, not the control.
+        return null;
+      });
+  }
+
+  function askOwnerApproval(reason) {
+    $("approval-why").textContent = reason;
     $("ap-user").value = "";
     $("ap-pass").value = "";
     setMsg("ap-msg", "", false);
@@ -1295,15 +1403,19 @@
     };
 
     // Asked for here so the password reaches the same call that does the checking. The
-    // prompt is a convenience: a cashier who skipped it is refused by core anyway.
+    // prompt is a convenience: a cashier who skipped it is refused by core anyway, and
+    // the same password covers both gates because an owner signing off a sale signs off
+    // whatever about it needed signing.
     var percent = lastQuote.pre_discount_subtotal > 0
       ? (lastQuote.discount_amount / lastQuote.pre_discount_subtotal) * 100
       : 0;
-    var approval = needsApproval(percent)
-      ? askOwnerApproval(percent)
-      : Promise.resolve(null);
 
-    approval
+    creditApprovalReason(lastQuote.grand_total)
+      .then(function (creditReason) {
+        if (needsApproval(percent)) return askOwnerApproval(discountReason(percent));
+        if (creditReason) return askOwnerApproval(creditReason);
+        return null;
+      })
       .then(function (credentials) {
         return invoke("create_invoice", {
           payload: buildPayload(),
@@ -1314,6 +1426,8 @@
       .then(function (saved) {
         button.disabled = false;
         showSaved(saved);
+        // Billing on credit moves what they owe, and the badge is beside their name.
+        loadOutstanding();
       })
       .catch(function (err) {
         // Nothing was written — core rolls the whole transaction back — so the form stays
@@ -1349,7 +1463,11 @@
     $("saved-sub").textContent =
       rupees(invoice.grand_total) + " · " + saved.lines.length + " item" +
       (saved.lines.length === 1 ? "" : "s") + " · queued for sync";
-    $("pay-static").textContent = invoice.payment_type.toUpperCase();
+    // A credit sale's locked card says what is still owed, not just how it was billed.
+    $("pay-static").textContent =
+      invoice.amount_due > 0
+        ? invoice.payment_type.toUpperCase() + " · " + rupees(invoice.amount_due) + " DUE"
+        : invoice.payment_type.toUpperCase();
 
     // Keep the saved invoice for the print preview the locked card now offers.
     lastSaved = saved;
@@ -1457,9 +1575,15 @@
               escapeHtml(stamp(row.invoice)) + "</td>" +
               '<td class="py-2">' + escapeHtml(row.customer_name) + "</td>" +
               '<td class="py-2 font-mono text-base-content/60">' +
-              escapeHtml(row.invoice.payment_type) + "</td>" +
+              escapeHtml(row.invoice.payment_type) + " " +
+              paymentStatusBadge(row.invoice) + "</td>" +
               '<td class="py-2 text-right font-mono tabular-nums">' +
-              money(row.invoice.grand_total) + "</td>" +
+              money(row.invoice.grand_total) +
+              (row.invoice.amount_due > 0
+                ? '<span class="block text-2xs text-warning">' +
+                  money(row.invoice.amount_due) + " due</span>"
+                : "") +
+              "</td>" +
               "</tr>"
             );
           })
@@ -1528,6 +1652,13 @@
         $("d-meta").innerHTML =
           meta("Raised", stamp(invoice)) +
           meta("Payment", invoice.payment_type) +
+          meta(
+            "Status",
+            invoice.amount_due > 0
+              ? statusWords(invoice.payment_status) + " · " + rupees(invoice.amount_due) +
+                " due"
+              : statusWords(invoice.payment_status)
+          ) +
           meta("Sync", invoice.sync_status);
 
         // Same row renderer as the billing table, without the editable controls.
@@ -2319,6 +2450,291 @@
         rowList($("about-rows"), [["Error", errText(err)]]);
       });
   }
+
+  /* ---------------------------------------------------------------- customers */
+
+  /** The rows the Customers list is showing, and whose ledger is open. */
+  var customerRows = [];
+  var openLedger = null;
+
+  function loadCustomers() {
+    if (!invoke || !user) return;
+
+    invoke("list_customers", {
+      filter: {
+        text: $("cu-filter").value.trim() || null,
+        owing_only: $("cu-owing").checked,
+        sort: $("cu-sort").value,
+      },
+    })
+      .then(function (rows) {
+        customerRows = rows;
+        $("customers-body").innerHTML = rows
+          .map(function (row, index) {
+            var owed = row.outstanding;
+            return (
+              '<tr class="cursor-pointer border-b border-base-300 text-sm last:border-0 ' +
+              'hover:bg-base-200/60" data-customer="' + index + '">' +
+              '<td class="py-2 font-medium">' + escapeHtml(row.customer.name) + "</td>" +
+              '<td class="py-2 font-mono text-base-content/60">' +
+              escapeHtml(row.customer.mobile) + "</td>" +
+              '<td class="py-2 pr-4 text-right font-mono tabular-nums text-base-content/60">' +
+              row.invoice_count + "</td>" +
+              '<td class="py-2 font-mono text-xs text-base-content/45">' +
+              escapeHtml(row.last_billed || "—") + "</td>" +
+              '<td class="py-2 text-right font-mono tabular-nums ' +
+              // Only money actually owed is worth colouring. Zero is the normal case and
+              // a screen of red zeroes says nothing.
+              (owed > 0 ? "font-medium text-warning" : "text-base-content/45") + '">' +
+              (owed < 0 ? "−" + money(-owed) : money(owed)) +
+              "</td></tr>"
+            );
+          })
+          .join("");
+
+        $("customers-empty").hidden = rows.length > 0;
+        var owing = rows.filter(function (r) { return r.outstanding > 0; });
+        var total = owing.reduce(function (sum, r) { return sum + r.outstanding; }, 0);
+        $("customers-count").textContent =
+          rows.length + " customer(s)" +
+          (owing.length
+            ? " · " + owing.length + " owing " + rupees(total)
+            : " · nobody owes anything");
+      })
+      .catch(function (err) {
+        status("list_customers failed: " + errText(err));
+      });
+  }
+
+  $("cu-filter").addEventListener("input", loadCustomers);
+  $("cu-sort").addEventListener("change", loadCustomers);
+  $("cu-owing").addEventListener("change", loadCustomers);
+
+  $("customers-body").addEventListener("click", function (event) {
+    var row = event.target.closest("[data-customer]");
+    if (!row) return;
+    var picked = customerRows[Number(row.dataset.customer)];
+    if (picked) showLedger(picked.customer.id);
+  });
+
+  /* ------------------------------------------------------------------ ledger */
+
+  function showLedger(customerId) {
+    if (!invoke) return bridgeMissing("customer_ledger");
+
+    invoke("customer_ledger", { customerId: customerId })
+      .then(function (ledger) {
+        openLedger = ledger;
+        renderLedger(ledger);
+        $("customers-list-card").hidden = true;
+        $("ledger-card").hidden = false;
+        closePaymentForm();
+        status(ledger.customer.name + ": " + describeBalance(ledger.balance) + ".");
+      })
+      .catch(function (err) {
+        status("customer_ledger failed: " + errText(err));
+      });
+  }
+
+  function closeLedger() {
+    openLedger = null;
+    $("ledger-card").hidden = true;
+    $("customers-list-card").hidden = false;
+    loadCustomers();
+  }
+
+  /** "owes ₹5,248.00", "in credit by ₹200.00", or "settled up". */
+  function describeBalance(balance) {
+    if (balance > 0) return "owes " + rupees(balance);
+    if (balance < 0) return "in credit by " + rupees(-balance);
+    return "settled up";
+  }
+
+  function renderLedger(ledger) {
+    var buyer = ledger.customer;
+    $("lg-name").textContent = buyer.name;
+    $("lg-meta").textContent =
+      buyer.mobile + " · GSTIN " + (buyer.gstin || "unregistered") +
+      " · place of supply " + buyer.place_of_supply +
+      (buyer.credit_limit != null ? " · credit limit " + rupees(buyer.credit_limit) : "");
+
+    // Owing, in credit and settled are three different facts, so they get three
+    // different labels rather than one number that changes sign.
+    $("lg-balance-label").textContent =
+      ledger.balance < 0 ? "In credit" : "Outstanding";
+    $("lg-balance").textContent =
+      ledger.balance < 0 ? rupees(-ledger.balance) : rupees(ledger.balance);
+    $("lg-balance").className =
+      "font-mono text-3xl font-semibold tabular-nums " +
+      (ledger.balance > 0 ? "text-warning" : ledger.balance < 0 ? "text-success" : "");
+
+    $("lg-billed").textContent = rupees(ledger.billed_total);
+    $("lg-paid").textContent = rupees(ledger.paid_total);
+    $("lg-credited").textContent = rupees(ledger.credited_total);
+
+    $("lg-limit-row").hidden = !user || user.role !== "owner";
+    $("lg-limit").value = buyer.credit_limit == null ? "" : buyer.credit_limit;
+    setMsg("lg-limit-msg", "", false);
+
+    var tones = {
+      invoice: "bg-base-300 text-base-content/70",
+      payment: "bg-success/15 text-success",
+      credit_note: "bg-info/15 text-info",
+    };
+    var labels = { invoice: "Invoice", payment: "Payment", credit_note: "Credit note" };
+
+    $("ledger-body").innerHTML = ledger.entries
+      .map(function (entry) {
+        return (
+          '<tr class="border-b border-base-300 text-sm last:border-0">' +
+          '<td class="py-2 font-mono text-xs text-base-content/60">' +
+          escapeHtml(entry.date) + "</td>" +
+          '<td class="py-2"><span class="rounded-field px-1.5 py-0.5 text-2xs ' +
+          'font-medium uppercase tracking-wider ' + (tones[entry.kind] || tones.invoice) +
+          '">' + escapeHtml(labels[entry.kind] || entry.kind) + "</span>" +
+          '<span class="ml-2 font-mono text-xs">' + escapeHtml(entry.reference) +
+          "</span></td>" +
+          '<td class="py-2 text-base-content/60">' + escapeHtml(entry.description) + "</td>" +
+          '<td class="py-2 text-right font-mono tabular-nums ' +
+          (entry.change < 0 ? "text-success" : "") + '">' +
+          (entry.change < 0 ? "−" + money(-entry.change) : money(entry.change)) + "</td>" +
+          '<td class="py-2 text-right font-mono tabular-nums font-medium">' +
+          (entry.balance < 0 ? "−" + money(-entry.balance) : money(entry.balance)) +
+          "</td></tr>"
+        );
+      })
+      .join("");
+    $("ledger-empty").hidden = ledger.entries.length > 0;
+  }
+
+  $("lg-back").addEventListener("click", closeLedger);
+
+  $("lg-limit-save").addEventListener("click", function () {
+    if (!invoke || !openLedger) return;
+    var raw = $("lg-limit").value.trim();
+    var limit = raw === "" ? null : parseFloat(raw);
+    if (limit !== null && (!isFinite(limit) || limit < 0)) {
+      return setMsg("lg-limit-msg", "Enter a limit of zero or more, or leave it blank.", true);
+    }
+
+    setMsg("lg-limit-msg", "Saving…", false);
+    invoke("set_credit_limit", {
+      customerId: openLedger.customer.id,
+      creditLimit: limit,
+    })
+      .then(function () {
+        setMsg(
+          "lg-limit-msg",
+          limit === null ? "Limit removed." : "Limit set to " + rupees(limit) + ".",
+          false
+        );
+        return showLedger(openLedger.customer.id);
+      })
+      .catch(function (err) {
+        setMsg("lg-limit-msg", errText(err), true);
+      });
+  });
+
+  /* --------------------------------------------------------- record payment */
+
+  function openPaymentForm() {
+    if (!openLedger) return;
+
+    $("pm-amount").value = "";
+    $("pm-method").value = "cash";
+    $("pm-date").value = todayIso();
+    $("pm-notes").value = "";
+    setMsg("pm-msg", "", false);
+
+    // Open bills, oldest first, plus the "no particular bill" option a customer
+    // clearing a running balance needs.
+    $("pm-invoice").innerHTML =
+      '<option value="">The account (no particular bill)</option>' +
+      openLedger.open_invoices
+        .map(function (invoice) {
+          return (
+            '<option value="' + invoice.id + '">' +
+            escapeHtml(invoice.invoice_no) + " · " + rupees(invoice.amount_due) + " due" +
+            "</option>"
+          );
+        })
+        .join("");
+    // The oldest open bill is what a shop settles first, so it is preselected.
+    if (openLedger.open_invoices.length) {
+      $("pm-invoice").value = String(openLedger.open_invoices[0].id);
+    }
+
+    $("payment-form").hidden = false;
+    $("pm-amount").focus();
+  }
+
+  function closePaymentForm() {
+    $("payment-form").hidden = true;
+  }
+
+  function todayIso() {
+    var now = new Date();
+    return (
+      now.getFullYear() + "-" +
+      String(now.getMonth() + 1).padStart(2, "0") + "-" +
+      String(now.getDate()).padStart(2, "0")
+    );
+  }
+
+  function submitPayment(event) {
+    if (event) event.preventDefault();
+    if (!invoke || !openLedger) return bridgeMissing("record_payment");
+
+    var amount = parseFloat($("pm-amount").value);
+    if (!isFinite(amount) || amount <= 0) {
+      return setMsg("pm-msg", "Enter an amount above zero.", true);
+    }
+
+    var invoiceId = $("pm-invoice").value ? Number($("pm-invoice").value) : null;
+    var button = $("pm-save");
+    button.disabled = true;
+    setMsg("pm-msg", "Recording…", false);
+
+    invoke("record_payment", {
+      payment: {
+        customer_id: openLedger.customer.id,
+        invoice_id: invoiceId,
+        amount: amount,
+        payment_method: $("pm-method").value,
+        date: $("pm-date").value || null,
+        notes: $("pm-notes").value.trim() || null,
+      },
+    })
+      .then(function (recorded) {
+        button.disabled = false;
+        closePaymentForm();
+
+        // A payment bigger than the bill it was aimed at becomes two rows. Saying so is
+        // the difference between a customer trusting the receipt and wondering where the
+        // rest of their money went.
+        if (recorded.applied && recorded.on_account) {
+          UI.toast(
+            rupees(recorded.applied.amount) + " settled the invoice; " +
+              rupees(recorded.on_account.amount) + " went to the account.",
+            "success"
+          );
+        } else {
+          UI.toast("Recorded " + rupees(amount) + ".", "success");
+        }
+        status(
+          openLedger.customer.name + " now " + describeBalance(recorded.balance) + "."
+        );
+        return showLedger(openLedger.customer.id);
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        setMsg("pm-msg", errText(err), true);
+      });
+  }
+
+  $("lg-pay").addEventListener("click", openPaymentForm);
+  $("pm-cancel").addEventListener("click", closePaymentForm);
+  $("payment-form").addEventListener("submit", submitPayment);
 
   /* ------------------------------------------------ price list management */
 
